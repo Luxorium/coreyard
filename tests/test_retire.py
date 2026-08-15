@@ -13,7 +13,8 @@ from coreyard.state import DiffResult
 
 
 def args(**kw) -> Namespace:
-    base = dict(sink="api", limit=None, force_retire=False, max_retire_fraction=0.10)
+    base = dict(sink="api", limit=None, force_retire=False, max_retire_fraction=0.10,
+                reconcile=False, retire_only=False)
     base.update(kw)
     return Namespace(**base)
 

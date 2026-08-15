@@ -184,6 +184,30 @@ class ShopifyPublisher:
         product_id = self._upsert(part, product_id, files, status)
         return product_id, len(files)
 
+    def published_r_numbers(self) -> set[str]:
+        """Every R# currently on the store under this installation's handle prefix.
+
+        The state file only knows what *it* published, which is not the same as what is on
+        the store: the bulk path tracks progress in its own JSONL, and a fresh state file
+        knows nothing at all. Asking Shopify directly is what lets a first incremental run
+        retire parts that sold before the state existed.
+        """
+        query = """query($cursor:String){ products(first:250, after:$cursor){
+          pageInfo{ hasNextPage endCursor } nodes{ handle status } } }"""
+        prefix = handle_for(Part(r_number="", part_type=""), self.store)  # "<prefix>-"
+        found: set[str] = set()
+        cursor = None
+        while True:
+            page = self.client.graphql(query, {"cursor": cursor})["products"]
+            for node in page["nodes"]:
+                # Already-archived products are the ones retirement produces; re-retiring
+                # them every run would be a pointless write per part per tick.
+                if node["status"] != self.retire_status and node["handle"].startswith(prefix):
+                    found.add(node["handle"][len(prefix):])
+            if not page["pageInfo"]["hasNextPage"]:
+                return found
+            cursor = page["pageInfo"]["endCursor"]
+
     def retire(self, r_number: str) -> str:
         """Take a sold part off sale: zero its inventory, then set the retire status.
 

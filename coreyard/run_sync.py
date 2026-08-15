@@ -126,6 +126,22 @@ def cmd_sync(args) -> int:
     with SyncState(STATE_DB) as state:
         diff = state.diff(current, image_fps)
         print("Diff vs last run:", diff.summary())
+
+        publisher = None
+        if args.sink == "api":
+            from coreyard.sink.shopify_write import ShopifyPublisher
+
+            publisher = ShopifyPublisher(store=settings.store, status=args.status)
+            if args.reconcile:
+                # Ask the store what it actually has, rather than trusting the state file.
+                # A fresh state file knows about nothing, and the bulk path keeps its own
+                # progress log, so parts sold before this run existed would otherwise stay
+                # on sale forever with no record that they were ever published.
+                print("Reconciling against the live store ...")
+                published = publisher.published_r_numbers()
+                diff.removed = sorted(published - set(current))
+                print(f"  {len(published)} published, {len(diff.removed)} no longer listable")
+
         retire, why = _retirement_plan(diff, args)
         if why:
             print(why)
@@ -146,11 +162,11 @@ def cmd_sync(args) -> int:
             # A dry run against the API sink must not write to the live store. Writing the
             # CSV above is harmless and is the point of that path; upserting 9,000 products
             # "as a preview" is not.
-            print(f"Dry run: would upsert {len(diff.added) + len(diff.changed)} product(s) "
-                  f"({len(diff.image_changed)} photo refresh) and retire {len(retire)}.")
+            upserts = 0 if args.retire_only else len(diff.added) + len(diff.changed)
+            print(f"Dry run: would upsert {upserts} product(s) "
+                  f"({0 if args.retire_only else len(diff.image_changed)} photo refresh) "
+                  f"and retire {len(retire)}.")
         else:  # api
-            from coreyard.sink.shopify_write import ShopifyPublisher
-
             todo = [p for p in parts if p.uid() in set(diff.added) | set(diff.changed)]
             if todo:
                 # Resolve fitment BEFORE publishing. Without it the renderer falls back to
@@ -164,8 +180,10 @@ def cmd_sync(args) -> int:
                 with connect() as conn:
                     InterchangeResolver(conn).attach(todo)
 
-            publisher = ShopifyPublisher(store=settings.store, status=args.status)
             needs_photos = set(diff.image_changed)
+            if args.retire_only:
+                print(f"Retire-only: skipping {len(todo)} upsert(s).")
+                todo = []
             print(f"Upserting {len(todo)} new/changed products to Shopify "
                   f"({len(needs_photos & {p.uid() for p in todo})} with changed photos) ...")
             for i, part in enumerate(todo, 1):
@@ -186,7 +204,11 @@ def cmd_sync(args) -> int:
                     if i % 25 == 0 or i == len(retire):
                         print(f"  {i}/{len(retire)}")
 
-        if not args.dry_run:
+        if args.retire_only:
+            # Nothing was published, so committing `current` would record 26,000 parts as
+            # live and the next run would skip every one of them as "unchanged".
+            print("Retire-only: state NOT committed.")
+        elif not args.dry_run:
             # Anything we believed was published but did not retire is carried forward at
             # its old fingerprint. Dropping it here would silently forget a part that is
             # still live on the storefront with stock it no longer has.
@@ -213,6 +235,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="skip the photo-share listing (faster; photo changes go undetected)")
     p.add_argument("--status", default="DRAFT", choices=["DRAFT", "ACTIVE"],
                    help="status for NEW products; existing products keep theirs (default DRAFT)")
+    p.add_argument("--retire-only", action="store_true",
+                   help="retire sold parts without publishing anything (pairs with --reconcile)")
+    p.add_argument("--reconcile", action="store_true",
+                   help="ask Shopify what is published instead of trusting the state file "
+                        "(use for the first run, or after a bulk load)")
     p.add_argument("--force-retire", action="store_true",
                    help="retire sold parts even if they exceed the safety fraction")
     p.add_argument("--max-retire-fraction", type=float, default=0.10,
