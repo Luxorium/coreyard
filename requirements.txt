@@ -1,0 +1,13 @@
+# Live database access. The source host commonly exposes SQL Server only over the
+# \sql\query named pipe (SMB2/3, no TCP listener), so the transport runs impacket's TDS engine over its
+# SMB client. A conventional TCP driver (python-tds, pyodbc, jTDS) cannot reach this server.
+impacket>=0.13
+
+# Shopify Admin API sink + staged image uploads
+requests>=2.31
+
+# Image fetching shells out to the `smbclient` CLI (Samba), not a Python package.
+# The transform/CSV code needs no third-party packages at all.
+
+# Optional: only if mirroring images to an S3-compatible bucket (e.g. Cloudflare R2)
+# boto3>=1.34

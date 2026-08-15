@@ -1,0 +1,172 @@
+"""Fetch part photos from the configured SMB share by R#.
+
+Photos live in one flat folder keyed by R# with a two-digit sequence:
+``<share>\\<subdir>\\{r_number}_{NN}.jpg`` (e.g. ``10002_01.jpg``,
+``10002_02.jpg``). We list/fetch only the files for a given R# using an
+``smbclient`` wildcard mask, so we never enumerate the whole (tens-of-thousands-of-files)
+directory. Shelling out to ``smbclient`` keeps this dependency-free and matches the tool
+already validated against the server.
+
+The trailing underscore in the ``{r_number}_*`` mask anchors the match, so R# ``1000``
+does not pick up ``10001_01.jpg`` and R# ``10002`` does not pick up ``100020_01.jpg``.
+"""
+
+from __future__ import annotations
+
+import atexit
+import os
+import re
+import subprocess
+import tempfile
+from pathlib import Path
+
+from coreyard.config import SmbConfig, load_smb_config
+
+_IMAGE_RE = re.compile(r".+\.(jpg|jpeg|png)$", re.IGNORECASE)
+
+
+class SmbError(RuntimeError):
+    pass
+
+
+class SmbImageStore:
+    """Thin wrapper over the ``smbclient`` CLI for the configured photo share."""
+
+    def __init__(self, cfg: SmbConfig | None = None) -> None:
+        self.cfg = cfg or load_smb_config()
+        self._auth_path: str | None = None
+
+    # -- auth ---------------------------------------------------------------
+    def _auth_file(self) -> str:
+        """Write a 0600 smbclient auth file once, so the password never appears in
+        the process argument list. Cleaned up at interpreter exit."""
+        if self._auth_path and os.path.exists(self._auth_path):
+            return self._auth_path
+        fd, path = tempfile.mkstemp(prefix="coreyard-smb-", suffix=".auth")
+        with os.fdopen(fd, "w") as fh:
+            fh.write(f"username = {self.cfg.user}\n")
+            fh.write(f"password = {self.cfg.password}\n")
+        os.chmod(path, 0o600)
+        self._auth_path = path
+        atexit.register(lambda p=path: os.path.exists(p) and os.remove(p))
+        return path
+
+    def _unc(self) -> str:
+        return f"//{self.cfg.host}/{self.cfg.images_share}"
+
+    def _run(self, smb_command: str, cwd: str | None = None) -> str:
+        """Run a single ``smbclient -c`` command string against the images share."""
+        argv = [
+            "smbclient", self._unc(),
+            "-A", self._auth_file(),
+            "-c", smb_command,
+        ]
+        try:
+            proc = subprocess.run(
+                argv, cwd=cwd, capture_output=True, text=True, timeout=120,
+            )
+        except FileNotFoundError as exc:  # smbclient missing
+            raise SmbError("smbclient not found on PATH") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise SmbError(f"smbclient timed out: {smb_command!r}") from exc
+        # smbclient exits non-zero on real errors; a "NT_STATUS_NO_SUCH_FILE" from an
+        # empty wildcard listing is normal and must not raise.
+        out = proc.stdout or ""
+        err = proc.stderr or ""
+        if proc.returncode != 0 and "NT_STATUS_NO_SUCH_FILE" not in (out + err):
+            raise SmbError(f"smbclient failed ({proc.returncode}): {err.strip() or out.strip()}")
+        return out
+
+    # -- listing / fetching -------------------------------------------------
+    def list_inventory_images(self, r_number: str) -> list[str]:
+        """Return the image filenames for an R#, ordered by sequence."""
+        subdir = self.cfg.inventory_subdir
+        mask = f"{r_number}_*"
+        out = self._run(f'cd "{subdir}"; ls "{mask}"')
+        return self._parse_ls(out, r_number)
+
+    def list_all_inventory_images(self) -> dict[str, list[str]]:
+        """Map every R# on the share to its ordered photo filenames, in one listing.
+
+        Per-part listing is the right call when you want one part's photos: it is anchored
+        and cheap. It is the wrong call when you want to know *which of 26,000 parts had a
+        photo added or removed* — that is 26,000 round trips at ~180 ms each. A single
+        directory listing answers the same question in one, and is the only reason this
+        module ever enumerates the folder.
+
+        Files that do not match ``{R#}_{NN}.ext`` are ignored, so stray uploads in the
+        folder cannot invent an R#.
+        """
+        out = self._run(f'cd "{self.cfg.inventory_subdir}"; ls')
+        by_part: dict[str, list[str]] = {}
+        for line in out.splitlines():
+            line = line.strip()
+            if not line or line.startswith(("Domain=", "OS=", "smb:")):
+                continue
+            token = line.split()[0]
+            m = re.fullmatch(r"(\d+)_(\d+)\.(?:jpg|jpeg|png)", token, re.IGNORECASE)
+            if m:
+                by_part.setdefault(m.group(1), []).append(token)
+        for names in by_part.values():
+            names.sort(key=lambda n: int(re.search(r"_(\d+)\.", n).group(1)))
+        return by_part
+
+    @staticmethod
+    def _parse_ls(out: str, r_number: str) -> list[str]:
+        names: list[str] = []
+        prefix = f"{r_number}_"
+        for line in out.splitlines():
+            line = line.strip()
+            if not line or line.startswith(("Domain=", "OS=", "smb:")):
+                continue
+            token = line.split()[0]
+            if token.startswith(prefix) and _IMAGE_RE.match(token):
+                names.append(token)
+
+        def seq(name: str) -> int:
+            m = re.search(r"_(\d+)\.", name)
+            return int(m.group(1)) if m else 0
+
+        return sorted(set(names), key=seq)
+
+    def fetch(self, r_number: str, dest_dir: Path) -> list[Path]:
+        """Download all images for an R# into ``dest_dir``.
+
+        Skips files already present with a non-zero size, so re-runs are cheap. All
+        ``get`` commands are batched into a single smbclient connection. Returns the
+        ordered list of local paths that now exist.
+        """
+        names = self.list_inventory_images(r_number)
+        if not names:
+            return []
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        to_get = [n for n in names if not (dest_dir / n).exists() or (dest_dir / n).stat().st_size == 0]
+        if to_get:
+            subdir = self.cfg.inventory_subdir
+            gets = "; ".join(f'get "{n}"' for n in to_get)
+            self._run(f'lcd "{dest_dir}"; cd "{subdir}"; {gets}', cwd=str(dest_dir))
+        return [dest_dir / n for n in names if (dest_dir / n).exists()]
+
+
+def _cli() -> int:
+    import sys
+
+    if len(sys.argv) < 2:
+        print("usage: python -m coreyard.yms.images <r_number> [<r_number>...] [--fetch]")
+        return 2
+    fetch = "--fetch" in sys.argv
+    r_numbers = [a for a in sys.argv[1:] if not a.startswith("--")]
+    store = SmbImageStore()
+    dest = Path("out/images")
+    for r_number in r_numbers:
+        names = store.list_inventory_images(r_number)
+        print(f"R#{r_number}: {len(names)} image(s) -> {names}")
+        if fetch and names:
+            paths = store.fetch(r_number, dest / r_number)
+            for p in paths:
+                print(f"   fetched {p} ({p.stat().st_size} bytes)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())
