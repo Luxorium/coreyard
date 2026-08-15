@@ -23,6 +23,13 @@ FORBIDDEN_TERMS = [
     "powerlink", "powerstation", "hollander", "solera", "plimages", "plusers", "elink",
 ]
 
+# The installation's own identity. CoreYard is a tool any yard can run, so the yard that
+# happens to have written it must be no more visible in the tree than any other — business
+# name, storefront, or the maintainer's work email. These live in .env, which is gitignored.
+FORBIDDEN_INSTALLATION = [
+    "abmotors", "ab motors", "a&b motors", "a & b motors",
+]
+
 # Column and table names belonging to a specific vendor's schema.
 FORBIDDEN_SCHEMA = [
     "inventoryid", "stockticketnumber", "interchangenumber", "inventorynumber",
@@ -74,7 +81,8 @@ def candidate_files():
 
 def main() -> int:
     failures: list[str] = []
-    patterns = [(t, re.compile(re.escape(t), re.I)) for t in FORBIDDEN_TERMS + FORBIDDEN_SCHEMA]
+    terms = FORBIDDEN_TERMS + FORBIDDEN_INSTALLATION + FORBIDDEN_SCHEMA
+    patterns = [(t, re.compile(re.escape(t), re.I)) for t in terms]
     for path, rel in candidate_files():
         try:
             text = path.read_text(encoding="utf-8")

@@ -196,6 +196,7 @@ cat > "$REPO_DIR/bin/coreyard" <<'LAUNCHER'
 #   coreyard bulk   [args]   resumable bulk publish
 #   coreyard oauth           exchange client id/secret for an admin token
 #   coreyard altfix [args]   backfill alt text onto existing product photos
+#   coreyard orders [args]   order webhook: serve / register / replay / status
 #   coreyard images  <R#>    list/fetch one part's photos
 #   coreyard schema          re-dump the source database schema
 set -euo pipefail
@@ -207,6 +208,7 @@ case "${1:-}" in
     bulk)   shift; exec "$PY" -m coreyard.sink.shopify_bulk "$@" ;;
     oauth)  shift; exec "$PY" -m coreyard.sink.shopify_oauth "$@" ;;
     altfix) shift; exec "$PY" -m coreyard.sink.backfill_alt "$@" ;;
+    orders) shift; exec "$PY" -m coreyard.webhook "$@" ;;
     images) shift; exec "$PY" -m coreyard.yms.images "$@" ;;
     schema) shift; exec "$PY" -m coreyard.yms.discover_schema "$@" ;;
     *)      exec "$PY" -m coreyard.run_sync "$@" ;;

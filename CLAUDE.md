@@ -16,9 +16,16 @@ handle prefix — may be hardcoded in source or docs. It all comes from `.env` v
 
 **Vendor neutrality is a project rule.** Do not name the yard management software, its vendor,
 or its parent company anywhere in this repository — not in code, comments, docs, or commit
-messages. Refer to "the yard system" / "the source database". The source system is the only
-source of truth, and every path into it is **read-only** (`SELECT` only,
-`db_datareader`-equivalent). Never add a write.
+messages. Refer to "the yard system" / "the source database". `scripts/check_neutrality.py`
+enforces this in CI, over `git ls-files`, and also bans the operating yard's own business name.
+
+**Read-only is a discipline, not a permission boundary.** Verified 2026-08-15: the service
+account is `db_owner`, mapped to `dbo`, holding INSERT/UPDATE/DELETE/ALTER/CONTROL on the
+source database. Nothing at the database level would stop a write — which is exactly why the
+`SELECT`-only rule lives in the code and has to be kept there deliberately. A loop bug in this
+repo has the privileges to destroy the system of record for the whole business. Any future
+write must be a specific, reviewed, transaction-wrapped operation against a schema whose
+invariants have been *observed*, never inferred.
 
 ## Commands
 
@@ -98,6 +105,14 @@ re-detected next run instead of being silently forgotten. `tests/test_retire.py`
 Delisting a part that is being sold is a **schema** concern, not a code one: exclude open
 work orders in the `scope` predicate of `schema.json` (see `schema.example.json`, `_scope`).
 Dropping out of scope is what makes CoreYard retire the listing.
+
+`webhook.py` closes the same loop in seconds instead of a timer interval: Shopify posts
+`orders/create`, the receiver verifies the HMAC and queues, and a worker prints a pull ticket
+and archives the sold products. It touches the source database only to *read* the bin location
+and donor vehicle for the ticket. Two constraints shape it — Shopify wants a 2xx inside ~5s
+(hence verify-queue-ack, work on a thread) and delivers at-least-once (hence the
+`X-Shopify-Webhook-Id` primary key). Order payloads are customer PII, so the queue clears the
+payload column once handled and nothing logs a body.
 
 The prefix comes from `StoreProfile.handle_prefix` (`SHOPIFY_HANDLE_PREFIX`, default
 `coreyard`). It is a live storefront key, not a namespace: for any store that has already

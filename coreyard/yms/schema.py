@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,32 @@ class SourceSchema:
             interchange_applications=(data.get("interchange_applications") or "").strip(),
             interchange_makes=(data.get("interchange_makes") or "").strip(),
         )
+
+    def build_lookup_query(self, r_numbers: list[str]) -> str:
+        """Select specific parts by R#, deliberately ignoring ``scope``.
+
+        Scope answers "what may be listed". This answers "what is this part", which is a
+        different question and has to keep working after the answer to the first one becomes
+        no — by the time an order arrives, the part it sold has usually already dropped out
+        of scope, and a puller still needs its bin location.
+
+        R#s reach this from Shopify order SKUs, which a draft order can set to arbitrary
+        text, so they are validated against a strict character class and emitted quoted.
+        """
+        seen: set[str] = set()
+        keys = []
+        for value in r_numbers:
+            key = str(value).strip()
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", key):
+                raise SchemaError(f"refusing to look up implausible R# {value!r}")
+            if key not in seen:      # an order can list the same part on two lines
+                seen.add(key)
+                keys.append(f"'{key}'")
+        if not keys:
+            raise SchemaError("no R#s to look up")
+        columns = ",\n    ".join(f"{expr} AS {field}" for field, expr in self.select.items())
+        return (f"SELECT\n    {columns}\nFROM {self.source}\n"
+                f"WHERE {self.select['r_number']} IN ({', '.join(keys)})")
 
     def build_query(self, limit: int | None = None, images_only: bool = False) -> str:
         top = f"TOP {int(limit)} " if limit else ""

@@ -40,9 +40,9 @@ Source of truth is the yard system's own database — no middleware, no export f
 | Incremental sync diff (add/change/unchanged/sold) | **working, unit-tested** |
 | Offline end-to-end demo (real photos → CSV) | **working** (`scripts/demo_offline.py`) |
 | Shopify Admin API sink (products + photos + inventory) | **working** — validated on a live catalog of ~9,400 image-backed parts |
-
 | Sold-part retirement (qty 0 → archived, with safety guards) | **working, unit-tested** |
 | Photo-change detection (share listing folded into the fingerprint) | **working, unit-tested** |
+| Order webhook → printable pull ticket + instant delist | **working, unit-tested** |
 
 Known gaps: a part's *variant-level* media assignment is not managed — photos attach to the
 product, not to a specific variant, which is fine while every part is a single-variant product.
@@ -222,6 +222,31 @@ bin/coreyard oauth        # re-runs consent, rewrites SHOPIFY_ADMIN_TOKEN in .en
 
 Check what a token actually carries with
 `{ currentAppInstallation { accessScopes { handle } } }`.
+
+### Online orders → a printable pull ticket
+
+A worker fulfilling an online order needs the bin location and donor vehicle (yard database)
+and the buyer and shipping address (Shopify) on one page. Neither system can print that sheet
+alone, so CoreYard renders it.
+
+```bash
+bin/coreyard orders register --url https://yard.example.com/webhook
+bin/coreyard orders serve --print-cmd 'lp -d yardprinter'
+bin/coreyard orders status                      # recent deliveries
+bin/coreyard orders replay out/test_order.json  # re-print, no store or signature needed
+```
+
+`serve` binds to `127.0.0.1:8787` by default — put TLS in front of it (a reverse proxy or a
+tunnel); Shopify only delivers to `https://`. Every request is checked against the app's
+signing secret with a constant-time compare, and an unsigned or mis-signed POST is refused
+without explanation. Deliveries are queued by `X-Shopify-Webhook-Id`, so Shopify's
+at-least-once retries can't print an order twice, and the receiver answers immediately rather
+than holding the connection open while a printer warms up.
+
+Sold parts are archived on Shopify as each order arrives, which closes the window where a
+part stays buyable until the next timer tick. `--no-retire` prints only. Order payloads carry
+a customer's name, phone and address, so the queue erases them once the ticket is rendered and
+no request body is ever logged.
 
 ### Taking sold parts off sale
 

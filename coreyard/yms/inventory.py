@@ -112,6 +112,22 @@ def fetch_parts(limit: Optional[int] = None, images_only: bool = False) -> list[
     return [p for p in (row_to_part(r) for r in rows) if p.is_listable()]
 
 
+def fetch_parts_by_r_number(r_numbers: list[str]) -> dict[str, Part]:
+    """Look up specific parts by R#, whether or not they are still listable.
+
+    ``is_listable`` is deliberately not applied. This exists to answer "where is this part
+    and what is it" for a part that has just sold, which is exactly when it stops being
+    listable — filtering here would return nothing precisely when it is needed.
+    """
+    if not r_numbers:
+        return {}
+    sql = schema.load().build_lookup_query(sorted(set(r_numbers)))
+    with connect() as conn:
+        rows = query(conn, sql)
+    parts = (row_to_part(r) for r in rows)
+    return {p.uid(): p for p in parts if p.uid()}
+
+
 if __name__ == "__main__":
     import sys
 
