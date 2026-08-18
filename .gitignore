@@ -2,6 +2,10 @@
 .env
 *.auth
 
+# Local agent/editor state (kept out of the repo, not just out of one machine's
+# global ignore file, so the rule travels with a clone)
+.claude/
+
 # Python
 .venv/
 __pycache__/
@@ -12,7 +16,7 @@ __pycache__/
 out/images/
 out/schema/
 out/*.csv
-coreyard_sync_state.sqlite3
+*.sqlite3
 
 # All generated output
 /out/

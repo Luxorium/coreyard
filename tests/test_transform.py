@@ -46,8 +46,8 @@ class TitleAndHandle(unittest.TestCase):
 
     def test_handle_prefix_is_configurable_and_slugged(self):
         # An existing store keeps publishing under the prefix it launched with.
-        legacy = StoreProfile(vendor="Test Yard", handle_prefix="abm")
-        self.assertEqual(handle_for(sample_part(), legacy), "abm-51")
+        legacy = StoreProfile(vendor="Test Yard", handle_prefix="oldyard")
+        self.assertEqual(handle_for(sample_part(), legacy), "oldyard-51")
         messy = StoreProfile(vendor="Test Yard", handle_prefix="My Yard!")
         self.assertEqual(handle_for(sample_part(), messy), "my-yard-51")
 

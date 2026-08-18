@@ -13,9 +13,11 @@ locally in `.env` and `schema.json` — both gitignored.
 `python scripts/check_neutrality.py` runs in CI and fails the build on a leak. Run it before
 you open a PR.
 
-**2. The source database is read-only.**
-Every query is a `SELECT`. There is no code path that writes, and none should be added. A yard's
-inventory system is its livelihood; this tool must never be the reason it breaks.
+**2. Source writes are exceptional.**
+Every database path is `SELECT`-only except `coreyard/yms/orders.py`, the explicitly enabled,
+transaction-wrapped storefront order booking path. Do not reuse `yms.db.query` for writes or
+add another write operation without equivalent observed invariants, rollback guarantees, and
+offline guard tests. A yard's inventory system is its livelihood.
 
 **3. Tests stay offline.**
 The suite must pass with no database, no network, and no `.env`. Anything needing a live server
@@ -27,7 +29,7 @@ belongs in `scripts/` or behind a CLI flag.
 git clone <your fork>
 cd coreyard
 ./install.sh --no-deps        # or plain ./install.sh to pull system packages too
-python -m unittest discover -s tests -v
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
 You do not need a live database to work on the transform, CSV, state, or SEO layers — they are
@@ -50,8 +52,8 @@ surrounding code. Comments should explain *why*, since the *what* is usually alr
 ## Pull requests
 
 - One focused change per PR.
-- Add a regression test for anything touching identifier mapping, state diffing, or rendered
-  output. Those are where silent breakage hurts most.
+- Add a regression test for anything touching identifier mapping, state diffing, rendered
+  output, retirement, webhook PII, or the guarded order transaction.
 - Say which commands you ran to verify.
 - Note any change to rendered titles, descriptions, or handles — see below.
 

@@ -12,7 +12,8 @@
 ## Impact checklist
 
 - [ ] No vendor product names or real table/column names added to the repo
-- [ ] No new write path to the source database
+- [ ] No source write outside `coreyard/yms/orders.py`; its transaction guards remain intact
+- [ ] Webhook/customer PII is not logged, committed, or retained without a bounded reason
 - [ ] Tests still run offline (no DB, no network, no `.env`)
 - [ ] If rendered output changed (titles/descriptions/handles), noted below
 

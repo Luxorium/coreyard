@@ -34,7 +34,7 @@ Source of truth is the yard system's own database — no middleware, no export f
 | Image fetch from the photo share over SMB (by R#) | **working, tested vs live server** |
 | Live SQL connect over the `\sql\query` named pipe | **working** (`coreyard/yms/smb_tds.py`) |
 | Schema discovery | **done** — real schema mapped 2026-08-14 |
-| Extract query (`inventory.py`) | **working** against the real schema (`CONFIGURED = True`) |
+| Extract query (`inventory.py`) | **working** against a real mapped schema (`is_configured()`) |
 | Interchange fitment + SEO titles/meta/tags | **working, unit-tested** |
 | Transform `Part` → Shopify product + CSV framing | **working, unit-tested** |
 | Incremental sync diff (add/change/unchanged/sold) | **working, unit-tested** |
@@ -42,7 +42,8 @@ Source of truth is the yard system's own database — no middleware, no export f
 | Shopify Admin API sink (products + photos + inventory) | **working** — validated on a live catalog of ~9,400 image-backed parts |
 | Sold-part retirement (qty 0 → archived, with safety guards) | **working, unit-tested** |
 | Photo-change detection (share listing folded into the fingerprint) | **working, unit-tested** |
-| Order webhook → printable pull ticket + instant delist | **working, unit-tested** |
+| Paid-order webhook → printable pull ticket + instant delist | **working, unit-tested** |
+| Order webhook → work order in the source database (opt-in) | **working, unit-tested** |
 
 Known gaps: a part's *variant-level* media assignment is not managed — photos attach to the
 product, not to a specific variant, which is fine while every part is a single-variant product.
@@ -64,7 +65,10 @@ coreyard/
     inventory.py             the extract query — the only module that knows the schema
     interchange.py           resolve full fitment (which vehicles a part fits)
     images.py                fetch {R#}_NN.jpg photos from the SMB share
+    orders.py                guarded, opt-in storefront order booking
   transform/
+    pricing.py               optional storefront-only charm pricing
+    pull_ticket.py           paid order + yard detail → printable HTML
     seo.py                   SEO titles/meta/description/tags (used by the API path)
     shopify_product.py       Part → title/body/tags/rows (used by the CSV path)
     shopify_csv.py           Shopify product-CSV writer
@@ -74,7 +78,10 @@ coreyard/
     shopify_write.py         publisher: product + staged photo upload + inventory qty
     shopify_bulk.py          resumable, concurrent bulk publish over shopify_write
     shopify_oauth.py         one-time Client ID/Secret → SHOPIFY_ADMIN_TOKEN exchange
+  webhook.py                 paid-order receiver, retry queue, pull workflow
+  schedule.py                systemd/cron sync scheduling helper
 scripts/demo_offline.py      offline proof (no DB needed)
+scripts/print_ticket.sh      Chromium → PDF → CUPS ticket printing
 scripts/test_db_connection.py  one-off live DB connectivity check
 tests/                       unittest suite (transform + state + extract mapping)
 ```
@@ -124,7 +131,8 @@ account and runs impacket's TDS engine over it with **Windows Authentication** �
 knowing:
 
 * Authentication uses the **SMB** credentials. `YMS_DB_PASSWORD` is unused and there is no
-  dedicated SQL login; access is read-only because the translator only ever issues `SELECT`.
+  dedicated SQL login. Normal extraction is `SELECT`-only; optional order booking is the sole
+  write and uses its own guarded executor.
 * A normal Linux SQL driver (`python-tds`, `pyodbc`, jTDS) cannot reach this server at all.
 * Verify with `.venv/bin/python scripts/test_db_connection.py`, which prints `@@VERSION` and
   the user databases.
@@ -169,7 +177,8 @@ Either path produces the `SHOPIFY_ADMIN_TOKEN` the sinks need, alongside
 
 * **In-admin custom app** — Shopify admin → **Settings → Apps and sales channels → Develop apps
   → Create an app** → **Configuration → Admin API scopes**: `read_products, write_products,
-  read_inventory, write_inventory, read_locations, read_files, write_files` → **Save** →
+  read_inventory, write_inventory, read_locations, read_files, write_files, read_orders` →
+  **Save** →
   **API credentials → Install app**
   → copy the `shpat_…` token into `.env`.
 * **Dev-dashboard app** (Client ID + Secret instead of a token) — add the redirect URL
@@ -200,7 +209,8 @@ bin/coreyard bulk                # everything with photos
 ```
 
 `bin/coreyard` runs the CLI inside the virtualenv from any working directory. Its subcommands
-are `bulk`, `altfix`, `oauth`, `images`, and `schema`; anything else is passed to the sync CLI.
+are `bulk`, `altfix`, `oauth`, `orders`, `images`, and `schema`; anything else is passed to the
+sync CLI.
 
 Photo alt text is written when a product's photos are first attached. To fill it in on photos
 published before that existed:
@@ -230,11 +240,18 @@ and the buyer and shipping address (Shopify) on one page. Neither system can pri
 alone, so CoreYard renders it.
 
 ```bash
-bin/coreyard orders register --url https://yard.example.com/webhook
+bin/coreyard orders register --url https://yard.example.com/webhook  # ORDERS_PAID
 bin/coreyard orders serve --print-cmd 'lp -d yardprinter'
 bin/coreyard orders status                      # recent deliveries
+bin/coreyard orders retry --id <webhook-id>     # retry only failed stages
 bin/coreyard orders replay out/test_order.json  # re-print, no store or signature needed
 ```
+
+Registration uses Shopify's `ORDERS_PAID` topic. The receiver also requires
+`financial_status=paid` before printing, booking, or retiring anything. During migration an
+older `ORDERS_CREATE` subscription is safe: unpaid deliveries are acknowledged and ignored,
+and paid duplicates are de-duplicated by order identity as well as webhook delivery ID.
+Remove the legacy subscription after confirming the paid subscription is active.
 
 `serve` binds to `127.0.0.1:8787` by default — put TLS in front of it (a reverse proxy or a
 tunnel); Shopify only delivers to `https://`. Every request is checked against the app's
@@ -243,10 +260,63 @@ without explanation. Deliveries are queued by `X-Shopify-Webhook-Id`, so Shopify
 at-least-once retries can't print an order twice, and the receiver answers immediately rather
 than holding the connection open while a printer warms up.
 
-Sold parts are archived on Shopify as each order arrives, which closes the window where a
+Sold parts are archived on Shopify as each paid order arrives, which closes the window where a
 part stays buyable until the next timer tick. `--no-retire` prints only. Order payloads carry
-a customer's name, phone and address, so the queue erases them once the ticket is rendered and
-no request body is ever logged.
+a customer's name, phone and address, so no request body is logged. Successful payloads are
+securely erased immediately. Failed payloads remain in the owner-only queue for seven days so
+only their failed print, booking, or retirement stage can be retried. Rendered tickets are
+owner-only and expire after 30 days. Configure the windows with
+`COREYARD_WEBHOOK_ERROR_RETENTION_DAYS` and `COREYARD_TICKET_RETENTION_DAYS`.
+
+`scripts/print_ticket.sh` renders HTML through Chromium/Chrome and submits the PDF with CUPS
+`lp`. Install both tools, set `COREYARD_PRINTER`, then configure
+`COREYARD_PRINT_CMD=scripts/print_ticket.sh {file}`.
+
+Run `orders serve` under a process supervisor with automatic restart, and keep it bound to
+loopback behind an HTTPS reverse proxy or tunnel. Monitor `orders status` for error rows.
+Cancellation/refund reversal is deliberately manual: restoring source inventory would be a
+second database write operation whose invariants must be observed and reviewed separately.
+
+### Booking the sale into the yard system
+
+Optionally, the same delivery creates a real order in your source database, so the storefront
+does not become a second set of books:
+
+```bash
+bin/coreyard orders serve --write-orders --print-cmd 'lp -d yardprinter'
+.venv/bin/python -m coreyard.yms.orders out/test_order.json  # print SQL, write nothing
+bin/coreyard orders status                           # deliveries and their order numbers
+```
+
+This is the **only** write CoreYard makes to your database. It requires an `order_write`
+section in local `schema.json` plus explicit runtime enablement: `YMS_WRITE_ORDERS=1`,
+`--write-orders`, or `--execute` for the manual command. Without the mapping and an explicit
+opt-in it stays read-only, so an upgrade never starts writing to a system of record on its own.
+Read the `_order_write` notes in `schema.example.json` before filling it in — most
+systems of this kind have no identity columns and no foreign keys, so ids come from counter
+tables the application is allocating from concurrently, and nothing implicit will fix a
+mistake.
+
+What CoreYard guarantees, whatever names you map: the order is one transaction under
+`SET XACT_ABORT ON`, so it commits whole or changes nothing; ids are allocated in a single
+`UPDATE ... OUTPUT` under `UPDLOCK` and checked unused before insert; the inventory decrement
+carries a quantity floor and must affect exactly one row, so an oversell fails loudly instead
+of going negative; and nothing is ever deleted. Because the write is atomic and idempotent,
+retrying after a failure is safe.
+
+A redelivery is refused by the database, not just by the queue: the storefront order reference
+is stored on the order and a second attempt returns the existing number instead of booking the
+sale twice. The pull ticket prints first and unconditionally — if the booking fails, the ticket
+is still on the printer and the failure is recorded against the delivery in
+`bin/coreyard orders status`. Retry it within the retention window with
+`bin/coreyard orders retry --id <webhook-id>`; add `--reprint` only when another paper copy is
+actually wanted.
+
+**Tax is a decision you have to make explicitly.** If your storefront already collects and
+remits sales tax, leave `line_items_taxable` false, or the same sale is taxed twice. Do not
+assume your customer account can carry the exemption — check whether your customer table even
+has such a column first. Booking online sales under the customer number your existing
+e-commerce integration uses is worth doing for consistency, but it is not a tax mechanism.
 
 ### Taking sold parts off sale
 
@@ -254,6 +324,13 @@ A part leaves the listing when it drops out of your `schema.json` `scope` predic
 unpriced, blocked, or on an open work order. `--sink api` then zeroes its inventory and sets it
 to `ARCHIVED`. It is never deleted: the product, its photos and its URL stay put, so an old link
 or a search result lands on a real page rather than a 404, and the part can be revived.
+
+Revival is automatic. A part can come back — a voided work order returns it to the yard — so the
+status a product held before it was archived is recorded in the sync state, and a later run puts
+it back exactly as it was. Without that memory the status read-back that stops a sync from
+un-publishing a live product would re-send `ARCHIVED`, quietly restoring the part's stock onto a
+product no shopper can see. Only archived products are revived, so a status you set by hand
+always stands.
 
 Scope is where the delisting rule lives, so put the work-order exclusion there — a part being
 pulled for a customer is still priced and still in stock, and without that clause it stays
@@ -299,9 +376,10 @@ Set `COREYARD_SMB_DEBUG=1` to trace the SMB pipe traffic when a connection misbe
 State in `coreyard_sync_state.sqlite3` makes `run_sync` incremental: only new/changed parts are
 pushed, and parts no longer priced-and-available are reported as sold (CSV import cannot remove
 products, so the API sink is the path to fully unattended sync).
-Schedule with cron, e.g. hourly:
-```cron
-0 * * * * cd /path/to/coreyard && .venv/bin/python -m coreyard.run_sync --sink api >> out/sync.log 2>&1
+Use the scheduling helper (systemd when available, cron fallback):
+```bash
+.venv/bin/python -m coreyard.schedule install --every 1h
+.venv/bin/python -m coreyard.schedule status
 ```
 
 ## Data model → Shopify mapping
@@ -340,9 +418,8 @@ behind a CLI flag.
 ## Security notes
 - Secrets live only in `.env` (gitignored). The SMB password is written to a `0600` temp
   auth file for `smbclient`, never passed on the command line.
-- The translator issues `SELECT` only — no writes, no schema changes, no stored procedures —
-  so normal operation and vendor support for your yard system are unaffected. The service
-  account is used exactly as that system already uses it.
+- Extraction and discovery issue `SELECT` only. The separately gated order-booking transaction
+  in `coreyard/yms/orders.py` is the sole source-database write path.
 - No hostnames, IP addresses, or account names appear in this repository; they all come from
   your local `.env`.
 
@@ -359,5 +436,5 @@ For security issues, please follow [SECURITY.md](SECURITY.md) rather than openin
 [MIT](LICENSE) © Luxorium.
 
 CoreYard is an independent tool and is not affiliated with, endorsed by, or a product of any
-yard management software vendor. It reads a database you already license and operate, and issues
-`SELECT` statements only.
+yard management software vendor. It reads a database you already license and operate; optional
+storefront order booking is explicit, guarded, and off by default.

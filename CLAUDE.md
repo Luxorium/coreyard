@@ -1,193 +1,205 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code when working in this repository. Read `AGENTS.md` first;
+this file adds architecture and operational invariants that are easy to violate.
 
-## What this is
+## Project Boundaries
 
-**CoreYard** ([coreyard.luxorium.dev](https://coreyard.luxorium.dev)) — a one-way translator
-that publishes a salvage yard's parts inventory to Shopify, reading an existing yard management
-system's SQL Server database and its part-photo SMB share. The Python package is `coreyard`.
+CoreYard publishes salvage-yard inventory from a source SQL Server database and SMB
+photo share to Shopify. The primary flow is extract -> transform -> diff -> publish.
+The optional order webhook is the sole reverse write: it can book a paid storefront
+sale as a work order in the source system.
 
-This is a **generic tool for any yard running a compatible system + Shopify**, not a one-site
-script. Nothing
-identifying an installation — host, account, credential, business name, city, storefront copy,
-handle prefix — may be hardcoded in source or docs. It all comes from `.env` via
-`config.StoreProfile` / `load_settings()`. Treat a literal business name or IP in a diff as a bug.
+This is a generic project, not a site-specific script. Never hardcode an installation's
+host, credentials, business identity, storefront copy, schema, or handle prefix. Site
+configuration belongs in `.env`; source table and column names belong in the local,
+gitignored `schema.json`. Keep `schema.example.json` generic.
 
-**Vendor neutrality is a project rule.** Do not name the yard management software, its vendor,
-or its parent company anywhere in this repository — not in code, comments, docs, or commit
-messages. Refer to "the yard system" / "the source database". `scripts/check_neutrality.py`
-enforces this in CI, over `git ls-files`, and also bans the operating yard's own business name.
+Vendor neutrality applies to code, tests, docs, and commit messages. Refer to "the yard
+system" or "the source database" and run `scripts/check_neutrality.py` before handing
+off changes. Customer-facing output must not identify any interchange-data vendor.
 
-**Read-only is a discipline, not a permission boundary.** Verified 2026-08-15: the service
-account is `db_owner`, mapped to `dbo`, holding INSERT/UPDATE/DELETE/ALTER/CONTROL on the
-source database. Nothing at the database level would stop a write — which is exactly why the
-`SELECT`-only rule lives in the code and has to be kept there deliberately. A loop bug in this
-repo has the privileges to destroy the system of record for the whole business. Any future
-write must be a specific, reviewed, transaction-wrapped operation against a schema whose
-invariants have been *observed*, never inferred.
+## Database and Configuration Safety
+
+The source account can have more privileges than CoreYard should exercise. Every
+database path must remain `SELECT`-only except `coreyard/yms/orders.py`. Do not reuse
+`coreyard.yms.db.query` for a write: impacket exposes some server errors as reply
+tokens, making a failed statement resemble an empty result.
+
+The order write is disabled unless a complete `order_write` mapping is present and
+writing is explicitly requested: `YMS_WRITE_ORDERS=1` or `--write-orders` for the
+webhook, or `--execute` for the manual order command. Its safety properties are part
+of the feature:
+
+- one transaction under `SET XACT_ABORT ON`;
+- atomic ID allocation from the source application's counter rows;
+- allocated IDs checked unused before insertion;
+- inventory decrement guarded by available quantity and exactly one affected row;
+- idempotence on the stored storefront order reference; and
+- no `DELETE` statements.
+
+Do not weaken these guards or add another write path without equivalent observed
+invariants, a dedicated executor, rollback-safe behavior, and offline regression tests.
+
+`coreyard/config.py` parses `.env` without overriding real environment variables. Read
+new configuration through `config._get`; direct `os.environ` access bypasses legacy-key
+fallbacks. Configuration keys are an interface: when renaming one, extend
+`config._LEGACY_KEYS`. Keep comments on their own lines because the `.env` parser does
+not strip trailing comments.
+
+Never commit `.env`, `schema.json`, customer/order payloads, `out/`, generated `bin/`,
+logs, photos, or SQLite state/queue databases.
 
 ## Commands
 
-Use the repo venv (`.venv/bin/python`, Python 3.13) — `impacket` and `requests` live there.
+Use the repository venv and run commands from the repository root. Python 3.10+ is
+supported; there is no build, formatter, or linter.
 
 ```bash
-./install.sh --no-deps --yes                                  # rebuild venv + bin/coreyard, verify
-python -m unittest discover -s tests -v                       # full suite (25 tests, offline)
-python -m unittest tests.test_transform.Rows.test_no_images   # a single test
-python scripts/demo_offline.py                                # transform + real SMB photos -> CSV, no DB
-python -m coreyard.run_sync --check                                # DB (and Shopify) connectivity
-python -m coreyard.run_sync --sink csv --limit 25 --dry-run        # preview without committing state
-python -m coreyard.run_sync --sink api                             # push new/changed parts to Shopify
-python -m coreyard.yms.inventory 10                          # print first 10 extracted parts
-python -m coreyard.yms.images 51 --fetch                     # list/fetch one part's photos
-python -m coreyard.yms.discover_schema                       # re-dump schema to out/schema/
-python -m coreyard.sink.shopify_bulk --limit 50 --workers 4        # resumable bulk publish (DRAFT)
-python -m coreyard.sink.shopify_oauth                              # exchange client id/secret -> admin token
-python -m coreyard.sink.backfill_alt --dry-run --limit 20      # preview photo alt-text backfill
-COREYARD_SMB_DEBUG=1 python -m coreyard.run_sync --check                # trace the SMB/TDS pipe
+./install.sh --no-deps --yes
+.venv/bin/python -m unittest discover -s tests -v          # full offline suite
+.venv/bin/python -m unittest tests.test_state.Diff.test_summary
+.venv/bin/python scripts/check_neutrality.py
+.venv/bin/python scripts/demo_offline.py                   # no DB; uses SMB photos
 ```
 
-Tests must stay offline; anything needing the live server belongs in `scripts/` or a CLI flag.
-There is no build, formatter, or linter.
+Configured/live operations:
+
+```bash
+bin/coreyard --check
+bin/coreyard --sink csv --limit 25 --dry-run
+bin/coreyard --sink api --dry-run
+bin/coreyard bulk --limit 50 --workers 4
+bin/coreyard images 51 --fetch
+bin/coreyard schema
+bin/coreyard orders status
+bin/coreyard orders retry --id <webhook-id>
+.venv/bin/python -m coreyard.schedule status
+```
+
+Commands without `--dry-run` can write Shopify or sync state. `bin/coreyard orders
+serve --write-orders` can also write the source database when the schema gate is
+configured. Do not treat a connectivity check or DB-free demo as an offline unit test:
+they use configured services.
+
+Tests use `unittest` and must not require a database, network, `.env`, or Shopify.
+Live diagnostics belong in `scripts/` or explicit CLI commands. Add regression tests
+for identifiers, query mappings, rendering, state diffs, retirement, media changes,
+webhook signatures/queues, order escaping, and transaction guards.
 
 ## Architecture
 
-`Part` (`coreyard/models.py`) is the single contract between extract and publish. Extract owns all
-source-schema knowledge; nothing downstream may reference a database column. This is what
-lets transform/CSV/state be unit-tested with synthetic parts.
+`Part` in `coreyard/models.py` is the neutral extract-to-publish contract. Downstream
+code must use `Part` fields, never source columns. `StoreProfile` in
+`coreyard/config.py` carries installation-specific storefront identity through
+rendering and fingerprinting so customer-facing strings are not hardcoded.
 
-`StoreProfile` (`coreyard/config.py`) is the matching contract for the *installation*: vendor,
-city, warranty, handle prefix. It threads through the whole render path (`shopify_product`,
-`seo`, `shopify_csv`, `state`, both sinks) so no customer-facing string is hardcoded. Every
-field defaults to empty and each clause drops out when blank, which is why tests can render
-without a `.env`.
-
-```
-coreyard/yms/        extract    inventory.py (the ONLY module that knows the schema)
-                           db.py -> smb_tds.py (TDS over an SMB named pipe)
-                           interchange.py (fitment), images.py (photos via smbclient)
-coreyard/transform/  render     seo.py (API path), shopify_product.py + shopify_csv.py (CSV path)
-coreyard/sink/       publish    csv_sink.py | shopify_api.py -> shopify_write.py -> shopify_bulk.py
-coreyard/state.py    diff       SQLite R# -> fingerprint, drives added/changed/unchanged/removed
-coreyard/run_sync.py CLI        orchestrates extract -> fingerprint diff -> sink
+```text
+coreyard/yms/        schema mapping, SMB/TDS reads, images, fitment, opt-in orders
+coreyard/transform/  pricing, SEO, products/CSV, and printable pull tickets
+coreyard/sink/       CSV output, Shopify GraphQL, bulk publishing, OAuth, alt text
+coreyard/state.py    SQLite content/image fingerprints and incremental diff
+coreyard/run_sync.py incremental sync orchestration and retirement planning
+coreyard/webhook.py  HMAC verification, durable queue, ticket/order/retire worker
+coreyard/schedule.py systemd-user/cron scheduling helper
 ```
 
-**Two publish paths exist. They now share a publisher but not their progress.**
-- `run_sync --sink csv|api` is the incremental path: it diffs against
-  `coreyard_sync_state.sqlite3` and only acts on adds/changes/removals. `--sink api` drives
-  `shopify_write.ShopifyPublisher`, so it gets the same fitment, SEO, photos and inventory
-  quantities as a bulk run — plus sold-part retirement, which only this path does.
-- `sink/shopify_bulk.py` -> the same `ShopifyPublisher` is the catalog-loading path: bounded
-  concurrency, `--limit`, and resume from `out/shopify_bulk_results.jsonl` (last
-  `status == "ok"` per R#), **not** from the SQLite state, so the two do not share progress.
-- `--sink csv` still renders through `transform/shopify_product.py` (plain titles/bodies) and
-  cannot retire anything; it is the offline preview path.
+There are three related publishing workflows:
 
-Both paths key products by the same handle `<prefix>-<R#>` (`shopify_product.handle_for`) and use
-`productSet` for idempotent upsert, so re-running updates rather than duplicates. Photos are
-attached only when the product has none, so re-runs don't duplicate images; `publish(part,
-refresh_images=True)` is the deliberate exception, and `run_sync` passes it only for the R#s
-`diff.image_changed` names.
+1. `run_sync --sink api` diffs against `coreyard_sync_state.sqlite3`, publishes
+   additions/changes, refreshes changed photos, and retires removals.
+2. `shopify_bulk.py` performs resumable concurrent initial loads, recording progress
+   in `out/shopify_bulk_results.jsonl`; it does not share progress with sync state.
+3. `webhook.py` immediately prints, optionally books, and retires parts from paid
+   orders. `--no-retire` disables its Shopify retirement.
 
-**`productSet` has set semantics, so an omitted field is reset, not left alone.** `_upsert`
-reads the existing product's `status` back and re-sends it for exactly this reason — otherwise
-every sync would drag a product the owner activated by hand back to DRAFT. New products get
-`--status` (default DRAFT). Retirement is the one intentional status write: qty 0, then
-ARCHIVED, so "not reviewed yet" (DRAFT) and "sold" stay distinguishable in Admin.
+The CSV sink renders previews/import files but cannot retire Shopify products.
 
-**Retirement is guarded, because "missing from the extract" has innocent causes.**
-`run_sync._retirement_plan` refuses to retire under `--limit` (a partial view of the yard) or
-when removals exceed `--max-retire-fraction` (default 10%, override with `--force-retire`).
-Anything not retired is carried forward in the state snapshot at its old fingerprint, so it is
-re-detected next run instead of being silently forgotten. `tests/test_retire.py` pins all of it.
+## Identifier and Publishing Invariants
 
-Delisting a part that is being sold is a **schema** concern, not a code one: exclude open
-work orders in the `scope` predicate of `schema.json` (see `schema.example.json`, `_scope`).
-Dropping out of scope is what makes CoreYard retire the listing.
+| Meaning | `Part` field | Role |
+|---|---|---|
+| R# | `r_number` | unique SKU, handle key, photo stem, state identity |
+| Stock # | `stock_number` | donor vehicle; shared by multiple parts |
+| Interchange # | `interchange_number` | customer-facing identifier |
+| Fitment key | `interchange_code` | internal application lookup only |
 
-`webhook.py` closes the same loop in seconds instead of a timer interval: Shopify posts
-`orders/create`, the receiver verifies the HMAC and queues, and a worker prints a pull ticket
-and archives the sold products. It touches the source database only to *read* the bin location
-and donor vehicle for the ticket. Two constraints shape it — Shopify wants a 2xx inside ~5s
-(hence verify-queue-ack, work on a thread) and delivers at-least-once (hence the
-`X-Shopify-Webhook-Id` primary key). Order payloads are customer PII, so the queue clears the
-payload column once handled and nothing logs a body.
+Never substitute Stock # for R#. Products are keyed by the stable handle
+`<SHOPIFY_HANDLE_PREFIX>-<R#>`. Changing the prefix on a live store makes every item
+look new and duplicates the catalog.
 
-The prefix comes from `StoreProfile.handle_prefix` (`SHOPIFY_HANDLE_PREFIX`, default
-`coreyard`). It is a live storefront key, not a namespace: for any store that has already
-published, changing it makes every product look new and duplicates the catalog. Never change
-the default or an installation's configured value. `tests/test_transform.py` pins the behavior.
+`productSet` has set semantics: an omitted field is reset rather than preserved.
+`shopify_write._upsert` reads and re-sends an existing product's status so an
+incremental update does not turn an activated product back into DRAFT. New products
+default to DRAFT. Retirement zeros inventory before setting ARCHIVED and never deletes
+the product, photos, or URL.
 
-`state.product_fingerprint` hashes the `shopify_product.primary_row` output, the ordered
-image list and `interchange_code` — so changing anything in `shopify_product.py` or the image
-resolver invalidates every fingerprint and makes the next run look like a full rewrite. Weigh
-that before editing those. `state.image_fingerprint` is tracked alongside it in its own column
-so a run can tell a text edit (cheap re-upsert) from a photo change (tear down and re-upload
-the media). Rows written before that column existed read as *unknown*, not *changed*, so the
-upgrade run doesn't re-upload the whole catalog.
+That status read-back is also why retirement has to remember. A part can return to the
+yard when a work order is voided, and republishing it would re-send ARCHIVED and restore
+its stock onto a product no shopper can see. `state.SyncState` keeps the pre-archive
+status in a `retired` table — deliberately not in `parts`, which retirement clears — and
+`publish(..., revive_status=)` applies it to archived products only, so a hand-set status
+still stands. `retire(..., record_prior=)` records only a real transition; recording on an
+already-archived product would overwrite the memory with ARCHIVED and strand the part.
+The order webhook records through the same table and degrades to "don't remember" if the
+state file is unavailable, because delisting a sold part outranks remembering it.
 
-The image resolver lists the **whole share once per run** (`SmbImageStore.list_all_inventory_images`,
-~0.3 s for 35k photos) rather than once per part (26k round trips, ~54 min). This is the one
-place that enumerates the photo folder, and the reason is that "which parts gained a photo?"
-cannot be answered any other way. `--no-image-scan` skips it.
+API-sync retirement treats a missing part cautiously. `--limit` always blocks
+retirement, and removals above `--max-retire-fraction` (default 10%) require
+`--force-retire`. Failed or refused retirements retain their old state entry so the next
+run retries them. Keep `tests/test_retire.py` passing before changing these rules.
 
-## Identifier semantics (the easiest thing to get wrong)
+`state.product_fingerprint` covers rendered product content, ordered images, and the
+fitment key. Changes to `transform/shopify_product.py` or image resolution can make the
+next run rewrite the full catalog. A separate image fingerprint limits expensive media
+replacement to parts whose photo set changed. The global image resolver intentionally
+lists the share once per run; `--no-image-scan` skips change detection.
 
-| Business label | schema field | Example | Role |
-|---|---|---|---|
-| R# | `r_number` | `51` | unique, never reused → SKU, handle, photo filename stem, state key |
-| Stock # | `stock_number` | `251026` | donor vehicle; **shared by many parts** — never an identity |
-| Interchange # | `interchange_number` | `545-01883` | customer-facing |
-| Fitment key | `interchange_code` | `01883` | internal lookup only; never shown as the interchange # |
+The 2026-07 Admin API removed older product-media mutations. Current code attaches
+`FileSetInput` through `productSet`, updates alt text with `fileUpdate`, and removes
+media with `fileDelete`; these require `write_files`. Introspect the live schema before
+assuming a mutation or input field exists.
 
-`tests/test_transform.py` and `tests/test_inventory.py` pin these; keep them passing.
-Customer-facing text must never name the interchange data vendor (there's a test for that).
+## Webhook and Order Invariants
 
-## Live-server constraints
+Registration uses `ORDERS_PAID`, and the worker independently requires
+`financial_status=paid` before any side effect. The receiver verifies the raw-body HMAC
+in constant time, queues the delivery, and returns promptly; slow work happens on a
+worker. Shopify delivery is at-least-once, so the queue deduplicates on both delivery ID
+and order ID. This also protects the transition from a legacy create subscription.
 
-- **SQL reaches the server only over an SMB named pipe.** The database host exposes no SQL TCP
-  port and SMB1 is off, so `smb_tds.py` opens `\sql\query` with impacket's SMB2/3 client and
-  runs impacket's TDS engine over a socket shim. Auth is Windows/NTLM using the **SMB**
-  credentials (`SMB_USER`/`SMB_PASSWORD`, the existing service account); the DB password is unused,
-  and no SQL login exists on the installed system. A normal TCP driver will not work here.
-- **impacket's TDS quirks shape every query.** Fixed-length CHAR/NCHAR columns come back as
-  bytes and can truncate a result set, so wrap each in `RTRIM(CAST(x AS varchar(n)))` and bits
-  in `CAST(x AS int)`. SQL `NULL` arrives as the literal string `'NULL'` — always run values
-  through `_clean`/`_to_int`/`_to_decimal` in `inventory.py`.
-- **Listing scope** comes from the site's `schema.json` `scope` predicate, with
-  `Part.is_listable()` as a second guard.
-  an anchored `{R#}_*` mask (never enumerate the directory — it holds tens of thousands of
-  files). The SMB password goes into a `0600` temp auth file, never onto the command line.
+Payloads contain customer PII: never log request bodies. Queue/ticket paths are
+owner-only. Successful payloads are securely erased immediately; failed payloads remain
+only for the configured retry window, and rendered tickets have bounded retention.
+Printing, booking, and retirement errors are independent, and `orders retry` reruns only
+failed stages. Database idempotence still comes from the stored storefront order
+reference, not from webhook delivery identity.
 
-## Configuration
+Tax behavior is deliberate. When Shopify collects and remits the sale tax,
+`order_write.line_items_taxable` must remain false so later source-system recalculation
+cannot tax the same sale again. The configured customer account is for bookkeeping
+consistency, not the tax exemption mechanism. Do not change order/tax behavior without
+reviewing `schema.example.json`, `coreyard/yms/orders.py`, and `tests/test_orders.py`.
 
-`coreyard/config.py` parses `.env` itself (no python-dotenv) and never overrides real environment
-variables. `.env` is gitignored and holds the only secrets; `.env.example` documents the keys.
-`out/`, `coreyard_sync_state.sqlite3`, and fetched images are generated — don't commit them.
+## Transport Constraints
 
-## Docs
+SQL is reached through the `\\sql\\query` named pipe over SMB2/3, using the SMB
+credentials and Windows authentication. Do not replace it with a conventional TCP SQL
+driver without confirming that an installation actually exposes a listener.
 
-`README.md`, `requirements.txt`, and `.env.example` were reconciled with the code on
-2026-08-14 (they previously described a TCP SQL port, an `abm_readonly` login, `python-tds`,
-and an unfilled `inventory.py` template). Keep them that way when the transport, the extract
-scope, or the publish paths change. `AGENTS.md` holds the same repo conventions in shorter
-form; keep the two consistent.
+Impacket's TDS behavior shapes schema expressions: cast fixed-width character fields to
+trimmed `varchar`, cast bit fields to integers, and clean the literal string `NULL` in
+the extraction layer. Keep those details inside `schema.json` and `inventory.py`.
 
-Note `coreyard/config.py` does not strip trailing comments from `.env` lines, so keep comments on
-their own lines in `.env`/`.env.example`.
+Per-part photo lookups use an anchored `{R#}_*` mask so similar R#s cannot bleed into
+one another. Full sync photo-change detection enumerates the directory once and groups
+the results. `smbclient` receives credentials through a mode-0600 temporary auth file,
+never command-line arguments.
 
-Config keys are interface. `config._LEGACY_KEYS` maps renamed keys to their old names so an
-existing `.env` keeps working across an upgrade, with a one-time note on stderr. Read config
-through `config._get`, never `os.environ` directly, or the fallback is bypassed. Add to that
-map when renaming a key; don't do a hard cutover — a deployed installation would fail at the
-next timer tick with nothing but "missing required config" to go on.
+## Change Checklist
 
-**Admin API drift.** `productCreateMedia`, `productUpdateMedia` and `productDeleteMedia` no
-longer exist in the 2026-07 Admin API. Photos are attached by passing `files` (`FileSetInput`)
-to `productSet`, alt text on existing media is changed with `fileUpdate`, and media are
-removed with `fileDelete` (product media are Files now). All need the `write_files` scope — a
-token without it fails with `ACCESS_DENIED`. `InventorySetQuantitiesInput` has lost
-`ignoreCompareQuantity`; omitting `changeFromQuantity` per item is the unconditional set.
-**Introspect before assuming a mutation or field still exists** — this API sheds them steadily,
-and the introspection query in `sink/shopify_api.py`'s client makes it a 5-second check.
+Before handoff, run the full unit suite, neutrality check, and `git diff --check`.
+Explain any schema/config assumptions and any storefront-visible output changes. Call
+out changes that affect handles, fingerprints, retirement, API fields, webhook PII,
+source writes, or tax behavior. Keep `README.md`, `.env.example`, `schema.example.json`,
+`AGENTS.md`, and this file synchronized when their documented interfaces change.
