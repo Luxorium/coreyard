@@ -105,7 +105,7 @@ def _systemctl(backend: str) -> list[str]:
 def _units(task: str, seconds: int) -> tuple[str, str]:
     service = f"""[Unit]
 Description=CoreYard inventory sync
-Documentation=https://coreyard.luxorium.dev
+Documentation=https://github.com/Luxorium/coreyard
 After=network-online.target
 Wants=network-online.target
 

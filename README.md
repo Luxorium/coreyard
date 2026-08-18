@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 
-[coreyard.luxorium.dev](https://coreyard.luxorium.dev) · a [Luxorium](https://luxorium.dev) project
+A [Luxorium](https://luxorium.dev) project
 
 Publishes a salvage yard's parts inventory to **Shopify** — products, photos, fitment, and
 inventory levels, kept in sync. It reads an existing yard management system's SQL Server

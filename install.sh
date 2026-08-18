@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# CoreYard installer — https://coreyard.luxorium.dev
+# CoreYard installer — https://github.com/Luxorium/coreyard
 #
 # Sets up CoreYard on any Linux distribution:
 #   * installs the system packages it needs (Python 3 + venv/pip, smbclient)
@@ -260,4 +260,4 @@ printf '  bin/coreyard --sink csv --limit 25 --dry-run  preview 25 parts\n'
 printf '  bin/coreyard bulk --limit 50                  bulk publish as drafts\n\n'
 printf 'Tip: add it to your PATH with\n'
 printf '  ln -s "%s/bin/coreyard" ~/.local/bin/coreyard\n\n' "$REPO_DIR"
-printf 'Docs: %shttps://coreyard.luxorium.dev%s\n\n' "$C_BOLD" "$C_RESET"
+printf 'Docs: %shttps://github.com/Luxorium/coreyard%s\n\n' "$C_BOLD" "$C_RESET"
