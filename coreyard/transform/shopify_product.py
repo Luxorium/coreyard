@@ -15,6 +15,7 @@ from typing import Optional
 
 from coreyard.config import StoreProfile
 from coreyard.models import Part
+from coreyard.transform.pricing import retail_str
 
 # Shopify's product title maximum is 255 characters.
 TITLE_MAX = 255
@@ -130,7 +131,7 @@ def primary_row(part: Part, first_image_url: Optional[str], store: StoreProfile)
         "Variant Inventory Qty": str(max(part.quantity, 0)),
         "Variant Inventory Policy": "deny",   # unique salvage parts must not oversell
         "Variant Fulfillment Service": "manual",
-        "Variant Price": f"{part.price:.2f}" if part.price is not None else "",
+        "Variant Price": retail_str(part.price),
         "Variant Requires Shipping": "TRUE",
         "Variant Taxable": "TRUE",
         "Variant Weight Unit": "g" if part.weight_grams else "",

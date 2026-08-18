@@ -23,6 +23,11 @@ from coreyard.yms import schema
 from coreyard.yms.db import connect, query
 
 
+# Impacket's parser has quadratic transient allocation within each TDS reply. Some rows
+# carry much larger notes/descriptions than average, so keep enough headroom for worst cases.
+FETCH_PAGE_SIZE = 250
+
+
 
 def is_configured() -> bool:
     """True once this installation has supplied its own ``schema.json``."""
@@ -105,11 +110,41 @@ def row_to_part(row: dict[str, Any]) -> Part:
 
 
 def fetch_parts(limit: Optional[int] = None, images_only: bool = False) -> list[Part]:
-    """Connect (read-only, over the SMB named pipe) and return listable parts."""
-    sql = build_query(limit, images_only)
-    with connect() as conn:
-        rows = query(conn, sql)
-    return [p for p in (row_to_part(r) for r in rows) if p.is_listable()]
+    """Connect (read-only, over the SMB named pipe) and return listable parts.
+
+    Impacket's TDS parser materializes a whole reply and repeatedly slices its remaining
+    bytes while decoding rows. A full yard extract therefore has quadratic transient memory
+    even though the resulting ``Part`` list is small. Read bounded pages on one connection
+    so a large catalogue cannot exhaust the host.
+    """
+    mapping = schema.load()
+    maximum = int(limit) if limit else None
+    fetched_total = 0
+    after: Any = None
+    parts: list[Part] = []
+    while maximum is None or fetched_total < maximum:
+        page_size = (
+            min(FETCH_PAGE_SIZE, maximum - fetched_total)
+            if maximum else FETCH_PAGE_SIZE
+        )
+        # A fresh connection per page makes Impacket release the previous reply's token
+        # graph and byte buffers. Its named-pipe connection setup is cheap compared with
+        # retaining successive 100 MB parser allocations in one long-lived client.
+        with connect() as conn:
+            rows = query(
+                conn,
+                mapping.build_page_query(page_size, after, images_only=images_only),
+            )
+        parts.extend(p for p in (row_to_part(r) for r in rows) if p.is_listable())
+        fetched = len(rows)
+        if fetched < page_size:
+            break
+        next_after = rows[-1].get("r_number")
+        if next_after is None or str(next_after) == str(after):
+            raise RuntimeError("inventory paging did not advance past the last R#")
+        after = next_after
+        fetched_total += fetched
+    return parts
 
 
 def fetch_parts_by_r_number(r_numbers: list[str]) -> dict[str, Part]:

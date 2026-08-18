@@ -133,6 +133,21 @@ command -v smbclient >/dev/null 2>&1 \
     && ok "smbclient present" \
     || warn "smbclient not found — photo fetching will fail until it is installed"
 
+if command -v lp >/dev/null 2>&1; then
+    ok "CUPS client present (optional pull-ticket printing)"
+else
+    warn "CUPS 'lp' not found — install a CUPS client before enabling ticket printing"
+fi
+if command -v chromium >/dev/null 2>&1 \
+   || command -v chromium-browser >/dev/null 2>&1 \
+   || command -v google-chrome >/dev/null 2>&1 \
+   || command -v google-chrome-stable >/dev/null 2>&1 \
+   || command -v brave-browser >/dev/null 2>&1; then
+    ok "Chromium-compatible browser present (optional pull-ticket rendering)"
+else
+    warn "no Chromium-compatible browser found — pull-ticket printing will be unavailable"
+fi
+
 # ----------------------------------------------------------------- venv -----
 step "Creating the virtualenv"
 if [ -d "$VENV_DIR" ]; then
@@ -196,7 +211,7 @@ cat > "$REPO_DIR/bin/coreyard" <<'LAUNCHER'
 #   coreyard bulk   [args]   resumable bulk publish
 #   coreyard oauth           exchange client id/secret for an admin token
 #   coreyard altfix [args]   backfill alt text onto existing product photos
-#   coreyard orders [args]   order webhook: serve / register / replay / status
+#   coreyard orders [args]   paid-order webhook: serve / register / retry / replay / status
 #   coreyard images  <R#>    list/fetch one part's photos
 #   coreyard schema          re-dump the source database schema
 set -euo pipefail

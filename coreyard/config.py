@@ -1,8 +1,8 @@
 """Configuration loading.
 
 Reads a local ``.env`` file (never committed) plus real environment variables, with a
-tiny dependency-free parser so the pipeline runs on a bare Python install. Secrets — the
-read-only SQL password and the SMB password — live only in ``.env``/the environment.
+tiny dependency-free parser so the pipeline runs on a bare Python install. Secrets and
+site-specific settings live only in ``.env``/the environment.
 """
 
 from __future__ import annotations

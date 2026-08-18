@@ -57,6 +57,17 @@ class ScopedQuery(unittest.TestCase):
         with self.assertRaises(SchemaError):
             SourceSchema.from_dict({"select": {"r_number": "x"}, "source": "t", "scope": "1=1"})
 
+    def test_bounded_page_uses_stable_identity_cursor(self):
+        sql = MAPPING.build_page_query(1000, after="A'2000", images_only=True)
+        self.assertIn("SELECT TOP 1000", sql)
+        self.assertIn("AND i.HasPhotos = 1", sql)
+        self.assertIn("AND i.PartId > N'A''2000'", sql)
+        self.assertIn("ORDER BY i.PartId", sql)
+
+    def test_bounded_page_rejects_invalid_bounds(self):
+        with self.assertRaises(ValueError):
+            MAPPING.build_page_query(0)
+
 
 if __name__ == "__main__":
     unittest.main()

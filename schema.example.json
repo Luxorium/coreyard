@@ -5,8 +5,7 @@
     "Run `python -m coreyard.yms.discover_schema` to list your tables and columns.",
     "Keys starting with _ are ignored, since JSON has no comments."
   ],
-
-  "_select": "Output field -> SQL expression. r_number, part_type and price are required. Wrap fixed-length CHAR/NCHAR columns in RTRIM(CAST(x AS varchar(n))) and bits in CAST(x AS int) — see README 'Driver quirks'.",
+  "_select": "Output field -> SQL expression. r_number, part_type and price are required. Wrap fixed-length CHAR/NCHAR columns in RTRIM(CAST(x AS varchar(n))) and bits in CAST(x AS int) \u2014 see README 'Driver quirks'.",
   "select": {
     "r_number": "i.PART_ID_COLUMN",
     "part_type_code": "i.PART_TYPE_CODE_COLUMN",
@@ -27,27 +26,90 @@
     "location": "RTRIM(CAST(i.BIN_LOCATION_COLUMN AS varchar(9)))",
     "has_images": "CAST(i.HAS_PHOTOS_FLAG_COLUMN AS int)"
   },
-
   "_source": "FROM clause plus any joins needed to resolve make/model/part-type names.",
   "source": "dbo.PARTS_TABLE i\n    LEFT JOIN dbo.PART_TYPE_TABLE pt ON i.PART_TYPE_CODE_COLUMN = pt.PART_TYPE_CODE_COLUMN\n    LEFT JOIN dbo.MODEL_TABLE  ml ON i.MODEL_YEAR_COLUMN = ml.MODEL_YEAR_COLUMN\n    LEFT JOIN dbo.MAKE_TABLE   mk ON ml.MAKE_CODE_COLUMN = mk.MAKE_CODE_COLUMN",
-
   "_scope": [
     "Which rows are publishable. Keep it conservative: priced, in stock, not blocked.",
     "Exclude parts on an open work order too. A part being pulled for a sale is still priced",
     "and still in stock, so without this it stays on the storefront and can be sold twice.",
     "Dropping out of scope is what makes CoreYard retire the listing, so this predicate is",
-    "the delisting rule — add the NOT EXISTS clause below, adjusted to your own tables:",
+    "the delisting rule \u2014 add the NOT EXISTS clause below, adjusted to your own tables:",
     "  AND NOT EXISTS (SELECT 1 FROM dbo.WORKORDER_LINE_TABLE w",
     "                  JOIN dbo.WORKORDER_TABLE o ON w.ORDER_ID_COLUMN = o.ORDER_ID_COLUMN",
     "                  WHERE w.PART_ID_COLUMN = i.PART_ID_COLUMN",
     "                    AND o.ORDER_STATUS_COLUMN IN ('OPEN','PICKING'))"
   ],
   "scope": "i.PRICE_COLUMN > 0 AND i.QUANTITY_COLUMN > 0 AND i.BLOCK_ONLINE_FLAG = 0",
-
   "images_filter": "i.HAS_PHOTOS_FLAG_COLUMN = 1",
   "order_by": "i.PART_ID_COLUMN",
-
-  "_interchange": "Optional. Omit both if your system has no fitment catalogue — listings then fall back to the donor vehicle only. {part_type_code} and {interchange_code} are substituted per part.",
+  "_interchange": "Optional. Omit both if your system has no fitment catalogue \u2014 listings then fall back to the donor vehicle only. {part_type_code} and {interchange_code} are substituted per part.",
   "interchange_makes": "SELECT DISTINCT UPPER(RTRIM(CAST(c.MODEL_NAME_COLUMN AS varchar(30)))) model, RTRIM(CAST(m.MAKE_NAME_COLUMN AS varchar(100))) make FROM CATALOG_DB.dbo.MODEL_TABLE c JOIN dbo.MAKE_TABLE m ON c.MAKE_CODE_COLUMN = m.MAKE_CODE_COLUMN WHERE c.MODEL_NAME_COLUMN IS NOT NULL",
-  "interchange_applications": "SELECT RTRIM(CAST(a.APPLICATION_TEXT_COLUMN AS varchar(255))) app FROM CATALOG_DB.dbo.APPLICATION_TABLE a WHERE RTRIM(CAST(a.PART_TYPE_COLUMN AS varchar(3)))='{part_type_code}' AND RTRIM(CAST(a.FITMENT_KEY_COLUMN AS varchar(5)))='{interchange_code}' ORDER BY a.SEQUENCE_COLUMN"
+  "interchange_applications": "SELECT RTRIM(CAST(a.APPLICATION_TEXT_COLUMN AS varchar(255))) app FROM CATALOG_DB.dbo.APPLICATION_TABLE a WHERE RTRIM(CAST(a.PART_TYPE_COLUMN AS varchar(3)))='{part_type_code}' AND RTRIM(CAST(a.FITMENT_KEY_COLUMN AS varchar(5)))='{interchange_code}' ORDER BY a.SEQUENCE_COLUMN",
+  "_order_write": [
+    "OPTIONAL. Omit this whole section and CoreYard can never write to your database;",
+    "that is the default and the safe choice until you have observed your own schema.",
+    "",
+    "It turns a storefront sale into an order in your yard system. Only fill it in after",
+    "confirming, against your own database, how your application allocates ids and what a",
+    "real e-commerce order looks like. Most systems of this kind have NO identity columns",
+    "and NO foreign keys: ids come from counter tables and integrity is enforced by the",
+    "application, so nothing implicit will fix a mistake here.",
+    "",
+    "CoreYard owns the transaction, the ordering and the guards (single transaction,",
+    "XACT_ABORT, atomic id allocation, refuse-if-id-exists, quantity floor, exactly-one-row",
+    "check). You own the names. Each fragment below is one statement.",
+    "",
+    "Fragments MUST reference these declared variables and MUST NOT interpolate values",
+    "themselves \u2014 CoreYard quotes and length-limits every buyer-supplied string, and a",
+    "fragment that builds its own literal reopens SQL injection from a shipping address:",
+    "  order:  @order_ref @customer @account @employee @store @yard @amount @parts_total",
+    "          @freight @discount @note @ship_via @taxable @recalc_tax @apply_rate",
+    "          @ship_name @ship_addr1 @ship_addr2 @ship_city @ship_state @ship_zip",
+    "          @ship_ctry @ship_phone @ship_email",
+    "          @bill_name @bill_addr1 @bill_addr2 @bill_city @bill_state @bill_zip",
+    "          @bill_ctry @bill_phone @bill_email",
+    "  filled: @order_id @order_number @li_id @audit_id @oldqty",
+    "  line:   @li_rnum @li_qty @li_price @li_sub @li_total @li_desc @li_intch",
+    "          @li_year @li_model @li_notes",
+    "",
+    "TAX. line_items_taxable is the decisive flag: a non-taxable line computes no tax even",
+    "if somebody later triggers a recalculation in your application. Leave it false when",
+    "your storefront collects and remits sales tax itself, or the same sale is taxed twice.",
+    "These three settings must be JSON booleans (false/true), never quoted strings.",
+    "Do not assume a customer account can carry the exemption \u2014 check whether your customer",
+    "table even has such a column before relying on one."
+  ],
+  "order_write": {
+    "_defaults": "Which store/yard/customer/employee an online sale is booked against. Match whatever your system's own e-commerce integration already uses, so online orders land in one place rather than a second one.",
+    "defaults": {
+      "store": 1,
+      "yard": 1,
+      "customer": "ECOMMERCE_CUSTOMER_NUMBER",
+      "account": "ACCOUNT_NUMBER",
+      "employee": 0
+    },
+    "line_items_taxable": false,
+    "recalculate_taxes": false,
+    "apply_customer_tax_rate": false,
+    "_duplicate_check": "MUST set @existing from the order reference. This is the idempotence guard: webhooks are delivered at least once, and without it a redelivery books and bills the sale twice.",
+    "duplicate_check": "SELECT @existing = MAX(ORDER_NUMBER_COLUMN)\n  FROM dbo.ORDER_TABLE WITH (UPDLOCK, HOLDLOCK)\n WHERE EXTERNAL_REFERENCE_COLUMN = @order_ref",
+    "_counters": "Each MUST allocate in ONE statement with OUTPUT ... INTO @out. A SELECT then UPDATE races your application, which allocates from these same rows, and hands out an order number somebody else is already using.",
+    "counter_order_id": "UPDATE dbo.COUNTER_TABLE WITH (UPDLOCK, ROWLOCK)\n   SET CounterValue = CounterValue + Increment\nOUTPUT INSERTED.CounterValue INTO @out\n WHERE TableName = 'ORDER_TABLE' AND CounterName = 'ORDER_ID_COLUMN'",
+    "counter_order_number": "UPDATE dbo.PER_STORE_COUNTER_TABLE WITH (UPDLOCK, ROWLOCK)\n   SET CounterValue = CounterValue + Increment\nOUTPUT INSERTED.CounterValue INTO @out\n WHERE TableName = 'ORDER_TABLE' AND CounterName = 'ORDER_NUMBER_COLUMN'\n   AND StoreNumber = @store AND YardNumber = @yard",
+    "counter_line_id": "UPDATE dbo.COUNTER_TABLE WITH (UPDLOCK, ROWLOCK)\n   SET CounterValue = CounterValue + Increment\nOUTPUT INSERTED.CounterValue INTO @out\n WHERE TableName = 'ORDER_LINE_TABLE' AND CounterName = 'LINE_ID_COLUMN'",
+    "counter_audit_id": "UPDATE dbo.COUNTER_TABLE WITH (UPDLOCK, ROWLOCK)\n   SET CounterValue = CounterValue + Increment\nOUTPUT INSERTED.CounterValue INTO @out\n WHERE TableName = 'AUDIT_TABLE' AND CounterName = 'AUDIT_ID_COLUMN'",
+    "_exists": "CoreYard wraps each in IF EXISTS (...) and aborts if an allocated id is already in use \u2014 a counter that drifted must fail, not overwrite an order.",
+    "exists_order_id": "SELECT 1 FROM dbo.ORDER_TABLE WHERE ORDER_ID_COLUMN = @order_id",
+    "exists_order_number": "SELECT 1 FROM dbo.ORDER_TABLE WHERE ORDER_NUMBER_COLUMN = @order_number",
+    "exists_line_id": "SELECT 1 FROM dbo.ORDER_LINE_TABLE WHERE LINE_ID_COLUMN = @li_id",
+    "_header_insert": "The order header. Put @order_ref somewhere durable and searchable (a customer-PO or external-reference column): it is both the duplicate guard and how a person matches this to the storefront. Map every ship-to and bill-to column your table has \u2014 a storefront order really does carry both, and they are often different people. Check where your application puts the buyer's NAME: some put it in a business-name column and leave the contact-name column empty, so look at a real order before choosing.",
+    "header_insert": "INSERT dbo.ORDER_TABLE\n  (ORDER_ID_COLUMN, STORE_COLUMN, REVISION_COLUMN, YARD_COLUMN,\n   ORDER_NUMBER_COLUMN, ACCOUNT_COLUMN, CUSTOMER_COLUMN, CREATED_BY_COLUMN,\n   CREATED_DATE_COLUMN, ORDER_STATUS_COLUMN, NOTES_COLUMN, AMOUNT_COLUMN,\n   IS_LAST_REVISION_COLUMN, PARTS_TOTAL_COLUMN, EXTERNAL_REFERENCE_COLUMN,\n   APPLY_CUSTOMER_TAX_RATE_COLUMN, RECALCULATE_TAXES_COLUMN,\n   FREIGHT_TOTAL_COLUMN, DISCOUNT_TOTAL_COLUMN, SHIP_METHOD_COLUMN,\n   SHIP_NAME_COLUMN, SHIP_BUSINESS_NAME_COLUMN, SHIP_ADDRESS1_COLUMN,\n   SHIP_ADDRESS2_COLUMN, SHIP_CITY_COLUMN, SHIP_STATE_COLUMN,\n   SHIP_POSTAL_COLUMN, SHIP_COUNTRY_COLUMN, SHIP_PHONE_COLUMN, SHIP_EMAIL_COLUMN,\n   BILL_BUSINESS_NAME_COLUMN, BILL_ADDRESS1_COLUMN, BILL_ADDRESS2_COLUMN,\n   BILL_CITY_COLUMN, BILL_STATE_COLUMN, BILL_POSTAL_COLUMN, BILL_COUNTRY_COLUMN,\n   BILL_PHONE_COLUMN, BILL_EMAIL_COLUMN)\nVALUES\n  (@order_id, @store, 0, @yard,\n   @order_number, @account, @customer, @employee,\n   GETDATE(), 'OPEN_STATUS_CODE', @note, @amount,\n   1, @parts_total, @order_ref,\n   @apply_rate, @recalc_tax,\n   @freight, @discount, @ship_via,\n   @ship_name, @ship_name, @ship_addr1,\n   @ship_addr2, @ship_city, @ship_state,\n   @ship_zip, @ship_ctry, @ship_phone, @ship_email,\n   @bill_name, @bill_addr1, @bill_addr2,\n   @bill_city, @bill_state, @bill_zip, @bill_ctry,\n   @bill_phone, @bill_email)",
+    "_line_insert": "Emitted once per part. @li_desc is your part-type wording, not the storefront title \u2014 description columns here are usually ~20 chars \u2014 so @li_notes carries the full storefront title where there is room for it. @li_year/@li_model describe the DONOR vehicle, read from your own inventory row, not the buyer's car.",
+    "line_insert": "INSERT dbo.ORDER_LINE_TABLE\n  (LINE_ID_COLUMN, ORDER_ID_COLUMN, REVISION_COLUMN, LINE_STATUS_COLUMN,\n   PART_ID_COLUMN, INTERCHANGE_NUMBER_COLUMN, LINE_DESCRIPTION_COLUMN,\n   QUANTITY_COLUMN, QUANTITY_RESERVED_COLUMN, UNIT_PRICE_COLUMN,\n   LINE_SUBTOTAL_COLUMN, LINE_TOTAL_COLUMN, LINE_DISCOUNT_COLUMN,\n   DONOR_MODEL_YEAR_COLUMN, DONOR_MODEL_NAME_COLUMN, LINE_NOTES_COLUMN,\n   IS_TAXABLE_COLUMN)\nVALUES\n  (@li_id, @order_id, 0, 'OPEN_STATUS_CODE',\n   @li_rnum, @li_intch, @li_desc,\n   @li_qty, @li_qty, @li_price,\n   @li_sub, @li_total, @li_sub - @li_total,\n   @li_year, @li_model, @li_notes, @taxable)",
+    "_inventory": "Taking the part off the shelf is what actually delists it \u2014 CoreYard's scope predicate stops matching, and the next sync retires the listing. inventory_take MUST carry the quantity floor: it is checked for exactly one affected row, so an oversell fails loudly instead of going negative.",
+    "inventory_read": "SELECT @oldqty = QUANTITY_COLUMN\n  FROM dbo.PARTS_TABLE WITH (UPDLOCK)\n WHERE PART_ID_COLUMN = @li_rnum",
+    "inventory_take": "UPDATE dbo.PARTS_TABLE\n   SET QUANTITY_COLUMN = QUANTITY_COLUMN - @li_qty\n WHERE PART_ID_COLUMN = @li_rnum AND QUANTITY_COLUMN >= @li_qty",
+    "_audit_insert": "Record the availability change the way your application records it, so the yard's own audit history stays truthful. Check first whether your application audits order creation \u2014 if it does not, do not.",
+    "audit_insert": "INSERT dbo.AUDIT_TABLE\n  (AUDIT_ID_COLUMN, AUDIT_DATE_COLUMN, EMPLOYEE_COLUMN, EVENT_TYPE_COLUMN,\n   KEY_COLUMN, TABLE_NAME_COLUMN, COLUMN_NAME_COLUMN, OLD_VALUE_COLUMN,\n   NEW_VALUE_COLUMN)\nVALUES\n  (@audit_id, GETDATE(), @employee, 'U',\n   CAST(@li_rnum AS varchar(10)), 'PARTS_TABLE', 'QUANTITY_COLUMN',\n   CAST(@oldqty AS varchar(10)), CAST(@oldqty - @li_qty AS varchar(10)))"
+  }
 }

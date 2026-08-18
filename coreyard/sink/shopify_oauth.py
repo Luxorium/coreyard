@@ -49,17 +49,18 @@ class _DualStackServer(HTTPServer):
             pass
         HTTPServer.server_bind(self)
 
-from coreyard.config import ENV_PATH, REPO_ROOT, load_env
+from coreyard.config import ENV_PATH, REPO_ROOT, _get, load_env
 
 DEFAULT_REDIRECT = "http://localhost:3456/callback"
-# read/write_files is what lets the publisher attach photos (productSet `files`) and set
-# their alt text (fileUpdate). Without it Shopify answers ACCESS_DENIED. Changing this list
-# has no effect on an existing token — the app must be re-authorized to mint a new one.
+# read/write_files lets the publisher attach photos and set their alt text; read_orders lets
+# the app subscribe to paid-order webhooks. Without them Shopify answers ACCESS_DENIED.
+# Changing this list has no effect on an existing token: re-authorize to mint a new one.
 DEFAULT_SCOPES = (
     "read_products,write_products,"
     "read_inventory,write_inventory,"
     "read_locations,"
-    "read_files,write_files"
+    "read_files,write_files,"
+    "read_orders"
 )
 
 _result: dict[str, str] = {}
@@ -105,12 +106,12 @@ def _upsert_env(key: str, value: str) -> None:
 
 def main() -> int:
     load_env()
-    store = os.environ.get("SHOPIFY_STORE", "").strip()
-    client_id = os.environ.get("SHOPIFY_CLIENT_ID", "").strip()
-    client_secret = os.environ.get("SHOPIFY_CLIENT_SECRET", "").strip()
-    scopes = os.environ.get("SHOPIFY_SCOPES", DEFAULT_SCOPES).strip()
-    redirect = os.environ.get("SHOPIFY_OAUTH_REDIRECT", DEFAULT_REDIRECT).strip()
-    timeout = int(os.environ.get("SHOPIFY_OAUTH_TIMEOUT", "600"))
+    store = (_get("SHOPIFY_STORE", "") or "").strip()
+    client_id = (_get("SHOPIFY_CLIENT_ID", "") or "").strip()
+    client_secret = (_get("SHOPIFY_CLIENT_SECRET", "") or "").strip()
+    scopes = (_get("SHOPIFY_SCOPES", DEFAULT_SCOPES) or DEFAULT_SCOPES).strip()
+    redirect = (_get("SHOPIFY_OAUTH_REDIRECT", DEFAULT_REDIRECT) or DEFAULT_REDIRECT).strip()
+    timeout = int(_get("SHOPIFY_OAUTH_TIMEOUT", "600") or "600")
 
     missing = [k for k, v in {
         "SHOPIFY_STORE": store,

@@ -11,16 +11,19 @@ shim. Windows Authentication (NTLM) happens at the TDS layer, exactly as the ins
 
 from __future__ import annotations
 
-import os
 import sys
 from typing import Any
 
 from impacket import tds
 from impacket.smbconnection import SMBConnection
 
+from coreyard.config import _get
+
 DEFAULT_PIPE = r"sql\query"          # default instance; named instance = MSSQL$NAME\sql\query
 _READ_CHUNK = 65535                   # one SMB2 READ returns one whole TDS packet/message
-_DEBUG = bool(os.environ.get("COREYARD_SMB_DEBUG"))
+_DEBUG = (_get("COREYARD_SMB_DEBUG", "") or "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
 
 
 class _PipeSocket:

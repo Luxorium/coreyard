@@ -6,9 +6,10 @@ schema, so the fixture below stands in for one.
 
 import unittest
 from decimal import Decimal
+from unittest.mock import MagicMock, patch
 
 from coreyard.yms import schema
-from coreyard.yms.inventory import _clean_note, row_to_part
+from coreyard.yms.inventory import FETCH_PAGE_SIZE, _clean_note, fetch_parts, row_to_part
 
 FIXTURE = {
     "select": {
@@ -95,6 +96,49 @@ class NoteCleaning(unittest.TestCase):
     def test_empty_and_null_become_none(self):
         self.assertIsNone(_clean_note(""))
         self.assertIsNone(_clean_note("NULL"))
+
+
+class PagedFetch(unittest.TestCase):
+    @patch("coreyard.yms.inventory.query")
+    @patch("coreyard.yms.inventory.connect")
+    @patch("coreyard.yms.inventory.schema.load")
+    def test_full_extract_reads_bounded_pages(self, load, connect, run_query):
+        mapping = load.return_value
+        mapping.build_page_query.side_effect = lambda size, after, **_: f"page:{after}:{size}"
+        connect.return_value.__enter__.return_value = MagicMock()
+        row = {"r_number": "1", "part_type": "Engine", "price": "10.00"}
+        run_query.side_effect = [
+            [row] * FETCH_PAGE_SIZE,
+            [{**row, "r_number": "2"}],
+        ]
+
+        parts = fetch_parts()
+
+        self.assertEqual(len(parts), FETCH_PAGE_SIZE + 1)
+        self.assertEqual(
+            [call.args[1] for call in run_query.call_args_list],
+            [f"page:None:{FETCH_PAGE_SIZE}", f"page:1:{FETCH_PAGE_SIZE}"],
+        )
+        self.assertEqual(connect.call_count, 2)
+
+    @patch("coreyard.yms.inventory.query")
+    @patch("coreyard.yms.inventory.connect")
+    @patch("coreyard.yms.inventory.schema.load")
+    def test_limit_caps_the_last_page(self, load, connect, run_query):
+        mapping = load.return_value
+        mapping.build_page_query.side_effect = lambda size, after, **_: f"page:{after}:{size}"
+        connect.return_value.__enter__.return_value = MagicMock()
+        row = {"r_number": "1", "part_type": "Engine", "price": "10.00"}
+        next_row = {**row, "r_number": "2"}
+        run_query.side_effect = [[row] * FETCH_PAGE_SIZE, [next_row] * 250]
+
+        limit = FETCH_PAGE_SIZE + 250
+        self.assertEqual(len(fetch_parts(limit=limit)), limit)
+        self.assertEqual(
+            [call.args[1] for call in run_query.call_args_list],
+            [f"page:None:{FETCH_PAGE_SIZE}", "page:1:250"],
+        )
+        self.assertEqual(connect.call_count, 2)
 
 
 if __name__ == "__main__":

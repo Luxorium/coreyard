@@ -6,7 +6,10 @@ existing service account and running TDS over it with Windows
 Authentication. This is the vendor-endorsed "ODBC + Windows Auth" path, just from Linux.
 Auth uses the SMB credentials; no separate SQL login exists on the installed system.
 
-Everything here issues SELECT only.
+Everything here issues SELECT only, and ``query`` must not be reused for a write: impacket
+reports server errors as reply tokens rather than raising, so a failed statement is
+indistinguishable from one that returned no rows. The single write path, ``yms/orders.py``,
+carries its own strict executor for that reason.
 """
 
 from __future__ import annotations

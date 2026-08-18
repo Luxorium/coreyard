@@ -15,40 +15,41 @@ than duplicates. Network calls are guarded so the module imports without credent
 
 from __future__ import annotations
 
-import os
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from coreyard.config import StoreProfile
+from coreyard.config import StoreProfile, _get, load_env
 from coreyard.models import Part
 from coreyard.transform import seo
+from coreyard.transform.pricing import retail_str
 from coreyard.transform.shopify_product import handle_for
 
-API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2026-07")
+DEFAULT_API_VERSION = "2026-07"
 
 
 @dataclass(frozen=True)
 class ShopifyCreds:
     store: str          # your-store.myshopify.com
     token: str          # shpat_...
+    api_version: str = DEFAULT_API_VERSION
 
     @property
     def endpoint(self) -> str:
-        return f"https://{self.store}/admin/api/{API_VERSION}/graphql.json"
+        return f"https://{self.store}/admin/api/{self.api_version}/graphql.json"
 
 
 def load_creds() -> ShopifyCreds:
-    from coreyard.config import load_env
-
     load_env()
-    store = os.environ.get("SHOPIFY_STORE", "").strip()
-    token = os.environ.get("SHOPIFY_ADMIN_TOKEN", "").strip()
+    store = (_get("SHOPIFY_STORE", "") or "").strip()
+    token = (_get("SHOPIFY_ADMIN_TOKEN", "") or "").strip()
+    api_version = (_get("SHOPIFY_API_VERSION", DEFAULT_API_VERSION)
+                   or DEFAULT_API_VERSION).strip()
     if not store or not token:
         raise RuntimeError(
             "Set SHOPIFY_STORE and SHOPIFY_ADMIN_TOKEN in .env to use the Admin API sink."
         )
-    return ShopifyCreds(store=store, token=token)
+    return ShopifyCreds(store=store, token=token, api_version=api_version)
 
 
 class ShopifyClient:
@@ -141,7 +142,7 @@ def part_to_product_set_input(
         "variants": [
             {
                 "sku": part.r_number,
-                "price": f"{part.price:.2f}" if part.price is not None else "0.00",
+                "price": retail_str(part.price, default="0.00"),
                 "inventoryPolicy": "DENY",
                 "optionValues": [{"optionName": "Title", "name": "Default Title"}],
             }
