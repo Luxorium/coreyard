@@ -18,9 +18,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from coreyard.config import StoreProfile
+from coreyard.config import REPO_ROOT, StoreProfile
 from coreyard.models import Part
 from coreyard.transform.shopify_product import primary_row
+
+# Named here rather than in the sync orchestrator because the order webhook also needs to
+# reach the retirement memory, and importing the whole sync path to learn a filename would
+# drag the extract layer into a service that must start without a database.
+DEFAULT_STATE_DB = REPO_ROOT / "coreyard_sync_state.sqlite3"
 
 
 def product_fingerprint(part: Part, image_urls: list[str], store: StoreProfile) -> str:
@@ -69,12 +74,25 @@ class SyncState:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        # The order webhook records retirements too, and it runs as its own long-lived
+        # service, so two processes can reach for this file at once. Wait for the lock
+        # instead of failing the write that remembers how to bring a part back.
+        self.conn = sqlite3.connect(db_path, timeout=30)
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS parts ("
             " r_number TEXT PRIMARY KEY,"
             " fingerprint TEXT NOT NULL,"
             " last_seen TEXT NOT NULL)"
+        )
+        # Retirement drops a part from `parts` entirely, so the status it had before being
+        # archived has to be kept somewhere that survives that. Without it a part that
+        # returns to the yard (a voided work order) is republished onto the archived
+        # product, which re-sends ARCHIVED and leaves the part unbuyable forever.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS retired ("
+            " r_number TEXT PRIMARY KEY,"
+            " status TEXT NOT NULL,"
+            " retired_at TEXT NOT NULL)"
         )
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(parts)")}
         if "stock" in columns and "r_number" not in columns:
@@ -144,6 +162,37 @@ class SyncState:
                     result.removed, result.image_changed):
             lst.sort()
         return result
+
+    # -- retirement memory ---------------------------------------------------
+    def record_retired(self, r_number: str, status: str) -> None:
+        """Remember the status a product held just before it was archived.
+
+        Called only on a real transition, never when a product is already archived, so a
+        repeated retirement of the same part cannot overwrite the answer with ARCHIVED.
+        """
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO retired(r_number, status, retired_at)"
+                " VALUES (?,?,?)",
+                (str(r_number), str(status), datetime.now(timezone.utc).isoformat()),
+            )
+
+    def retired_statuses(self) -> dict[str, str]:
+        """Every remembered pre-retirement status, keyed by R#."""
+        return {
+            r_number: status
+            for r_number, status in self.conn.execute(
+                "SELECT r_number, status FROM retired"
+            )
+        }
+
+    def clear_retired(self, r_numbers: Iterable[str]) -> None:
+        """Forget parts that are back on sale; the memory is only for archived ones."""
+        keys = [(str(r),) for r in r_numbers]
+        if not keys:
+            return
+        with self.conn:
+            self.conn.executemany("DELETE FROM retired WHERE r_number = ?", keys)
 
     def commit(self, current: dict[str, str], images: dict[str, str] | None = None) -> None:
         """Replace the snapshot with the current set (removes vanished R#s)."""

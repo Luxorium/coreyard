@@ -17,10 +17,10 @@ import sys
 from pathlib import Path
 
 from coreyard.config import REPO_ROOT, load_settings
-from coreyard.state import SyncState, fingerprints_with_images
+from coreyard.state import DEFAULT_STATE_DB, SyncState, fingerprints_with_images
 from coreyard.transform.shopify_csv import ImageResolver
 
-STATE_DB = REPO_ROOT / "coreyard_sync_state.sqlite3"
+STATE_DB = DEFAULT_STATE_DB
 DEFAULT_CSV = REPO_ROOT / "out" / "products.csv"
 
 
@@ -147,6 +147,13 @@ def cmd_sync(args) -> int:
             print(why)
 
         retired: set[str] = set()
+        # Parts that were archived and are listable again — a voided work order puts one
+        # back in the yard. They come back as whatever they were before, not as ARCHIVED
+        # (which the status read-back would otherwise re-send) and not as DRAFT (which
+        # would hide a product that was on sale).
+        revivals = {r: s for r, s in state.retired_statuses().items() if r in current}
+        if revivals:
+            print(f"  {len(revivals)} archived part(s) are back in the yard.")
 
         if args.sink == "csv":
             from coreyard.sink.csv_sink import write
@@ -164,7 +171,8 @@ def cmd_sync(args) -> int:
             # "as a preview" is not.
             upserts = 0 if args.retire_only else len(diff.added) + len(diff.changed)
             print(f"Dry run: would upsert {upserts} product(s) "
-                  f"({0 if args.retire_only else len(diff.image_changed)} photo refresh) "
+                  f"({0 if args.retire_only else len(diff.image_changed)} photo refresh), "
+                  f"revive {0 if args.retire_only else len(revivals)}, "
                   f"and retire {len(retire)}.")
         else:  # api
             todo = [p for p in parts if p.uid() in set(diff.added) | set(diff.changed)]
@@ -186,16 +194,23 @@ def cmd_sync(args) -> int:
                 todo = []
             print(f"Upserting {len(todo)} new/changed products to Shopify "
                   f"({len(needs_photos & {p.uid() for p in todo})} with changed photos) ...")
+            revived: set[str] = set()
             for i, part in enumerate(todo, 1):
-                publisher.publish(part, refresh_images=part.uid() in needs_photos)
+                publisher.publish(part, refresh_images=part.uid() in needs_photos,
+                                  revive_status=revivals.get(part.uid()))
+                if part.uid() in revivals:
+                    revived.add(part.uid())
                 if i % 25 == 0 or i == len(todo):
                     print(f"  {i}/{len(todo)}")
+            # Only after the upsert landed: a part whose revival failed must still be
+            # remembered, or the retry would republish it as ARCHIVED.
+            state.clear_retired(revived)
 
             if retire:
                 print(f"Retiring {len(retire)} sold part(s) (qty 0, {publisher.retire_status}) ...")
                 for i, r_number in enumerate(retire, 1):
                     try:
-                        publisher.retire(r_number)
+                        publisher.retire(r_number, record_prior=state.record_retired)
                         retired.add(r_number)
                     except RuntimeError as exc:
                         # One stubborn product must not strand the rest, and an R# that was

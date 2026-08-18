@@ -12,6 +12,7 @@ from __future__ import annotations
 import mimetypes
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -31,8 +32,11 @@ _RETIRE_FIND = """query($h:String!){ productByIdentifier(identifier:{handle:$h})
 _PRODUCT_UPDATE = """mutation($input:ProductUpdateInput!){ productUpdate(product:$input){
   product{ id status } userErrors{ field message } } }"""
 
-_SET_QUANTITIES = """mutation($input:InventorySetQuantitiesInput!){
-  inventorySetQuantities(input:$input){ userErrors{ field message } } }"""
+_SET_QUANTITIES = """mutation($input:InventorySetQuantitiesInput!,$idempotencyKey:String!){
+  inventorySetQuantities(input:$input) @idempotent(key:$idempotencyKey){
+    userErrors{ field message }
+  }
+}"""
 
 # productDeleteMedia went the way of productCreateMedia/productUpdateMedia in 2026-07.
 # Product media are Files now, so they are removed with fileDelete.
@@ -164,7 +168,8 @@ class ShopifyPublisher:
             ]
 
     # -- orchestration ------------------------------------------------------
-    def publish(self, part: Part, refresh_images: bool = False) -> tuple[str, int]:
+    def publish(self, part: Part, refresh_images: bool = False,
+                revive_status: Optional[str] = None) -> tuple[str, int]:
         """Create/update one part; returns (product_id, images_added).
 
         Photos are staged before the upsert so productSet can attach them in the same call.
@@ -173,8 +178,16 @@ class ShopifyPublisher:
         ``refresh_images`` is for the case the state diff says this part's photo set changed
         on the share: the old media are deleted and the current set re-uploaded. It costs a
         full re-upload, so callers should pass it only on a detected change, never blanket.
+
+        ``revive_status`` is the status this product held before it was retired. A part can
+        come back — a voided work order returns it to the yard — and the status read-back
+        that stops a sync from un-publishing a live product would otherwise re-send
+        ARCHIVED, restoring the part's stock onto a product no shopper can see. It is
+        applied only to an archived product, so it can never override a hand-set status.
         """
         product_id, media_ids, status = self._find(handle_for(part, self.store))
+        if revive_status and status == self.retire_status:
+            status = revive_status
         if refresh_images and media_ids:
             res = self.client.graphql(_DELETE_FILES, {"ids": media_ids})["fileDelete"]
             if res["userErrors"]:
@@ -208,7 +221,7 @@ class ShopifyPublisher:
                 return found
             cursor = page["pageInfo"]["endCursor"]
 
-    def retire(self, r_number: str) -> str:
+    def retire(self, r_number: str, record_prior=None) -> str:
         """Take a sold part off sale: zero its inventory, then set the retire status.
 
         Returns one of "retired", "already", or "absent". Inventory is zeroed *before* the
@@ -216,6 +229,12 @@ class ShopifyPublisher:
         than visible with stock. Retiring is deliberately not a delete: the product, its
         photos and its URL stay put, so an existing link or search result lands on a real
         page instead of a 404, and the part can be revived if it comes back.
+
+        ``record_prior`` is called with (R#, status) for a product that is actually being
+        archived now, so a caller holding the sync state can put the part back the way it
+        was if it returns. It is deliberately not called for a product that is already
+        archived: re-retiring a part must not overwrite the remembered status with
+        ARCHIVED and strand it.
         """
         # Built through handle_for, not by hand: the slugging rules must not drift between
         # the code that publishes a handle and the code that goes looking for it.
@@ -224,17 +243,32 @@ class ShopifyPublisher:
         if not found:
             return "absent"
 
+        # Recorded before anything is changed: a crash between here and the status update
+        # leaves a part that is still sellable and merely has a note about it, which the
+        # next revival check discards. Recording afterwards could lose the only copy of
+        # the status the moment it stops being readable.
+        if record_prior is not None and found["status"] != self.retire_status:
+            record_prior(str(r_number), found["status"])
+
         variants = found["variants"]["nodes"]
         if variants and variants[0]["inventoryItem"].get("tracked"):
-            res = self.client.graphql(_SET_QUANTITIES, {"input": {
-                "name": "available",
-                "reason": "correction",
-                "quantities": [{
-                    "inventoryItemId": variants[0]["inventoryItem"]["id"],
-                    "locationId": self.location,
-                    "quantity": 0,
-                }],
-            }})["inventorySetQuantities"]
+            res = self.client.graphql(_SET_QUANTITIES, {
+                "idempotencyKey": str(uuid.uuid4()),
+                "input": {
+                    "name": "available",
+                    "reason": "correction",
+                    "quantities": [{
+                        "inventoryItemId": variants[0]["inventoryItem"]["id"],
+                        "locationId": self.location,
+                        "quantity": 0,
+                        # Admin API 2026-07 requires this field even when deliberately
+                        # opting out of compare-and-swap. The yard database is the source
+                        # of truth for availability, so a sold part must end at zero
+                        # regardless of Shopify's previously cached quantity.
+                        "changeFromQuantity": None,
+                    }],
+                },
+            })["inventorySetQuantities"]
             if res["userErrors"]:
                 raise RuntimeError(f"inventorySetQuantities R#{r_number}: {res['userErrors']}")
 

@@ -143,5 +143,49 @@ class ImageChanges(unittest.TestCase):
                 self.assertEqual(diff.image_changed, [])
 
 
+
+class RetirementMemory(unittest.TestCase):
+    """What a part was before it was archived, so it can come back as that."""
+
+    def test_records_and_reads_back_a_status(self):
+        with TemporaryDirectory() as d:
+            with SyncState(Path(d) / "state.sqlite3") as st:
+                st.record_retired("51", "ACTIVE")
+                self.assertEqual(st.retired_statuses(), {"51": "ACTIVE"})
+
+    def test_survives_a_commit_that_drops_the_part(self):
+        """Retirement removes the R# from `parts`; the memory must outlive that."""
+        with TemporaryDirectory() as d:
+            db = Path(d) / "state.sqlite3"
+            with SyncState(db) as st:
+                st.commit(fingerprints_for([part("51")], NO_IMG, STORE))
+                st.record_retired("51", "ACTIVE")
+                st.commit({})
+                self.assertEqual(st.retired_statuses(), {"51": "ACTIVE"})
+
+    def test_clearing_forgets_only_the_revived_parts(self):
+        with TemporaryDirectory() as d:
+            with SyncState(Path(d) / "state.sqlite3") as st:
+                st.record_retired("51", "ACTIVE")
+                st.record_retired("52", "DRAFT")
+                st.clear_retired(["51"])
+                self.assertEqual(st.retired_statuses(), {"52": "DRAFT"})
+
+    def test_clearing_nothing_is_a_no_op(self):
+        with TemporaryDirectory() as d:
+            with SyncState(Path(d) / "state.sqlite3") as st:
+                st.record_retired("51", "ACTIVE")
+                st.clear_retired([])
+                self.assertEqual(st.retired_statuses(), {"51": "ACTIVE"})
+
+    def test_memory_is_kept_across_reopens(self):
+        with TemporaryDirectory() as d:
+            db = Path(d) / "state.sqlite3"
+            with SyncState(db) as st:
+                st.record_retired("51", "ACTIVE")
+            with SyncState(db) as st:
+                self.assertEqual(st.retired_statuses(), {"51": "ACTIVE"})
+
+
 if __name__ == "__main__":
     unittest.main()
