@@ -520,8 +520,13 @@ def build_tags(part: Part, store: Optional[StoreProfile] = None, max_tags: int =
             for y in range(f.year_start, (f.year_end or f.year_start) + 1):
                 add(f"{y} {veh}".strip())
     if not part.fitment:
-        add(clean_make(part.make))
-        add(" ".join(str(x) for x in (part.year, clean_make(part.make), clean_model(part.model)) if x))
+        # No fitment rows, so the part's own vehicle is all there is. Route it through
+        # _vehicle_label like the fitment branch above: joining make and model directly
+        # doubles a make the model already carries, which is how 180 parts ended up
+        # tagged "2019 Dodge Dodge 1500" (make "DODGE TRUCK", model "DODGE 1500 PICKUP").
+        mk = clean_make(part.make)
+        add(mk)
+        add(" ".join(str(x) for x in (part.year, _vehicle_label(mk, clean_model(part.model))) if x))
     for f in part.fitment or []:
         for a in getattr(f, "applications", None) or []:
             note = getattr(a, "note", "") or ""

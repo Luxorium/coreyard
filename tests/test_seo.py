@@ -303,5 +303,40 @@ class ShortWordCasing(unittest.TestCase):
         self.assertEqual(seo.expand_part_type("center cap"), "Wheel Center Cap")
 
 
+class TagsWithoutFitment(unittest.TestCase):
+    """A part with no interchange rows still has to tag a sane vehicle.
+
+    The fitment branch routes make and model through _vehicle_label; the fallback
+    used to join them raw, so the yard's "DODGE TRUCK" / "DODGE 1500 PICKUP" pair
+    became the tag "2019 Dodge Dodge 1500". 180 live parts carried a doubled make.
+    """
+
+    def _vehicle_tags(self, **kw):
+        p = part(fitment=[], **kw)
+        return [t for t in seo.build_tags(p, STORE) if t[:4].isdigit()]
+
+    def test_make_is_not_doubled_when_the_model_carries_it(self):
+        self.assertEqual(
+            self._vehicle_tags(year=2019, make="DODGE TRUCK", model="DODGE 1500 PICKUP"),
+            ["2019 Dodge 1500"])
+
+    def test_short_form_of_the_make_in_the_model_is_also_caught(self):
+        self.assertEqual(
+            self._vehicle_tags(year=2010, make="MERCEDES-BENZ TRUCK",
+                               model="MERCEDES SPRINTER 2500"),
+            ["2010 Mercedes Sprinter 2500"])
+
+    def test_an_ordinary_make_and_model_still_join(self):
+        # Tags keep the model's hyphen; only titles strip it.
+        self.assertEqual(
+            self._vehicle_tags(year=2008, make="Ford", model="F-150"),
+            ["2008 Ford F-150"])
+
+    def test_the_bare_make_is_still_tagged(self):
+        tags = seo.build_tags(part(fitment=[], make="DODGE TRUCK",
+                                   model="DODGE 1500 PICKUP"), STORE)
+        self.assertIn("Dodge", tags)
+
+
 if __name__ == "__main__":
     unittest.main()
