@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import html
 import re
+from datetime import date
 from typing import Optional
 
 from coreyard.config import StoreProfile
@@ -26,6 +27,8 @@ META_DESC_MAX = 160
 # Common source part-type abbreviations -> fuller, search-friendly names.
 _PART_TYPE = {
     "anti-lock brake pts": "ABS Anti Lock Brake Pump Control Module",
+    "chassis cont mod": "Chassis Control Module",
+    "center cap": "Wheel Center Cap",
     "tail lamp": "Tail Light Lamp Assembly",
     "starter motor": "Engine Starter Motor",
     "side view mirror": "Side View Door Mirror",
@@ -54,7 +57,15 @@ _PART_TYPE = {
 
 
 # Short words that are words, not acronyms — the <=3 char rule would shout them.
-_NOT_ACRONYM = {"VAN", "CAB", "BUS", "WGN", "TRK", "PUP", "SUV"} - {"SUV"}
+# Three letters or fewer usually means a trim or acronym (CTS, ESV, GT), so _fix_token
+# shouts them. These are ordinary words that happen to be short, and shouting them
+# leaves "Center CAP" and "SUN Visor" in customer-facing titles.
+_NOT_ACRONYM = {
+    "VAN", "CAB", "BUS", "WGN", "TRK", "PUP",
+    "CAP", "SUN", "BOX", "PAN", "ARM", "FAN", "BAR", "KIT", "SET", "LID",
+    "ROD", "PIN", "NUT", "OIL", "GAS", "AIR", "HUB", "TOP", "JAR", "MOD",
+    "PUMP", "DOOR",
+}
 
 
 def _fix_token(tok: str) -> str:
@@ -136,9 +147,18 @@ def _looks_like_prose(s: Optional[str]) -> bool:
 
 
 def _vehicle_label(make: Optional[str], model: Optional[str]) -> str:
-    """'Make Model', but avoid 'Isuzu Isuzu I-290' when the model already carries the make."""
-    if make and model and model.lower().startswith(make.lower()):
-        return model
+    """'Make Model', but avoid 'Isuzu Isuzu I-290' when the model already carries the make.
+
+    The model often carries a shorter form of the make than the make column does, so an
+    exact prefix test misses it: make "Mercedes-Benz" against model "Mercedes 450" reads
+    as "Mercedes-Benz Mercedes 450". Comparing the first word of each catches those too.
+    """
+    if make and model:
+        if model.lower().startswith(make.lower()):
+            return model
+        head = re.split(r"[^A-Za-z0-9]+", make, maxsplit=1)[0].lower()
+        if head and model.lower().startswith(head + " "):
+            return model
     return " ".join(x for x in (make, model) if x)
 
 
@@ -155,14 +175,39 @@ def _model_labels(part: Part) -> list[str]:
         lab = _vehicle_label(clean_make(part.make), clean_model(part.model))
         if lab:
             labels.append(lab)
+    # A fitment row with no model yields the bare make, which says nothing next to the
+    # specific labels beside it — "Volvo, Volvo 70 Series, Volvo 60 Series" spends title
+    # space to repeat what the next label already says.
+    specific = {l for l in labels if " " in l}
+    if specific:
+        labels = [l for l in labels
+                  if " " in l or not any(s.lower().startswith(l.lower() + " ") for s in specific)]
     return labels
 
 
+# The yard database marks an open-ended interchange run with a placeholder year rather
+# than a null: one that began before the catalogue did is stamped 1940, and one still in
+# production is stamped 2030. Printed literally they reach the customer as "1940 thru
+# 2030 …", which reads as a broken listing to anyone who knows the parts.
+_SENTINEL_START = 1940
+_SENTINEL_END = 2027
+
+
+def _plausible_end(year: int) -> int:
+    """Model years run a year ahead of the calendar; past that it is a marker, not a year."""
+    return min(year, date.today().year + 1)
+
+
 def _year_span(part: Part) -> tuple[Optional[int], Optional[int]]:
-    starts = [f.year_start for f in part.fitment if f.year_start]
-    ends = [f.year_end for f in part.fitment if f.year_end]
+    starts = [f.year_start for f in part.fitment
+              if f.year_start and f.year_start > _SENTINEL_START]
+    ends = [f.year_end for f in part.fitment
+            if f.year_end and f.year_end < _SENTINEL_END]
     if starts:
-        return min(starts), max(ends or starts)
+        return min(starts), _plausible_end(max(ends or starts))
+    if ends:
+        return min(ends), _plausible_end(max(ends))
+    # Every row was a placeholder — the part's own vehicle is the only real year left.
     return part.year, part.year
 
 

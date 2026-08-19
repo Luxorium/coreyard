@@ -2,6 +2,7 @@
 
 import re
 import unittest
+from datetime import date
 from decimal import Decimal
 
 from coreyard.config import StoreProfile
@@ -231,6 +232,75 @@ class AltLength(unittest.TestCase):
         for i in (1, 2, 9):
             self.assertLessEqual(len(seo.image_alt(p, i)), 140)
         self.assertFalse(seo.image_alt(p, 1).endswith(" "))
+
+
+class PlaceholderYears(unittest.TestCase):
+    """The yard marks open-ended runs with 1940 / 2030 instead of nulls."""
+
+    def test_placeholder_start_year_is_not_advertised(self):
+        fit = [Fitment(make="Volvo", model="70 Series", year_start=1940, year_end=2011),
+               Fitment(make="Volvo", model="70 Series", year_start=1999, year_end=2011)]
+        self.assertEqual(seo._year_span(part(fitment=fit)), (1999, 2011))
+
+    def test_placeholder_end_year_is_not_advertised(self):
+        fit = [Fitment(make="Mazda", model="3", year_start=1975, year_end=2030),
+               Fitment(make="Mazda", model="3", year_start=1975, year_end=1999)]
+        self.assertEqual(seo._year_span(part(fitment=fit)), (1975, 1999))
+
+    def test_span_never_reaches_beyond_next_model_year(self):
+        fit = [Fitment(make="Mazda", model="3", year_start=2001, year_end=2030)]
+        _, end = seo._year_span(part(fitment=fit))
+        self.assertLessEqual(end, date.today().year + 1)
+
+    def test_all_placeholder_rows_fall_back_to_the_parts_own_year(self):
+        fit = [Fitment(make="Volvo", model="70 Series", year_start=1940, year_end=2030)]
+        self.assertEqual(seo._year_span(part(fitment=fit, year=2005)), (2005, 2005))
+
+    def test_real_spans_are_left_alone(self):
+        fit = [Fitment(make="Ford", model="Edge", year_start=2007, year_end=2015),
+               Fitment(make="Ford", model="Edge", year_start=2009, year_end=2012)]
+        self.assertEqual(seo._year_span(part(fitment=fit)), (2007, 2015))
+
+    def test_no_placeholder_year_survives_into_a_title(self):
+        fit = [Fitment(make="Volvo", model="70 Series", year_start=1940, year_end=2030),
+               Fitment(make="Volvo", model="70 Series", year_start=2001, year_end=2008)]
+        title = seo.build_title(part(fitment=fit))
+        self.assertNotIn("1940", title)
+        self.assertNotIn("2030", title)
+
+
+class VehicleLabels(unittest.TestCase):
+    def test_shorter_make_inside_the_model_is_not_repeated(self):
+        self.assertEqual(seo._vehicle_label("Mercedes-Benz", "Mercedes 450"), "Mercedes 450")
+
+    def test_exact_make_prefix_still_collapses(self):
+        self.assertEqual(seo._vehicle_label("Isuzu", "Isuzu I-290"), "Isuzu I-290")
+
+    def test_a_model_that_merely_starts_with_a_letter_run_is_kept_whole(self):
+        self.assertEqual(seo._vehicle_label("Ford", "E150 Van"), "Ford E150 Van")
+
+    def test_bare_make_is_dropped_when_a_specific_model_covers_it(self):
+        fit = [Fitment(make="Volvo", model=None, year_start=2001, year_end=2008),
+               Fitment(make="Volvo", model="70 Series", year_start=2001, year_end=2008)]
+        self.assertEqual(seo._model_labels(part(fitment=fit)), ["Volvo 70 Series"])
+
+    def test_bare_make_survives_when_it_is_all_we_know(self):
+        fit = [Fitment(make="Volvo", model=None, year_start=2001, year_end=2008)]
+        self.assertEqual(seo._model_labels(part(fitment=fit)), ["Volvo"])
+
+
+class ShortWordCasing(unittest.TestCase):
+    def test_short_ordinary_words_are_not_shouted(self):
+        for token, want in (("CAP", "Cap"), ("SUN", "Sun"), ("BOX", "Box"), ("PAN", "Pan")):
+            self.assertEqual(seo._fix_token(token), want)
+
+    def test_genuine_trim_acronyms_still_shout(self):
+        for token in ("CTS", "ESV", "XTS", "SUV", "GT"):
+            self.assertEqual(seo._fix_token(token), token)
+
+    def test_yard_shorthand_expands_to_shopper_wording(self):
+        self.assertEqual(seo.expand_part_type("chassis cont mod"), "Chassis Control Module")
+        self.assertEqual(seo.expand_part_type("center cap"), "Wheel Center Cap")
 
 
 if __name__ == "__main__":
