@@ -17,8 +17,10 @@ reports listing quality. `run_sync.py` orchestrates syncs, `state.py` tracks fin
 
 A storefront repository may live beside this one. CoreYard must never import it, assume it,
 or reach for a sibling path: site policy arrives as configuration files whose paths are named
-in `.env` (`STORE_PROFILE_FILE`, `STORE_WEIGHT_RULES_FILE`, `STORE_ORDER_POLICY_FILE`), and
-everything else goes through Shopify or this CLI.
+in `.env` (`STORE_PROFILE_FILE`, `STORE_WEIGHT_RULES_FILE`, `STORE_SHIPPING_POLICY_FILE`,
+`STORE_ORDER_POLICY_FILE`), and everything else goes through Shopify or this CLI. Those four
+schemas are checkable offline with `bin/coreyard validate`, which is what lets a storefront
+repository verify its own files in CI without importing anything from here.
 
 ## Build, Test, and Development Commands
 
@@ -34,6 +36,7 @@ bin/coreyard --sink csv --limit 25 --dry-run
 bin/coreyard reconcile              # plan only; writes nothing
 bin/coreyard repair titles --dry-run
 bin/coreyard audit catalog          # read-only
+bin/coreyard validate               # external config against its schemas, offline
 bin/coreyard schema
 ```
 
@@ -101,9 +104,16 @@ failed payloads may remain only in the owner-only queue for the bounded retry wi
   fingerprint hashes and that both sinks serialize. Never add a second place that renders a
   title, tag, description or SEO field for publishing: fingerprinting one renderer while
   publishing another is the bug that made stale products read as "unchanged" forever.
-- Anything shopper-visible belongs on `RenderedProduct`, so it moves the fingerprint.
-  Anything CoreYard does not own — product status, channel publication, another system's
-  tags — deliberately does not, because those are read from the live product instead.
+- Anything shopper-visible belongs on `RenderedProduct`, so it moves the fingerprint. That
+  includes the shipping classification tag and the structured metafields: a theme renders
+  them, so they are catalogue content, not decoration. Anything CoreYard does not own —
+  product status, channel publication, another system's tags — deliberately does not,
+  because those are read from the live product instead.
+- A namespace CoreYard generates into is *owned*, not preserved. `transform/tags.merge`
+  replaces a stale `ship:` tag rather than leaving two classifications on one product;
+  everything else namespaced is still carried through untouched.
+- Shipping classification happens during the publish that creates the product. A later pass
+  is a window in which a product is live, buyable and wearing the wrong shipping.
 - `productSet` has set semantics. Preserve omitted fields deliberately; existing status is
   read and re-sent by `shopify_write._upsert`, and existing external tags are merged back by
   `transform/tags.merge`. Sending only generated tags deletes the storefront's own.

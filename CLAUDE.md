@@ -13,9 +13,13 @@ sale as a work order in the source system.
 This is a generic project, not a site-specific script. Never hardcode an installation's
 host, credentials, business identity, storefront copy, claims, shipping policy, schema, or
 handle prefix. Site configuration belongs in `.env` and in the files it names
-(`STORE_PROFILE_FILE`, `STORE_WEIGHT_RULES_FILE`, `STORE_ORDER_POLICY_FILE`); source table and
-column names belong in the local, gitignored `schema.json`. Keep `schema.example.json`
-generic.
+(`STORE_PROFILE_FILE`, `STORE_WEIGHT_RULES_FILE`, `STORE_SHIPPING_POLICY_FILE`,
+`STORE_ORDER_POLICY_FILE`); source table and column names belong in the local, gitignored
+`schema.json`. Keep `schema.example.json` generic.
+
+Those four files are a contract with whatever storefront sits on the other side, so their
+schemas are validated offline by `coreyard/validate.py`. Adding a key means extending the
+validator, or the other side cannot check it in CI.
 
 A storefront repository may sit beside this one. CoreYard must never import it, add it to
 `sys.path`, or assume a sibling checkout exists. The two sides meet at documented
@@ -91,6 +95,7 @@ bin/coreyard reconcile --apply --activate  # WRITES status changes
 bin/coreyard repair titles --dry-run
 bin/coreyard repair tags --apply           # WRITES tags
 bin/coreyard audit catalog                 # read-only
+bin/coreyard validate                      # config schemas, offline
 bin/coreyard orders status
 bin/coreyard orders poll --check
 bin/coreyard orders retry --id <webhook-id>
@@ -124,13 +129,14 @@ rendering and fingerprinting so customer-facing strings are not hardcoded.
 
 ```text
 coreyard/yms/        schema mapping, SMB/TDS reads, images, fitment, opt-in orders
-coreyard/transform/  the canonical renderer, SEO, tags, weights, pricing, CSV, tickets
+coreyard/transform/  the canonical renderer, SEO, tags, shipping, weights, CSV, tickets
 coreyard/sink/       the Shopify client, CSV output, publisher, bulk, OAuth, alt text
 coreyard/orders/     order pipeline + queue, poll transport, lifecycle sync, policy
 coreyard/reconcile/  yard-vs-store comparison, planning, and guarded application
 coreyard/repair/     rewrite catalog output an older renderer produced
 coreyard/audit/      read-only listing-quality checks with configurable thresholds
-coreyard/profile.py  site merchandising policy (claims, wording, audit thresholds)
+coreyard/profile.py  site merchandising policy (claims, wording, metafield namespace)
+coreyard/validate.py offline schema checks for the four external config files
 coreyard/state.py    SQLite content/image fingerprints and incremental diff
 coreyard/run_sync.py incremental sync orchestration and retirement planning
 coreyard/webhook.py  HMAC verification and the HTTP receiver for the order pipeline

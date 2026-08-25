@@ -53,6 +53,9 @@ Source of truth is the yard system's own database — no middleware, no export f
 | Sold-part retirement (qty 0 → archived, with safety guards) | **working, unit-tested** |
 | Photo-change detection (share listing folded into the fingerprint) | **working, unit-tested** |
 | Paid-order webhook → printable pull ticket + instant delist | **working, unit-tested** |
+| Shipping classification applied during publish, from a site policy | **working, unit-tested** |
+| Structured metafields (grade, mileage, condition, fitment) | **working, unit-tested** |
+| Offline validation of every external config file (`validate`) | **working, unit-tested** |
 | Order polling (same pipeline, for hosts with no inbound port) | **working, unit-tested** |
 | Order webhook → work order in the source database (opt-in) | **working, unit-tested** |
 | Source order status → Shopify tags/note/fulfillment (policy-gated) | **working, unit-tested** |
@@ -125,10 +128,33 @@ Everything a shopper can see is produced once, by `transform/render.py`, as a
 what the CSV writer serializes:
 
 ```
-Part --> render() --> RenderedProduct --+--> fingerprint()      (incremental sync state)
-                                        +--> productSet input   (Admin API sink)
-                                        +--> CSV rows           (CSV sink)
+your yard database
+      |
+      v
+   Part                       the neutral extract-to-publish contract
+      |
+      v
+   render()  ------------->   RenderedProduct
+                                |-- title, description, vendor, type, price, inventory
+                                |-- tags, including the shipping classification tag
+                                |-- SEO title and description
+                                |-- structured metafields (grade, mileage, condition, fitment)
+                                |-- images, alt text, shipping weight
+                                +-- fingerprint()   <- everything above, hashed
+      |
+      +--> productSet input   (Admin API sink)
+      +--> CSV rows           (CSV sink)
+      |
+      v
+   Shopify
+      |
+      v
+   your theme                 reads the fields and metafields above directly
 ```
+
+The last line is the point of the structured metafields. A theme that had to recover a
+vehicle by taking a generated title or tag apart would break the moment that wording
+improved; reading `fitment` gives it named fields that mean the same thing next year.
 
 This is a correctness property, not tidiness. When the two sinks rendered their own titles
 and tags and the fingerprint covered only one of them, changing the renderer that actually
@@ -260,9 +286,20 @@ them:
 
 | Setting | File | What it decides |
 |---|---|---|
-| `STORE_PROFILE_FILE` | your profile | what a listing may claim, part-type wording, audit thresholds |
+| `STORE_PROFILE_FILE` | your profile | what a listing may claim, part-type wording, the metafield namespace, audit thresholds |
 | `STORE_WEIGHT_RULES_FILE` | your weight table | packed shipping weight per part type (`coreyard/transform/weights.py`) |
-| `STORE_ORDER_POLICY_FILE` | your order policy | order tagging, and which shipping groups another system fulfills (`coreyard/orders/policy.py`) |
+| `STORE_SHIPPING_POLICY_FILE` | your shipping policy | how each part ships, and the tag that says so (`coreyard/transform/shipping.py`) |
+| `STORE_ORDER_POLICY_FILE` | your order policy | order tagging; fulfillment rules are derived from the shipping policy (`coreyard/orders/policy.py`) |
+
+Check all four against their schemas at any time, with no database, store or credentials:
+
+```bash
+bin/coreyard validate                                   # whatever this install configures
+bin/coreyard validate --shipping /path/to/freight.json  # or one file, by path
+```
+
+That second form is how a storefront repository validates its own configuration in CI
+against the backend's schemas, without either application importing the other.
 
 Without a weight table, products publish with no weight and every carrier-calculated rate is
 quoted for an empty box, so supplying one is worth the hour it takes.
@@ -328,8 +365,8 @@ bin/coreyard audit catalog       # read-only listing-quality report
 ```
 
 `bin/coreyard` runs the CLI inside the virtualenv from any working directory. Its subcommands
-are `bulk`, `altfix`, `oauth`, `orders`, `reconcile`, `repair`, `audit`, `images`, and
-`schema`; anything else is passed to the sync CLI.
+are `bulk`, `altfix`, `oauth`, `orders`, `reconcile`, `repair`, `audit`, `validate`,
+`images`, and `schema`; anything else is passed to the sync CLI.
 
 ### Reconciling, repairing, auditing
 
@@ -358,6 +395,7 @@ bin/coreyard repair titles --apply
 bin/coreyard repair tags   --dry-run         # e.g. vehicle tags with a doubled make
 bin/coreyard repair seo --apply --limit 200
 bin/coreyard repair weights --apply          # products published before weights were owned
+bin/coreyard repair metafields --apply       # grade, mileage, condition, fitment
 bin/coreyard repair all --dry-run
 ```
 
@@ -370,6 +408,65 @@ tags a rewrite would delete *before* it does, and never removes a tag another sy
 bin/coreyard audit catalog                   # missing SKU, no photos, zero weight, …
 bin/coreyard audit catalog --show 20 --json out/audit.json
 ```
+
+### How a part ships, and the tag that says so
+
+A storefront has to tell a shopper *before* checkout that a door is pickup-only, and it
+reads that from a tag. Whoever writes that tag makes a promise: get it wrong and a
+freight-only engine quotes free ground, or a shippable alternator refuses to ship.
+
+Point `STORE_SHIPPING_POLICY_FILE` at a file describing your groups and CoreYard applies the
+right tag during the publish that creates the product — not in a later pass, which is a
+window in which a product is live, buyable, and wearing the wrong shipping or none:
+
+```json
+{
+  "groups": {
+    "PICKUP": {"tag": "ship:pickup-only", "price": null,     "label": "Pickup only",
+               "match": ["door assembly", "glass"], "fulfillment": "yard"},
+    "A":      {"tag": "ship:freight-299", "price": "299.99", "label": "Freight",
+               "match": ["engine assembly"],        "fulfillment": "yard"},
+    "GROUND": {"tag": "ship:free",        "price": "0.00",   "label": "Free ground",
+               "default": true,                     "fulfillment": "external"}
+  },
+  "match_order": ["PICKUP", "A"]
+}
+```
+
+Groups are tried in `match_order`, first substring hit against the part type wins, and
+exactly one group is the `default` that catches the rest. `fulfillment` says who ships it —
+`external` means another system buys the label and will close the order out, which is what
+stops `orders sync-status` fulfilling a parcel order before the shipping app has attached a
+tracking number. Because the shipping policy already declares that, the order policy derives
+its fulfillment rules from it rather than repeating them.
+
+The tag is part of the rendered product, so it is fingerprinted like any other
+shopper-visible field, and CoreYard then **owns that namespace**: a stale `ship:` tag from
+whatever wrote them before is replaced rather than accumulated next to the new one. Two
+shipping tags on one product and the storefront reads whichever it tests for first.
+
+### Structured product data
+
+The catalogue is not only prose. Grade, mileage, condition and full fitment are structured
+values a theme can render as a table or a spec row, so CoreYard publishes them as metafields
+rather than leaving a storefront to parse them back out of a description:
+
+| Metafield | Type | Value |
+|---|---|---|
+| `<ns>.grade` | `single_line_text_field` | the source system's condition grade |
+| `<ns>.mileage` | `number_integer` | donor mileage |
+| `<ns>.condition` | `single_line_text_field` | the profile's condition wording |
+| `<ns>.fitment` | `json` | `[{"years","make","model","note","label"}, …]` |
+
+`<ns>` is `metafield_namespace` from the profile, defaulting to `coreyard`. Each fitment row
+carries a `label` that is exactly the vehicle tag CoreYard also emits, so a theme can link to
+a tag-filtered collection without reverse-engineering one from a title.
+
+A part with no catalogue fitment still fits the car it came off, so its donor vehicle is
+emitted as a single row — otherwise anything built from fitment would silently lose every
+part the interchange catalogue does not cover. Values the source did not supply are left out
+rather than published empty, and a value that later disappears is deleted from the product
+rather than left showing something untrue.
 
 ### Tags another system owns
 
@@ -638,6 +735,8 @@ two.
 | Variant Price | price, charm-rounded when the site asks (parts with no positive price are skipped) |
 | Variant Inventory Qty / Policy | quantity / `deny` (unique parts don't oversell) |
 | Shipping weight | the site's weight table by part type, or a source weight if the yard records one |
+| Shipping tag | the site's shipping policy, classified by part type during publish |
+| Metafields | grade, mileage, condition, and structured fitment, in the profile's namespace |
 | Product media | `{R#}_NN.jpg` from the photo share, uploaded via staged uploads (API path) or referenced by URL (CSV path) |
 | Alt text | generated per photo, and covered by the fingerprint |
 
@@ -662,10 +761,11 @@ python scripts/check_neutrality.py
 ```
 The suite is offline by design — no database, no network, no Shopify, no `.env` — and
 anything that needs the live server belongs in `scripts/` or behind a CLI flag. It covers the
-canonical renderer and fingerprint sensitivity, tag ownership, weight rules, the listable
-policy, reconciliation and its retirement guards, catalog repair, order polling and
-normalization, the order lifecycle policy, the Shopify client, retirement and revival, and
-the extract mapping.
+canonical renderer and fingerprint sensitivity, tag ownership, shipping classification,
+structured metafields and their staleness, weight rules, the listable policy, external
+config validation, reconciliation and its retirement guards, catalog repair, order polling
+and normalization, the order lifecycle policy, the Shopify client, retirement and revival,
+and the extract mapping.
 
 ## Security notes
 - Secrets live only in `.env` (gitignored). The SMB password is written to a `0600` temp
