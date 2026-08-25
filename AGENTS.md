@@ -2,15 +2,23 @@
 
 ## Project Structure & Module Organization
 
-`coreyard/` implements the source-system-to-Shopify pipeline. `models.py` and
-`config.py` define the neutral data/config contracts. `yms/` owns schema-driven SQL
-extraction, SMB/TDS transport, photos, fitment, and the narrowly scoped order write;
-`transform/` renders products, SEO, pricing, CSV rows, and pull tickets; `sink/`
-contains CSV and Shopify publishers. `run_sync.py` orchestrates syncs, `state.py`
-tracks fingerprints, `webhook.py` handles orders, and `schedule.py` installs timers.
-Tests are in `tests/`; operational checks belong in `scripts/`. Photos are external;
-`out/`, `*.sqlite3`, `.env`, `schema.json`, and generated `bin/` content are private
-or generated.
+`coreyard/` implements the source-system-to-Shopify pipeline. `models.py`, `config.py` and
+`profile.py` define the neutral data/config/policy contracts. `yms/` owns schema-driven SQL
+extraction, SMB/TDS transport, photos, fitment, changed-since deltas (`delta.py`), optional
+catalogue enrichment (`enrich.py`), and the narrowly scoped order write. `transform/` holds
+the canonical renderer (`render.py`) plus the SEO engine, tag ownership, weights, pricing,
+CSV framing, and pull tickets; `sink/` contains the one Shopify client and the CSV and API
+publishers. `orders/` owns the order pipeline and its transports, `reconcile/` compares the
+store with the yard, `repair/` rewrites output an older renderer produced, and `audit/`
+reports listing quality. `run_sync.py` orchestrates syncs, `state.py` tracks fingerprints,
+`webhook.py` is the webhook transport, and `schedule.py` installs timers. Tests are in
+`tests/`; operational checks belong in `scripts/`. Photos are external; `out/`, `*.sqlite3`,
+`.env`, `schema.json`, and generated `bin/` content are private or generated.
+
+A storefront repository may live beside this one. CoreYard must never import it, assume it,
+or reach for a sibling path: site policy arrives as configuration files whose paths are named
+in `.env` (`STORE_PROFILE_FILE`, `STORE_WEIGHT_RULES_FILE`, `STORE_ORDER_POLICY_FILE`), and
+everything else goes through Shopify or this CLI.
 
 ## Build, Test, and Development Commands
 
@@ -23,6 +31,9 @@ Python 3.10+ is required; there is no build step.
 .venv/bin/python scripts/demo_offline.py
 bin/coreyard --check
 bin/coreyard --sink csv --limit 25 --dry-run
+bin/coreyard reconcile              # plan only; writes nothing
+bin/coreyard repair titles --dry-run
+bin/coreyard audit catalog          # read-only
 bin/coreyard schema
 ```
 
@@ -41,11 +52,19 @@ through `config._get`, not `os.environ`, so `_LEGACY_KEYS` remains effective.
 
 ## Testing Guidelines
 
-Tests use `unittest` and must run without a database, network, or `.env`. Name files
+Tests use `unittest` and must run without a database, network, or `.env`. That last one is
+easy to break indirectly: a config gate on the render path that calls `load_env` itself will
+pull the installation's real `.env` into the whole suite and change unrelated assertions.
+Read config through `_get` and let the caller load the environment. Name files
 `test_<area>.py`, classes for the behavior, and methods `test_<expected_behavior>`.
-Add regression coverage for identifiers, mappings, fingerprints/state diffs,
-retirement, webhooks, order guards, and rendered Shopify output. Run one test with,
-for example, `.venv/bin/python -m unittest tests.test_state.Diff.test_summary`.
+Add regression coverage for identifiers, mappings, fingerprints/state diffs, retirement,
+revival, webhooks, order guards, tag ownership, the listable policy, weight rules,
+reconciliation, repair, order polling, and rendered Shopify output. Run one test with, for
+example, `.venv/bin/python -m unittest tests.test_state.Diff.test_summary`.
+
+Anything that talks to Shopify takes a client so a fake can be passed in, and every planning
+decision that could empty a catalogue — retirement fractions, reconciliation buckets, repair
+diffs — lives in a pure function that a test can call directly.
 
 ## Commit & Pull Request Guidelines
 
@@ -78,10 +97,22 @@ failed payloads may remain only in the owner-only queue for the bounded retry wi
 - R# (`r_number`) is the stable SKU, handle key, photo stem, and state identity;
   `stock_number` is shared donor-vehicle data, not identity.
 - `SHOPIFY_HANDLE_PREFIX` is a live storefront key. Changing it duplicates products.
-- `productSet` has set semantics. Preserve omitted fields deliberately; existing
-  status is read and re-sent by `shopify_write._upsert`.
-- Product/image rendering feeds stored fingerprints. Changing
-  `transform/shopify_product.py` or image resolution can trigger a full rewrite.
+- **There is one renderer.** `transform/render.py` produces the `RenderedProduct` that the
+  fingerprint hashes and that both sinks serialize. Never add a second place that renders a
+  title, tag, description or SEO field for publishing: fingerprinting one renderer while
+  publishing another is the bug that made stale products read as "unchanged" forever.
+- Anything shopper-visible belongs on `RenderedProduct`, so it moves the fingerprint.
+  Anything CoreYard does not own — product status, channel publication, another system's
+  tags — deliberately does not, because those are read from the live product instead.
+- `productSet` has set semantics. Preserve omitted fields deliberately; existing status is
+  read and re-sent by `shopify_write._upsert`, and existing external tags are merged back by
+  `transform/tags.merge`. Sending only generated tags deletes the storefront's own.
+- Product/image rendering feeds stored fingerprints. Changing `transform/render.py`,
+  `transform/seo.py`, the weight table, the site profile, or image resolution can trigger a
+  full rewrite.
+- "Listable" has one definition: `yms.inventory.photos_required` plus the mapping's `scope`.
+  Sync, reconciliation, bulk publishing and the audit all read it; a second SQL condition
+  anywhere lets them publish and archive the same part in turn.
 - Retirement archives rather than deletes. API sync guards mass retirement with
   `--limit` and `--max-retire-fraction`; the webhook also retires ordered parts.
 - Both retirement paths record the pre-archive status in the sync state, and a part that

@@ -11,9 +11,23 @@ The optional order webhook is the sole reverse write: it can book a paid storefr
 sale as a work order in the source system.
 
 This is a generic project, not a site-specific script. Never hardcode an installation's
-host, credentials, business identity, storefront copy, schema, or handle prefix. Site
-configuration belongs in `.env`; source table and column names belong in the local,
-gitignored `schema.json`. Keep `schema.example.json` generic.
+host, credentials, business identity, storefront copy, claims, shipping policy, schema, or
+handle prefix. Site configuration belongs in `.env` and in the files it names
+(`STORE_PROFILE_FILE`, `STORE_WEIGHT_RULES_FILE`, `STORE_ORDER_POLICY_FILE`); source table and
+column names belong in the local, gitignored `schema.json`. Keep `schema.example.json`
+generic.
+
+A storefront repository may sit beside this one. CoreYard must never import it, add it to
+`sys.path`, or assume a sibling checkout exists. The two sides meet at documented
+configuration files, environment variables, this CLI, and Shopify itself — a sibling-path
+import turns a backend refactor into a broken storefront script.
+
+What CoreYard may claim about a part is itself configuration. The built-in profile
+(`coreyard/profile.py`) states only what the yard data supports: used, OEM, off an
+inventoried donor vehicle. It does not say every part was tested or inspected, because that
+is not true at every yard, and a tool must not put a claim in a seller's mouth. When adding
+copy to the render path, ask whether it is a fact about the data or a promise about the
+business — the second belongs in the profile with a neutral default.
 
 Vendor neutrality applies to code, tests, docs, and commit messages. Refer to "the yard
 system" or "the source database" and run `scripts/check_neutrality.py` before handing
@@ -72,8 +86,15 @@ bin/coreyard --sink api --dry-run
 bin/coreyard bulk --limit 50 --workers 4
 bin/coreyard images 51 --fetch
 bin/coreyard schema
+bin/coreyard reconcile                     # plan only
+bin/coreyard reconcile --apply --activate  # WRITES status changes
+bin/coreyard repair titles --dry-run
+bin/coreyard repair tags --apply           # WRITES tags
+bin/coreyard audit catalog                 # read-only
 bin/coreyard orders status
+bin/coreyard orders poll --check
 bin/coreyard orders retry --id <webhook-id>
+bin/coreyard orders sync-status            # plan only
 .venv/bin/python -m coreyard.schedule status
 ```
 
@@ -89,6 +110,13 @@ webhook signatures/queues, order escaping, and transaction guards.
 
 ## Architecture
 
+`Part.aliases` and `Part.vehicle` (`yms/enrich.py`) are optional enrichment and default to
+empty. They feed the rendered product and therefore the fingerprint, so they stay inert
+unless `COREYARD_ENRICH` is set: enabling it republishes every product it covers. Keep
+`tests/test_enrich.py::FingerprintStability` passing. Render-path config gates read the
+already-loaded environment and must not call `load_env` themselves, or the site's real
+`.env` leaks into unit tests.
+
 `Part` in `coreyard/models.py` is the neutral extract-to-publish contract. Downstream
 code must use `Part` fields, never source columns. `StoreProfile` in
 `coreyard/config.py` carries installation-specific storefront identity through
@@ -96,15 +124,28 @@ rendering and fingerprinting so customer-facing strings are not hardcoded.
 
 ```text
 coreyard/yms/        schema mapping, SMB/TDS reads, images, fitment, opt-in orders
-coreyard/transform/  pricing, SEO, products/CSV, and printable pull tickets
-coreyard/sink/       CSV output, Shopify GraphQL, bulk publishing, OAuth, alt text
+coreyard/transform/  the canonical renderer, SEO, tags, weights, pricing, CSV, tickets
+coreyard/sink/       the Shopify client, CSV output, publisher, bulk, OAuth, alt text
+coreyard/orders/     order pipeline + queue, poll transport, lifecycle sync, policy
+coreyard/reconcile/  yard-vs-store comparison, planning, and guarded application
+coreyard/repair/     rewrite catalog output an older renderer produced
+coreyard/audit/      read-only listing-quality checks with configurable thresholds
+coreyard/profile.py  site merchandising policy (claims, wording, audit thresholds)
 coreyard/state.py    SQLite content/image fingerprints and incremental diff
 coreyard/run_sync.py incremental sync orchestration and retirement planning
-coreyard/webhook.py  HMAC verification, durable queue, ticket/order/retire worker
+coreyard/webhook.py  HMAC verification and the HTTP receiver for the order pipeline
 coreyard/schedule.py systemd-user/cron scheduling helper
 ```
 
-There are three related publishing workflows:
+`transform/render.py` is load-bearing. One `RenderedProduct` per part is what the fingerprint
+hashes, what `productSet` serializes, and what the CSV writer serializes. The bug it exists
+to prevent: the two sinks used to render their own titles and tags, and the fingerprint
+covered only the CSV one, so changing the renderer that actually published left the stored
+hash identical and every stale product read as "unchanged" forever. If you are about to write
+a second title/tag/description builder for publishing, don't — extend the renderer.
+
+There are four related publishing workflows, plus three that operate on what is already on
+the store:
 
 1. `run_sync --sink api` diffs against `coreyard_sync_state.sqlite3`, publishes
    additions/changes, refreshes changed photos, and retires removals.
@@ -112,8 +153,28 @@ There are three related publishing workflows:
    in `out/shopify_bulk_results.jsonl`; it does not share progress with sync state.
 3. `webhook.py` immediately prints, optionally books, and retires parts from paid
    orders. `--no-retire` disables its Shopify retirement.
+4. `run_sync --sink api --delta` (`yms/delta.py`) publishes only what moved since the
+   stored cursor and retires what left scope. It is a catch-up for the hourly full sync,
+   not a replacement.
 
 The CSV sink renders previews/import files but cannot retire Shopify products.
+
+5. `reconcile/` asks the store what it holds instead of trusting the snapshot, and closes the
+   differences it can: activate listable drafts (policy-gated), revive archived parts that
+   came back, retire ACTIVE products that are no longer listable (under the same fraction
+   guard as the sync), publish products that reached no sales channel, and forget snapshot
+   entries whose product does not exist — the last of which is what unsticks a part the sync
+   believes it already published.
+6. `repair/` compares live product copy against the canonical renderer and rewrites only the
+   differences. It exists because the sync's diff cannot see storefront drift: when the
+   renderer improves, a product whose yard data has not moved keeps its old text forever.
+   It is idempotent, so it needs no progress file.
+7. `audit/` reports listing quality and writes nothing.
+
+`StoreProfile` carries both the site's identity and its policy (`catalog`, `weights`), so the
+whole render path is a pure function of (part, images, store). Do not read the environment
+inside it: that is what keeps the fingerprint reproducible and the tests free of any
+installation's `.env`.
 
 ## Identifier and Publishing Invariants
 
@@ -149,6 +210,20 @@ retirement, and removals above `--max-retire-fraction` (default 10%) require
 `--force-retire`. Failed or refused retirements retain their old state entry so the next
 run retries them. Keep `tests/test_retire.py` passing before changing these rules.
 
+The delta path has its own invariants, and they are not the full path's:
+
+- It holds a *subset* of the yard, so it must call `state.diff(..., detect_removals=False)`
+  and `state.update`/`state.forget`, never `state.commit` — committing a subset deletes
+  every part the run did not look at.
+- Retirement there is evidence-based: a part is retired only because its row was read and
+  reported out of scope. Never retire from absence on this path.
+- Only a full run may write the cursor (`_delta_baseline`), and it captures the source
+  server's clock *before* the extract, minus `delta.DEFAULT_OVERLAP`. Advancing it from this
+  host's clock, or from after the read, silently drops rows.
+- The delta resolver lists photos per part while the full resolver lists the share once.
+  Both must yield identical filenames and order, or a delta run re-fingerprints everything
+  it touches.
+
 `state.product_fingerprint` covers rendered product content, ordered images, and the
 fitment key. Changes to `transform/shopify_product.py` or image resolution can make the
 next run rewrite the full catalog. A separate image fingerprint limits expensive media
@@ -161,6 +236,12 @@ media with `fileDelete`; these require `write_files`. Introspect the live schema
 assuming a mutation or input field exists.
 
 ## Webhook and Order Invariants
+
+The order *pipeline* — queue, worker, ticket, booking, delisting — is
+`coreyard/orders/pipeline.py`, and `webhook.py` is one transport onto it. `orders/poll.py` is
+the other, for hosts that cannot accept an inbound connection; `replay` is a third. All three
+write to the same queue, which is why a site can run polling and webhooks at once without
+printing a ticket twice. Add a transport, never a second pipeline.
 
 Registration uses `ORDERS_PAID`, and the worker independently requires
 `financial_status=paid` before any side effect. The receiver verifies the raw-body HMAC
@@ -195,6 +276,14 @@ Per-part photo lookups use an anchored `{R#}_*` mask so similar R#s cannot bleed
 one another. Full sync photo-change detection enumerates the directory once and groups
 the results. `smbclient` receives credentials through a mode-0600 temporary auth file,
 never command-line arguments.
+
+`orders/lifecycle.py` writes back to Shopify: tags, a note, and — only where the site's
+policy says nothing else will close the order — a fulfillment. That last decision is not
+CoreYard's to make. Shopify has no "picked but not shipped" state, so creating a fulfillment
+under a shipping app that has not bought the label yet costs the buyer their tracking number,
+while never fulfilling an order nothing else touches leaves it open forever. Which applies
+depends on the site's shipping arrangements, so it comes from `STORE_ORDER_POLICY_FILE` and
+defaults to "tag and note only".
 
 ## Change Checklist
 
