@@ -1,3 +1,10 @@
+"""The canonical renderer and its two serializers.
+
+Both sinks publish the same :class:`RenderedProduct`, so the assertions about titles, tags
+and body copy are assertions about what a shopper sees on either path — there is no second
+renderer left to disagree with them.
+"""
+
 import csv
 import io
 import unittest
@@ -9,12 +16,9 @@ from coreyard.config import StoreProfile
 from coreyard.models import Part
 from coreyard.sink.shopify_api import part_to_product_set_input
 from coreyard.transform import seo, shopify_csv
-from coreyard.transform.shopify_product import (
-    build_tags,
-    build_title,
-    handle_for,
-    part_to_rows,
-)
+from coreyard.transform.render import render
+from coreyard.transform.seo import build_tags, build_title
+from coreyard.transform.shopify_product import handle_for, part_to_rows
 
 
 STORE = StoreProfile(vendor="Test Yard", city="Testville, TX", warranty="90-day warranty")
@@ -57,7 +61,8 @@ class TitleAndHandle(unittest.TestCase):
         self.assertNotEqual(handle_for(a, STORE), handle_for(b, STORE))
 
     def test_title_fitment(self):
-        self.assertEqual(build_title(sample_part()), "2014 Ford Fusion Engine Control Module ECM")
+        self.assertEqual(build_title(sample_part()),
+                         "2014 Ford Fusion Engine Control Module ECM")
 
     def test_title_falls_back_to_part_type(self):
         p = sample_part(year=None, make=None, model=None)
@@ -71,10 +76,10 @@ class TitleAndHandle(unittest.TestCase):
 
 
 class Tags(unittest.TestCase):
-    def test_tags_dedupe_and_order(self):
-        tags = build_tags(sample_part())
-        self.assertEqual(tags[0], "2014")
-        self.assertIn("Ford Fusion", tags)
+    def test_tags_dedupe_and_carry_the_search_terms(self):
+        tags = build_tags(sample_part(), STORE)
+        self.assertIn("Ford", tags)
+        self.assertIn("2014 Ford Fusion", tags)
         self.assertIn("Used OEM", tags)
         self.assertIn("Interchange 545-01883", tags)
         self.assertEqual(len(tags), len(set(t.lower() for t in tags)))
@@ -111,6 +116,27 @@ class Rows(unittest.TestCase):
         self.assertIn("<strong>Stock #:</strong> 251026", body)
         self.assertIn("<strong>Interchange #:</strong> 545-01883", body)
 
+    def test_both_sinks_serialize_the_same_canonical_product(self):
+        """The property the fingerprint depends on: one renderer, two serializers."""
+        part = sample_part()
+        product = render(part, ["u1"], STORE)
+        row = part_to_rows(part, ["u1"], STORE)[0]
+        api = part_to_product_set_input(part, STORE)
+
+        self.assertEqual(row["Title"], product.title)
+        self.assertEqual(api["title"], product.title)
+        self.assertEqual(row["Body (HTML)"], product.description_html)
+        self.assertEqual(api["descriptionHtml"], product.description_html)
+        self.assertEqual(row["Tags"], ", ".join(product.tags))
+        self.assertEqual(api["tags"], list(product.tags))
+        self.assertEqual(row["Type"], product.product_type)
+        self.assertEqual(api["productType"], product.product_type)
+        self.assertEqual(row["SEO Title"], product.seo_title)
+        self.assertEqual(api["seo"]["title"], product.seo_title)
+        self.assertEqual(row["SEO Description"], product.seo_description)
+        self.assertEqual(api["seo"]["description"], product.seo_description)
+        self.assertEqual(row["Variant Price"], api["variants"][0]["price"])
+
     def test_direct_api_uses_r_number_as_sku(self):
         product = part_to_product_set_input(sample_part(), STORE)
         self.assertEqual(product["variants"][0]["sku"], "51")
@@ -119,8 +145,10 @@ class Rows(unittest.TestCase):
         self.assertEqual(sample_part().image_key(), "51")
 
     def test_missing_grade_and_mileage_are_described_safely(self):
+        """The neutral default states no test nobody performed."""
         body = seo.build_body_html(sample_part(grade=None, mileage=None))
-        self.assertIn("<strong>Condition:</strong> Used, tested", body)
+        self.assertIn("<strong>Condition:</strong> Used", body)
+        self.assertNotIn("tested", body)
         self.assertNotIn("<strong>Mileage:</strong>", body)
 
     def test_customer_content_does_not_name_interchange_vendor(self):
@@ -147,6 +175,7 @@ class CsvWriter(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
         reader = list(csv.DictReader(io.StringIO(text)))
         self.assertEqual(reader[0]["Handle"], "coreyard-51")
+        self.assertEqual(reader[0]["Title"], build_title(parts[0], STORE))
         self.assertEqual(reader[0]["Image Src"], "https://img/51_01.jpg")
         self.assertEqual(reader[0]["Variant Inventory Policy"], "deny")
         self.assertTrue(reader[0]["Body (HTML)"].startswith("<p>"))

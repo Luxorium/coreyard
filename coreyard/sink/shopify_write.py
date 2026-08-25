@@ -16,15 +16,16 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from coreyard.config import StoreProfile
+from coreyard.config import StoreProfile, publication_names
 from coreyard.models import Part
 from coreyard.yms.images import SmbImageStore
-from coreyard.sink.shopify_api import ShopifyClient, part_to_product_set_input
-from coreyard.transform import seo
-from coreyard.transform.shopify_product import handle_for
+from coreyard.sink.shopify_api import ShopifyClient, product_set_input
+from coreyard.transform.render import RenderedProduct, handle_for, render
 
+# Tags come back with the product because productSet replaces the whole tag list: without
+# knowing what is already there, a routine update deletes whatever another system added.
 _FIND = """query($h:String!){ productByIdentifier(identifier:{handle:$h}){
-  id status media(first:250){ nodes{ id } } } }"""
+  id status tags media(first:250){ nodes{ id } } } }"""
 
 _RETIRE_FIND = """query($h:String!){ productByIdentifier(identifier:{handle:$h}){
   id status variants(first:1){ nodes{ id inventoryItem{ id tracked } } } } }"""
@@ -49,6 +50,9 @@ _SET = """mutation($input:ProductSetInput!){ productSet(synchronous:true, input:
 _STAGE = """mutation($input:[StagedUploadInput!]!){ stagedUploadsCreate(input:$input){
   stagedTargets{ url resourceUrl parameters{ name value } } userErrors{ field message } } }"""
 
+_PUBLISH = """mutation($id:ID!,$input:[PublicationInput!]!){
+  publishablePublish(id:$id, input:$input){ userErrors{ field message } } }"""
+
 # productCreateMedia was removed from the Admin API; photos are now attached by passing
 # `files` to productSet in the same upsert.
 
@@ -60,6 +64,7 @@ class ShopifyPublisher:
         status: str = "DRAFT",
         require_images: bool = False,
         retire_status: str = "ARCHIVED",
+        publications: Optional[list[str]] = None,
     ) -> None:
         from coreyard.config import load_store
 
@@ -73,41 +78,70 @@ class ShopifyPublisher:
         self.require_images = require_images
         self.location = self.client.primary_location_id()
         self.images = SmbImageStore()
+        # Status and channel publication are different things: an ACTIVE product that is on
+        # no channel is a 404 to every shopper and to Google. Configured names are resolved
+        # once, here, so a typo fails at startup instead of per product.
+        self.publications = self._resolve_publications(
+            publications if publications is not None else publication_names())
+
+    def _resolve_publications(self, names: list[str]) -> list[str]:
+        ids = []
+        for name in names:
+            found = self.client.publication_id(name)
+            if not found:
+                raise RuntimeError(
+                    f"STORE_PUBLICATIONS names {name!r}, which is not a sales channel on "
+                    f"this store."
+                )
+            ids.append(found)
+        return ids
 
     # -- product ------------------------------------------------------------
-    def _find(self, handle: str) -> tuple[Optional[str], list[str], Optional[str]]:
-        """Return (product id, existing media ids, current status) for a handle."""
+    def _find(self, handle: str) -> tuple[Optional[str], list[str], Optional[str], list[str]]:
+        """Return (product id, existing media ids, current status, current tags)."""
         r = self.client.graphql(_FIND, {"h": handle})["productByIdentifier"]
         if not r:
-            return None, [], None
-        return r["id"], [n["id"] for n in r["media"]["nodes"]], r.get("status")
+            return None, [], None, []
+        return (r["id"], [n["id"] for n in r["media"]["nodes"]], r.get("status"),
+                list(r.get("tags") or []))
 
-    def _upsert(self, part: Part, product_id: Optional[str],
-                files: Optional[list] = None, status: Optional[str] = None) -> str:
-        inp = part_to_product_set_input(part, self.store)
+    def _upsert(self, product: RenderedProduct, quantity: int, product_id: Optional[str],
+                files: Optional[list] = None, status: Optional[str] = None,
+                existing_tags: Optional[list[str]] = None) -> str:
+        policy = self.store.catalog
+        inp = product_set_input(
+            product, status or self.status, existing_tags,
+            tuple(policy.preserved_tag_prefixes), policy.preserve_namespaced_tags,
+        )
         if files:
             inp["files"] = files
-        # productSet has "set" semantics: an omitted status would be reset to the default,
-        # so an existing product's status is read back and re-sent. Otherwise every sync
-        # would drag a product the owner had activated by hand back to DRAFT.
-        inp["status"] = status or self.status
         if product_id:
             inp["id"] = product_id
-        inp["variants"][0]["inventoryItem"] = {"tracked": True}
+        item = inp["variants"][0].setdefault("inventoryItem", {})
+        item["tracked"] = True
         inp["variants"][0]["inventoryQuantities"] = [
-            {"locationId": self.location, "name": "available", "quantity": max(int(part.quantity), 0)}
+            {"locationId": self.location, "name": "available", "quantity": max(quantity, 0)}
         ]
-        res = self.client.graphql(_SET, {"input": inp})["productSet"]
-        if res["userErrors"]:
-            raise RuntimeError(f"productSet R#{part.r_number}: {res['userErrors']}")
+        res = self.client.mutate(_SET, {"input": inp}, "productSet")
         return res["product"]["id"]
 
+    def publish_to_channels(self, product_id: str) -> None:
+        if not self.publications:
+            return
+        self.client.mutate(
+            _PUBLISH,
+            {"id": product_id, "input": [{"publicationId": p} for p in self.publications]},
+            "publishablePublish",
+        )
+
     # -- images -------------------------------------------------------------
-    def _staged_files(self, part: Part) -> list[dict]:
+    def _staged_files(self, part: Part, alt_for) -> list[dict]:
         """Upload this part's photos to Shopify's staging area.
 
         Returns FileSetInput dicts ready to hand to productSet — each with alt text, since
-        media created without it is invisible to image search.
+        media created without it is invisible to image search. ``alt_for`` is the canonical
+        renderer's alt text for photo *n*, so the alt a photo is created with and the alt
+        the audit and repair paths expect are one string, not two.
         """
         import requests
 
@@ -161,7 +195,7 @@ class ShopifyPublisher:
                 {
                     "originalSource": url,
                     "contentType": "IMAGE",
-                    "alt": seo.image_alt(part, i),
+                    "alt": alt_for(i),
                     "filename": name,
                 }
                 for i, (url, name) in enumerate(urls, start=1)
@@ -185,56 +219,63 @@ class ShopifyPublisher:
         ARCHIVED, restoring the part's stock onto a product no shopper can see. It is
         applied only to an archived product, so it can never override a hand-set status.
         """
-        product_id, media_ids, status = self._find(handle_for(part, self.store))
+        rendered = render(part, part.images, self.store)
+        product_id, media_ids, status, existing_tags = self._find(rendered.handle)
         if revive_status and status == self.retire_status:
             status = revive_status
         if refresh_images and media_ids:
-            res = self.client.graphql(_DELETE_FILES, {"ids": media_ids})["fileDelete"]
-            if res["userErrors"]:
-                raise RuntimeError(f"fileDelete R#{part.r_number}: {res['userErrors']}")
+            self.client.mutate(_DELETE_FILES, {"ids": media_ids}, "fileDelete")
             media_ids = []
-        files = self._staged_files(part) if not media_ids else []
-        product_id = self._upsert(part, product_id, files, status)
+        alt_for = self._alt_text(part)
+        files = self._staged_files(part, alt_for) if not media_ids else []
+        product_id = self._upsert(rendered, part.quantity, product_id, files, status,
+                                  existing_tags)
+        # Only a product that is meant to be visible is put on a channel: publishing a DRAFT
+        # would make the holding state for "not ready yet" mean nothing.
+        if (status or self.status) == "ACTIVE":
+            self.publish_to_channels(product_id)
         return product_id, len(files)
+
+    def _alt_text(self, part: Part):
+        from coreyard.transform import seo
+
+        return lambda index: seo.image_alt(part, index, self.store)
 
     def published_r_numbers(self) -> set[str]:
         """Every R# currently on the store under this installation's handle prefix.
 
-        The state file only knows what *it* published, which is not the same as what is on
-        the store: the bulk path tracks progress in its own JSONL, and a fresh state file
-        knows nothing at all. Asking Shopify directly is what lets a first incremental run
-        retire parts that sold before the state existed.
-        """
-        query = """query($cursor:String){ products(first:250, after:$cursor){
-          pageInfo{ hasNextPage endCursor } nodes{ handle status } } }"""
-        prefix = handle_for(Part(r_number="", part_type=""), self.store)  # "<prefix>-"
-        found: set[str] = set()
-        cursor = None
-        while True:
-            page = self.client.graphql(query, {"cursor": cursor})["products"]
-            for node in page["nodes"]:
-                # Already-archived products are the ones retirement produces; re-retiring
-                # them every run would be a pointless write per part per tick.
-                if node["status"] != self.retire_status and node["handle"].startswith(prefix):
-                    found.add(node["handle"][len(prefix):])
-            if not page["pageInfo"]["hasNextPage"]:
-                return found
-            cursor = page["pageInfo"]["endCursor"]
+        Already-archived products are excluded: they are what retirement produces, and
+        re-retiring them every run would be a pointless write per part per tick.
 
-    def retire(self, r_number: str, record_prior=None) -> str:
+        The scan itself lives in :mod:`coreyard.reconcile.store` so the sync's ``--reconcile``
+        and the standalone reconcile command read the store exactly the same way. Imported
+        here rather than at module scope because reconciliation publishes through this class.
+        """
+        from coreyard.reconcile.store import published_r_numbers
+
+        return published_r_numbers(self.client, self.store, self.retire_status)
+
+    def retire(self, r_number: str, record_prior=None, skip_draft: bool = False) -> str:
         """Take a sold part off sale: zero its inventory, then set the retire status.
 
-        Returns one of "retired", "already", or "absent". Inventory is zeroed *before* the
-        status change so that a failure part-way through leaves the part unbuyable rather
-        than visible with stock. Retiring is deliberately not a delete: the product, its
-        photos and its URL stay put, so an existing link or search result lands on a real
-        page instead of a 404, and the part can be revived if it comes back.
+        Returns one of "retired", "already", "draft", or "absent". Inventory is zeroed
+        *before* the status change so that a failure part-way through leaves the part
+        unbuyable rather than visible with stock. Retiring is deliberately not a delete: the
+        product, its photos and its URL stay put, so an existing link or search result lands
+        on a real page instead of a 404, and the part can be revived if it comes back.
 
         ``record_prior`` is called with (R#, status) for a product that is actually being
         archived now, so a caller holding the sync state can put the part back the way it
         was if it returns. It is deliberately not called for a product that is already
         archived: re-retiring a part must not overwrite the remembered status with
         ARCHIVED and strand it.
+
+        ``skip_draft`` is for callers retiring a part because it is *no longer listable*
+        rather than because it sold. A DRAFT product is already invisible to shoppers — it
+        is the holding state for "not ready", typically a part with no photos yet — so
+        archiving it writes to the store, zeroes a stock figure that was correct, and
+        destroys the difference between "not ready" and "gone". A sale is different: that
+        is positive evidence, so the order pipeline leaves this off.
         """
         # Built through handle_for, not by hand: the slugging rules must not drift between
         # the code that publishes a handle and the code that goes looking for it.
@@ -242,6 +283,8 @@ class ShopifyPublisher:
         found = self.client.graphql(_RETIRE_FIND, {"h": handle})["productByIdentifier"]
         if not found:
             return "absent"
+        if skip_draft and found["status"] == "DRAFT":
+            return "draft"
 
         # Recorded before anything is changed: a crash between here and the status update
         # leaves a part that is still sellable and merely has a note about it, which the
@@ -291,7 +334,7 @@ def main() -> int:
 
     limit = int(sys.argv[1]) if len(sys.argv) > 1 else 10
     status = sys.argv[2] if len(sys.argv) > 2 else "DRAFT"
-    parts = fetch_parts(limit=limit, images_only=True)
+    parts = fetch_parts(limit=limit, images_only=True)  # a hand-run smoke test
     print(f"Resolving interchange fitment for {len(parts)} parts…")
     with connect() as c:
         InterchangeResolver(c).attach(parts)

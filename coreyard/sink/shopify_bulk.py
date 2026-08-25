@@ -15,7 +15,7 @@ from coreyard.config import REPO_ROOT
 from coreyard.models import Part
 from coreyard.yms.db import connect
 from coreyard.yms.interchange import InterchangeResolver
-from coreyard.yms.inventory import fetch_parts
+from coreyard.yms.inventory import fetch_parts, photos_required
 from coreyard.sink.shopify_write import ShopifyPublisher
 
 DEFAULT_LOG = REPO_ROOT / "out" / "shopify_bulk_results.jsonl"
@@ -35,20 +35,21 @@ def _completed_r_numbers(path: Path) -> set[str]:
     return {r_number for r_number, status in latest.items() if status == "ok"}
 
 
-def _publisher(status: str) -> ShopifyPublisher:
+def _publisher(status: str, require_images: bool = True) -> ShopifyPublisher:
     publisher = getattr(_thread_local, "publisher", None)
     if publisher is None:
-        publisher = ShopifyPublisher(status=status, require_images=True)
+        publisher = ShopifyPublisher(status=status, require_images=require_images)
         _thread_local.publisher = publisher
     return publisher
 
 
-def _publish_with_retry(part: Part, status: str, max_attempts: int) -> dict[str, Any]:
+def _publish_with_retry(part: Part, status: str, max_attempts: int,
+                        require_images: bool = True) -> dict[str, Any]:
     started = time.monotonic()
     last_error: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            product_id, images_added = _publisher(status).publish(part)
+            product_id, images_added = _publisher(status, require_images).publish(part)
             return {
                 "status": "ok",
                 "r_number": part.r_number,
@@ -84,11 +85,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-attempts", type=int, default=5)
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
     parser.add_argument("--no-resume", action="store_true")
+    images = parser.add_mutually_exclusive_group()
+    images.add_argument("--images-only", dest="images_only", action="store_true",
+                        default=None,
+                        help="only publish parts the mapping says have photos "
+                             "(default: this installation's STORE_REQUIRE_IMAGES policy)")
+    images.add_argument("--all-parts", dest="images_only", action="store_false",
+                        help="publish every listable part, photographed or not")
     args = parser.parse_args(argv)
     if args.workers < 1:
         parser.error("--workers must be positive")
 
-    parts = fetch_parts(limit=args.limit, images_only=True)
+    # The same definition of "listable" the sync and reconciliation use, so a bulk load
+    # cannot create products that the next reconcile immediately archives.
+    parts = fetch_parts(limit=args.limit, images_only=args.images_only)
+    require_images = photos_required() if args.images_only is None else args.images_only
     already_done = set() if args.no_resume else _completed_r_numbers(args.log)
     selected = [part for part in parts if part.r_number not in already_done]
     print(
@@ -141,7 +152,8 @@ def main(argv: list[str] | None = None) -> int:
             resolver = InterchangeResolver(conn)
             for part in selected:
                 part.fitment = resolver.fitment_for(part)
-                future = pool.submit(_publish_with_retry, part, args.status, args.max_attempts)
+                future = pool.submit(_publish_with_retry, part, args.status,
+                                     args.max_attempts, require_images)
                 pending[future] = part
                 while len(pending) >= args.workers * 3:
                     record_completed(log_file, block=True)

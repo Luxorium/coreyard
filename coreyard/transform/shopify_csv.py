@@ -42,6 +42,7 @@ SHOPIFY_COLUMNS: list[str] = [
     "Image Position",
     "Image Alt Text",
     "SEO Title",
+    "SEO Description",
     "Status",
 ]
 

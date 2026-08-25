@@ -24,6 +24,7 @@ from coreyard.config import REPO_ROOT, StoreProfile, load_store
 from coreyard.models import Part
 from coreyard.sink.shopify_api import ShopifyClient
 from coreyard.transform import seo
+from coreyard.transform.render import r_number_from_handle
 
 DEFAULT_LOG = REPO_ROOT / "out" / "alt_backfill_results.jsonl"
 BATCH = 25
@@ -49,11 +50,6 @@ def _iter_products(client: ShopifyClient, max_pages: int | None = None) -> Itera
         if not page["pageInfo"]["hasNextPage"] or (max_pages and pages >= max_pages):
             return
         cursor = page["pageInfo"]["endCursor"]
-
-
-def _r_number(handle: str, store: StoreProfile) -> str | None:
-    prefix = f"{store.handle_prefix}-"
-    return handle[len(prefix):] if handle.startswith(prefix) else None
 
 
 def _completed(path: Path) -> set[str]:
@@ -82,7 +78,9 @@ def _plan(client: ShopifyClient, store: StoreProfile, done: set[str], overwrite:
     stats = {"products": 0, "ours": 0, "skipped_done": 0, "photos": 0, "already_set": 0}
     for node in _iter_products(client, max_pages):
         stats["products"] += 1
-        r_number = _r_number(node["handle"], store)
+        # The same handle rules the publisher uses, so a slugged prefix cannot make this
+        # walk quietly skip every product.
+        r_number = r_number_from_handle(node["handle"], store)
         if r_number is None:
             continue
         stats["ours"] += 1
@@ -164,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
         if part is None:
             continue
         for media_id, index in media:
-            updates.append({"id": media_id, "alt": seo.image_alt(part, index)})
+            updates.append({"id": media_id, "alt": seo.image_alt(part, index, store)})
             owner.append(r_number)
 
     if not updates:

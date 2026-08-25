@@ -8,6 +8,12 @@ freeform interchange) plus the resolved interchange fitment into:
   * year/make/model search tags.
 
 No AI, no external calls — pure string work, so it scales to the whole catalog instantly.
+
+The *engine* is generic; the *claims* are not. What a listing may assert — that a part was
+tested, that it is genuine, whether "OEM" belongs in a title, what a part type is called in
+shopper language — differs per yard, so every one of those strings comes from the store
+profile's :class:`~coreyard.profile.CatalogProfile` rather than being written in here. The
+defaults are the minimum CoreYard can know from the data. See :mod:`coreyard.profile`.
 """
 
 from __future__ import annotations
@@ -18,11 +24,22 @@ from datetime import date
 from typing import Optional
 
 from coreyard.config import StoreProfile
-from coreyard.models import Part
+from coreyard.models import VEHICLE_FIELDS, Part
+from coreyard.profile import DEFAULT_PROFILE, CatalogProfile
 
 TITLE_MAX = 255
 META_TITLE_MAX = 60
 META_DESC_MAX = 160
+
+# Shopper-facing labels for the optional donor-vehicle detail carried on ``Part.vehicle``.
+_VEHICLE_LABELS = {
+    "engine": "Engine",
+    "transmission": "Transmission",
+    "drivetrain": "Drivetrain",
+    "body": "Body",
+    "trim": "Trim",
+    "doors": "Doors",
+}
 
 # Common source part-type abbreviations -> fuller, search-friendly names.
 _PART_TYPE = {
@@ -114,8 +131,26 @@ def clean_model(model: Optional[str]) -> Optional[str]:
     return _smart_title(m) or None
 
 
-def expand_part_type(pt: str) -> str:
+def _policy(store: "StoreProfile | CatalogProfile | None") -> CatalogProfile:
+    """Accept a store, a bare profile, or nothing, and return the policy to render under."""
+    if store is None:
+        return DEFAULT_PROFILE
+    if isinstance(store, CatalogProfile):
+        return store
+    return store.catalog
+
+
+def expand_part_type(pt: str, store: "StoreProfile | CatalogProfile | None" = None) -> str:
+    """Shopper-facing name for a source part type.
+
+    The built-in table covers abbreviations common to this kind of source data; a site adds
+    or overrides entries through its profile's ``part_types``, because which wording sells
+    a part is a merchandising decision, not a fact about the database.
+    """
     key = re.sub(r"\s+", " ", pt.strip().lower())
+    overrides = _policy(store).part_types
+    if key in overrides:
+        return overrides[key]
     if key in _PART_TYPE:
         return _PART_TYPE[key]
     # generic cleanup: title-case, drop trailing " Pts"/" Assy"
@@ -282,7 +317,7 @@ _SIDE_SHORT = {"LEFT": "Left Driver", "L": "Left Driver",
                "RIGHT": "Right Passenger", "R": "Right Passenger"}
 
 
-def title_side(part: Part) -> str:
+def title_side(part: Part, store: "StoreProfile | CatalogProfile | None" = None) -> str:
     """Side wording for a title, chosen so the word "Side" appears exactly once.
 
     "Side View Door Mirror" already supplies it, so the side reads "Left Driver" and the
@@ -292,13 +327,13 @@ def title_side(part: Part) -> str:
     key = (part.side or "").strip().upper()
     if not key:
         return ""
-    if "side" in expand_part_type(part.part_type).lower():
+    if "side" in expand_part_type(part.part_type, store).lower():
         return _SIDE_SHORT.get(key, "")
     return _SIDE_PHRASE.get(key, "")
 
 
-def _title_part_type(part: Part) -> str:
-    return seo_clean(expand_part_type(part.part_type))
+def _title_part_type(part: Part, store=None) -> str:
+    return seo_clean(expand_part_type(part.part_type, store))
 
 
 # "from 11/82" / "thru 10/82" — production splits, useless as title keywords.
@@ -384,14 +419,19 @@ def title_qualifiers(part: Part, max_phrases: int = 5, max_chars: int = 55) -> l
     return chosen
 
 
-def build_title(part: Part, max_models: int = 4) -> str:
+def build_title(part: Part, store: "StoreProfile | CatalogProfile | None" = None,
+                max_models: Optional[int] = None) -> str:
     """e.g. "2008 Ford F150 Left Driver Side View Door Mirror".
 
-    No dashes, slashes or symbols, and never the word "OEM" — that stays in the tags and
-    the description, where it does not eat title space.
+    No dashes, slashes or symbols. Whether the word "OEM" appears is the site's call
+    (``title_include_oem``): it is a high-intent search term, but it also eats characters
+    that could carry another model, and it stays in the tags and description regardless.
     """
-    pt = _title_part_type(part)
-    side = title_side(part)
+    policy = _policy(store)
+    if max_models is None:
+        max_models = policy.title_max_models
+    pt = _title_part_type(part, store)
+    side = title_side(part, store)
     years = _year_tokens(*_year_span(part))
     labels = [c for c in (seo_clean(l) for l in _model_labels(part)) if c]
     spec = part_spec(part)
@@ -404,7 +444,8 @@ def build_title(part: Part, max_models: int = 4) -> str:
             continue
         extra.append(" ".join(kept))
         seen |= {w.lower() for w in kept}
-    tail = " ".join(x for x in (side, pt, " ".join(spec + extra)) if x)
+    lead = "OEM" if policy.title_include_oem and "oem" not in seen else ""
+    tail = " ".join(x for x in (side, lead, pt, " ".join(spec + extra)) if x)
     if not labels:
         return _cap(" ".join(x for x in (years, tail) if x), TITLE_MAX)
     shown = labels[:max_models]
@@ -413,35 +454,54 @@ def build_title(part: Part, max_models: int = 4) -> str:
     return _cap(" ".join(x for x in (years, models, tail) if x), TITLE_MAX)
 
 
-def meta_title(part: Part) -> str:
+def meta_title(part: Part, store: "StoreProfile | CatalogProfile | None" = None) -> str:
     labels = [c for c in (seo_clean(l) for l in _model_labels(part)) if c]
     bits = (_year_tokens(*_year_span(part)), labels[0] if labels else "",
-            title_side(part), _title_part_type(part))
+            title_side(part, store), _title_part_type(part, store))
     return _cap(" ".join(x for x in bits if x), META_TITLE_MAX)
 
 
 def meta_description(part: Part, store: Optional[StoreProfile] = None) -> str:
     store = store or StoreProfile()
-    pt = expand_part_type(part.part_type)
+    policy = _policy(store)
+    pt = expand_part_type(part.part_type, store)
     labels = _model_labels(part)
     fit = ", ".join(labels[:3]) + (" and more" if len(labels) > 3 else "")
     years = _year_tokens(*_year_span(part))
     stock = f" Stock #{part.stock_number}." if part.stock_number else ""
-    origin = store.origin()
-    where = f" In stock and tested at {origin}." if origin else " In stock and tested."
+    # What the site is willing to claim about availability and condition, not what CoreYard
+    # assumes: not every yard tests every part, and saying so for them would be a lie the
+    # seller never told.
+    where = f" {policy.availability_text(store.origin())}"
     warranty = f" {store.warranty}." if store.warranty else ""
     lead = " ".join(x for x in ("Used OEM", side_phrase(part.side), pt) if x)
     txt = f"{lead} for {years} {fit}." + where + warranty + stock
     return _cap(txt, META_DESC_MAX)
 
 
+def _lead_html(policy: CatalogProfile, part_type: str, origin: str) -> str:
+    """The description's opening sentence, from site-supplied text.
+
+    The profile carries *text*, never markup: the template is escaped here and the emphasis
+    around the part type is added by this function, so a profile can change what a listing
+    claims without being able to inject HTML into the storefront.
+    """
+    text = policy.lead_text(part_type, origin)
+    before, marker, after = text.partition(part_type) if part_type else (text, "", "")
+    body = (f"{html.escape(before)}<strong>{html.escape(part_type)}</strong>{html.escape(after)}"
+            if marker else html.escape(text))
+    sold_by = policy.sold_by_text(origin)
+    if sold_by:
+        body += " " + html.escape(sold_by)
+    return f"<p>{body}</p>"
+
+
 def build_body_html(part: Part, store: Optional[StoreProfile] = None) -> str:
     store = store or StoreProfile()
-    pt = expand_part_type(part.part_type)
+    policy = _policy(store)
+    pt = expand_part_type(part.part_type, store)
     origin = store.origin()
-    sold_by = f" Sold by {html.escape(origin)}." if origin else ""
-    lines = [f"<p>Genuine <strong>OEM {html.escape(pt)}</strong>, removed from an inventoried "
-             f"donor vehicle and inspected.{sold_by}</p>"]
+    lines = [_lead_html(policy, pt, origin)]
     if _looks_like_prose(part.description):
         lines.append(f"<p>{html.escape(part.description)}</p>")
 
@@ -465,11 +525,16 @@ def build_body_html(part: Part, store: Optional[StoreProfile] = None) -> str:
             lines.append("    </ul>")
             lines.append("  </li>")
         lines.append("</ul>")
-        lines.append("<p><em>Verify fitment by year, options, and part/casting numbers where "
-                     "shown in the photos.</em></p>")
+        if policy.fitment_note:
+            lines.append(f"<p><em>{html.escape(policy.fitment_note)}</em></p>")
 
     details = [
-        ("Condition", f"Grade {part.grade}" if part.grade else "Used, tested"),
+        # Donor specifics first: they describe the vehicle the "Fits" list just named, and
+        # a shopper checking whether this is the 5.0L is looking for them, not for the
+        # bookkeeping identifiers further down. Every one is absent unless the site opted
+        # into enrichment, so the rendered block is byte-identical otherwise.
+        *((_VEHICLE_LABELS[f], part.vehicle.get(f)) for f in VEHICLE_FIELDS),
+        ("Condition", policy.condition_text(part.grade)),
         ("Side", side_phrase(part.side) or None),
         ("Interchange #", part.interchange_number),
         ("Mileage", f"{part.mileage:,} mi" if part.mileage else None),
@@ -486,7 +551,8 @@ def build_body_html(part: Part, store: Optional[StoreProfile] = None) -> str:
     return "\n".join(lines)
 
 
-def image_alt(part: Part, index: int = 1) -> str:
+def image_alt(part: Part, index: int = 1,
+              store: "StoreProfile | CatalogProfile | None" = None) -> str:
     """Alt text for an uploaded photo.
 
     Staged media were being created with no alt at all, which costs image search results
@@ -495,12 +561,13 @@ def image_alt(part: Part, index: int = 1) -> str:
     """
     # Screen readers announce alt text in full, so keep it to roughly one sentence
     # rather than the whole multi-model title.
-    base = _cap(build_title(part), 125) or expand_part_type(part.part_type)
+    base = _cap(build_title(part, store), 125) or expand_part_type(part.part_type, store)
     return f"{base} photo {index}" if index > 1 else base
 
 
 def build_tags(part: Part, store: Optional[StoreProfile] = None, max_tags: int = 120) -> list[str]:
     store = store or StoreProfile()
+    policy = _policy(store)
     tags: list[str] = []
     seen: set[str] = set()
 
@@ -540,7 +607,14 @@ def build_tags(part: Part, store: Optional[StoreProfile] = None, max_tags: int =
     for term in part_spec(part):
         add(term)
     add(side_phrase(part.side))
-    add(expand_part_type(part.part_type))
-    add("Used OEM")
-    add(store.vendor)
+    add(expand_part_type(part.part_type, store))
+    # Alternate trade names for the same part, so a shopper searching "taillamp" finds the
+    # one filed as "Tail Light". Empty unless the site opted into enrichment, which keeps
+    # this a no-op — and the fingerprint stable — for everyone who has not.
+    for alias in part.aliases:
+        add(alias)
+    for extra in policy.tags:
+        add(extra)
+    if policy.tag_vendor:
+        add(store.vendor)
     return tags

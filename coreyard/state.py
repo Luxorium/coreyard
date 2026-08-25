@@ -3,9 +3,9 @@
 A tiny SQLite table maps ``R# -> content fingerprint``. Each run fingerprints
 the parts it would publish and diffs against the stored snapshot to classify every part
 as added / changed / unchanged, and to detect removals (R#s we published
-before that are no longer priced-and-available — i.e. sold). The fingerprint is taken
-over the exact primary Shopify row plus the full ordered image list, so it moves only
-when something a shopper would see changes.
+before that are no longer listable — i.e. sold). The fingerprint is taken over the canonical
+rendered product — the same object both sinks publish, photos and alt text included — so it
+moves exactly when something a shopper would see changes, and never fails to.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from typing import Iterable
 
 from coreyard.config import REPO_ROOT, StoreProfile
 from coreyard.models import Part
-from coreyard.transform.shopify_product import primary_row
+from coreyard.transform.render import render
 
 # Named here rather than in the sync orchestrator because the order webhook also needs to
 # reach the retirement memory, and importing the whole sync path to learn a filename would
@@ -29,17 +29,15 @@ DEFAULT_STATE_DB = REPO_ROOT / "coreyard_sync_state.sqlite3"
 
 
 def product_fingerprint(part: Part, image_urls: list[str], store: StoreProfile) -> str:
-    """Stable SHA-256 over the published content (primary row + image list)."""
-    first = image_urls[0] if image_urls else None
-    payload = {
-        "row": primary_row(part, first, store),
-        "images": image_urls,
-        # The fitment key drives the whole fitment section but never reaches primary_row,
-        # so re-keying a part to a different interchange would otherwise go undetected.
-        "interchange_code": part.interchange_code,
-    }
-    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    return hashlib.sha256(blob).hexdigest()
+    """Stable SHA-256 over the canonical rendered product.
+
+    It hashes the *same object both sinks publish*, which is the whole point. Fingerprinting
+    one renderer while publishing through another meant a change to the published title,
+    tags, description or SEO metadata left the stored hash untouched, so the next run called
+    every stale product "unchanged" and the storefront kept output no current version of the
+    code would produce. See :mod:`coreyard.transform.render`.
+    """
+    return render(part, image_urls, store).fingerprint()
 
 
 def image_fingerprint(image_urls: list[str]) -> str:
@@ -94,6 +92,15 @@ class SyncState:
             " status TEXT NOT NULL,"
             " retired_at TEXT NOT NULL)"
         )
+        # Where a delta run left off. Kept beside the fingerprints on purpose: a cursor that
+        # outlived the snapshot it was taken against would make the next delta run skip every
+        # change between them, and the two are only meaningful together.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS cursors ("
+            " name TEXT PRIMARY KEY,"
+            " value TEXT NOT NULL,"
+            " updated_at TEXT NOT NULL)"
+        )
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(parts)")}
         if "stock" in columns and "r_number" not in columns:
             # Older snapshots already stored the R# in a misleadingly named column.
@@ -131,11 +138,20 @@ class SyncState:
             if fp
         }
 
-    def diff(self, current: dict[str, str], images: dict[str, str] | None = None) -> DiffResult:
+    def diff(
+        self,
+        current: dict[str, str],
+        images: dict[str, str] | None = None,
+        detect_removals: bool = True,
+    ) -> DiffResult:
         """Classify current fingerprints against the stored snapshot.
 
         ``images`` is the parallel photo-set fingerprint map. When given, parts whose photos
         moved are reported in ``image_changed`` so the caller can re-upload only those.
+
+        ``detect_removals`` must be False when ``current`` is a *subset* of the yard, as it
+        is for a delta run. Removal is inferred from absence, and every part the subset did
+        not look at is absent — so leaving this on would report the entire catalogue as sold.
         """
         previous = self.load()
         result = DiffResult()
@@ -146,9 +162,10 @@ class SyncState:
                 result.changed.append(r_number)
             else:
                 result.unchanged.append(r_number)
-        for r_number in previous:
-            if r_number not in current:
-                result.removed.append(r_number)
+        if detect_removals:
+            for r_number in previous:
+                if r_number not in current:
+                    result.removed.append(r_number)
         if images:
             previous_images = self.load_images()
             result.image_changed = [
@@ -162,6 +179,20 @@ class SyncState:
                     result.removed, result.image_changed):
             lst.sort()
         return result
+
+    # -- delta cursors -------------------------------------------------------
+    def get_cursor(self, name: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT value FROM cursors WHERE name = ?", (str(name),)
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_cursor(self, name: str, value: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO cursors(name, value, updated_at) VALUES (?,?,?)",
+                (str(name), str(value), datetime.now(timezone.utc).isoformat()),
+            )
 
     # -- retirement memory ---------------------------------------------------
     def record_retired(self, r_number: str, status: str) -> None:
@@ -193,6 +224,33 @@ class SyncState:
             return
         with self.conn:
             self.conn.executemany("DELETE FROM retired WHERE r_number = ?", keys)
+
+    def update(self, current: dict[str, str], images: dict[str, str] | None = None) -> None:
+        """Merge a *subset* of fingerprints into the snapshot, leaving the rest alone.
+
+        The delta path's counterpart to :meth:`commit`. Calling ``commit`` with a delta's
+        handful of parts would delete every part it did not look at, and the next full run
+        would then republish the whole catalogue as new.
+        """
+        if not current:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        images = images or {}
+        with self.conn:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO parts"
+                "(r_number, fingerprint, image_fingerprint, last_seen) VALUES (?,?,?,?)",
+                [(r_number, fp, images.get(r_number, ""), now)
+                 for r_number, fp in current.items()],
+            )
+
+    def forget(self, r_numbers: Iterable[str]) -> None:
+        """Drop specific parts from the snapshot, as retirement does for a full run."""
+        keys = [(str(r),) for r in r_numbers]
+        if not keys:
+            return
+        with self.conn:
+            self.conn.executemany("DELETE FROM parts WHERE r_number = ?", keys)
 
     def commit(self, current: dict[str, str], images: dict[str, str] | None = None) -> None:
         """Replace the snapshot with the current set (removes vanished R#s)."""
