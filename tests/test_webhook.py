@@ -260,8 +260,10 @@ class Worker(unittest.TestCase):
         # Always a throwaway state file: the retirement memory lives in the sync's
         # database, and a test must never open the installation's real one.
         kwargs.setdefault("state_db", directory / "sync-state.sqlite3")
-        with patch("coreyard.webhook.TICKET_DIR", directory), \
-                patch("coreyard.webhook.load_store", return_value=STORE):
+        # The worker lives in the order pipeline; the webhook module is only one of the
+        # transports that feed it.
+        with patch("coreyard.orders.pipeline.TICKET_DIR", directory), \
+                patch("coreyard.orders.pipeline.load_store", return_value=STORE):
             return OrderWorker(**kwargs)
 
     def test_unpaid_order_is_refused_before_lookup(self):
