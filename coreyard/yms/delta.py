@@ -35,7 +35,7 @@ from typing import Any, Optional
 from coreyard.models import Part
 from coreyard.yms import schema
 from coreyard.yms.db import connect, query, server_now
-from coreyard.yms.inventory import FETCH_PAGE_SIZE, row_to_part
+from coreyard.yms.inventory import FETCH_PAGE_SIZE, photos_required, row_to_part
 
 # Name of the stored cursor. One cursor covers both the row and photo deltas: they are read
 # in the same pass against the same server clock, so splitting them would only create a way
@@ -114,12 +114,14 @@ class DeltaResult:
         )
 
 
-def _page_rows(conn, mapping, since: datetime) -> tuple[list[dict[str, Any]], bool]:
+def _page_rows(conn, mapping, since: datetime,
+               images_only: bool = False) -> tuple[list[dict[str, Any]], bool]:
     """Read every changed row, keyset-paged on R# so no reply is unbounded."""
     rows: list[dict[str, Any]] = []
     after: Any = None
     while True:
-        page = query(conn, mapping.build_delta_query(since, FETCH_PAGE_SIZE, after))
+        page = query(conn, mapping.build_delta_query(since, FETCH_PAGE_SIZE, after,
+                                                     images_only))
         rows.extend(page)
         if len(page) < FETCH_PAGE_SIZE:
             return rows, False
@@ -171,7 +173,10 @@ def _fetch_changes_once(since: datetime, overlap: timedelta) -> DeltaResult:
         now = server_now(conn)
         result.cursor = now - overlap
 
-        rows, result.truncated = _page_rows(conn, mapping, since)
+        # Same listable definition as the full sync, or the two would fight over every
+        # unphotographed part that changed.
+        images_only = photos_required(mapping)
+        rows, result.truncated = _page_rows(conn, mapping, since, images_only)
         seen: set[str] = set()
         for row in rows:
             part = row_to_part(row)
@@ -192,7 +197,8 @@ def _fetch_changes_once(since: datetime, overlap: timedelta) -> DeltaResult:
         extra = sorted(photos - seen)
         if extra:
             for chunk in (extra[i:i + 200] for i in range(0, len(extra), 200)):
-                for row in query(conn, mapping.build_lookup_query(chunk, with_scope=True)):
+                for row in query(conn, mapping.build_lookup_query(
+                        chunk, with_scope=True, images_only=images_only)):
                     part = row_to_part(row)
                     key = part.uid()
                     if not key or key in seen:

@@ -18,6 +18,7 @@ import re
 from decimal import Decimal
 from typing import Any, Optional
 
+from coreyard.config import require_images
 from coreyard.models import Part
 from coreyard.yms import schema
 from coreyard.yms.db import connect, query
@@ -34,8 +35,35 @@ def is_configured() -> bool:
     return schema.is_configured()
 
 
-def build_query(limit: Optional[int] = None, images_only: bool = False) -> str:
-    return schema.load().build_query(limit=limit, images_only=images_only)
+def photos_required(mapping: Optional[schema.SourceSchema] = None) -> bool:
+    """Whether this installation only lists parts that have at least one photo.
+
+    **The single definition of "listable".** Sync, reconciliation, bulk publishing and the
+    catalog audit all ask here rather than each assembling its own SQL condition, because
+    when they disagree the storefront ends up in a state no one of them can explain: sync
+    publishes an unphotographed part, reconciliation calls it unlistable and archives it,
+    and the next sync publishes it again. Which is exactly what happened.
+
+    Off by default, so an upgrade never silently changes which parts an existing
+    installation publishes; a site turns it on with ``STORE_REQUIRE_IMAGES=true``.
+    """
+    if not require_images():
+        return False
+    mapping = mapping or schema.load()
+    if not mapping.supports_images_filter:
+        raise schema.SchemaError(
+            "STORE_REQUIRE_IMAGES is on, but this mapping has no 'images_filter' "
+            "expression, so CoreYard cannot tell which parts have photos. Add one to "
+            "schema.json (see schema.example.json) or turn the setting off."
+        )
+    return True
+
+
+def build_query(limit: Optional[int] = None, images_only: Optional[bool] = None) -> str:
+    mapping = schema.load()
+    if images_only is None:
+        images_only = photos_required(mapping)
+    return mapping.build_query(limit=limit, images_only=images_only)
 
 
 # --- value coercion (impacket returns everything as str; NULL as the string 'NULL') ---
@@ -109,8 +137,11 @@ def row_to_part(row: dict[str, Any]) -> Part:
     return part
 
 
-def fetch_parts(limit: Optional[int] = None, images_only: bool = False) -> list[Part]:
+def fetch_parts(limit: Optional[int] = None, images_only: Optional[bool] = None) -> list[Part]:
     """Connect (read-only, over the SMB named pipe) and return listable parts.
+
+    ``images_only`` defaults to this installation's photo policy (see
+    :func:`photos_required`); pass a boolean only to override it deliberately.
 
     Impacket's TDS parser materializes a whole reply and repeatedly slices its remaining
     bytes while decoding rows. A full yard extract therefore has quadratic transient memory
@@ -118,6 +149,8 @@ def fetch_parts(limit: Optional[int] = None, images_only: bool = False) -> list[
     so a large catalogue cannot exhaust the host.
     """
     mapping = schema.load()
+    if images_only is None:
+        images_only = photos_required(mapping)
     maximum = int(limit) if limit else None
     fetched_total = 0
     after: Any = None
@@ -161,6 +194,37 @@ def fetch_parts_by_r_number(r_numbers: list[str]) -> dict[str, Part]:
         rows = query(conn, sql)
     parts = (row_to_part(r) for r in rows)
     return {p.uid(): p for p in parts if p.uid()}
+
+
+def listable_r_numbers(images_only: Optional[bool] = None) -> set[str]:
+    """Every R# the yard says may be listed right now — identifiers only.
+
+    The authoritative answer to "what should be on the storefront", and the cheap half of
+    reconciliation: it reads one column instead of rendering a catalogue, so asking the yard
+    directly costs seconds rather than minutes. Same scope predicate and same photo policy
+    as :func:`fetch_parts`, because a reconciliation that used a different definition would
+    retire the parts sync had just published.
+    """
+    mapping = schema.load()
+    if images_only is None:
+        images_only = photos_required(mapping)
+    found: set[str] = set()
+    after: Any = None
+    while True:
+        with connect() as conn:
+            rows = query(
+                conn, mapping.build_identity_page_query(FETCH_PAGE_SIZE, after, images_only)
+            )
+        for row in rows:
+            value = _clean(row.get("r_number"))
+            if value:
+                found.add(value)
+        if len(rows) < FETCH_PAGE_SIZE:
+            return found
+        next_after = rows[-1].get("r_number")
+        if next_after is None or str(next_after) == str(after):
+            raise RuntimeError("listable paging did not advance past the last R#")
+        after = next_after
 
 
 if __name__ == "__main__":
