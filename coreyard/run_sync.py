@@ -8,12 +8,17 @@ Typical uses:
 
 The first real run doubles as the bulk load. State lives in ``coreyard_sync_state.sqlite3`` so
 subsequent runs only act on adds/changes and can retire sold parts.
+
+The diff here compares the yard against that snapshot, never against the store. That is the
+right trade for a run on a timer and it is blind to drift on Shopify's side, which is what
+``coreyard reconcile`` and ``coreyard repair`` exist to answer.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from coreyard.config import REPO_ROOT, load_settings
@@ -48,6 +53,28 @@ def _make_resolver(image_base_url: str | None, scan_images: bool = True) -> Imag
     def resolver(part) -> list[str]:
         key = part.image_key()  # R# — the photo filename stem on the share
         names = index.get(key, [])
+        return [f"{base}/{key}/{n}" for n in names] if base else list(names)
+
+    return resolver
+
+
+def _make_part_resolver(image_base_url: str | None) -> ImageResolver:
+    """Per-part photo lookup, for the small candidate sets a delta run produces.
+
+    The full sync lists the whole share once because it asks about 26,000 parts. A delta run
+    asks about a few dozen, where anchored per-part lookups are both cheaper and fresher.
+    The returned shape is deliberately identical to the full resolver's — same filenames, same
+    order — because these strings land in the stored fingerprint, and a delta run that spelled
+    them differently would mark every part it touched as changed.
+    """
+    from coreyard.yms.images import SmbImageStore
+
+    store = SmbImageStore()
+    base = image_base_url.rstrip("/") if image_base_url else None
+
+    def resolver(part) -> list[str]:
+        key = part.image_key()
+        names = store.list_inventory_images(key)
         return [f"{base}/{key}/{n}" for n in names] if base else list(names)
 
     return resolver
@@ -101,8 +128,175 @@ def _retirement_plan(diff, args) -> tuple[list[str], str]:
     return list(diff.removed), ""
 
 
+def _enrich(conn, parts) -> None:
+    """Attach part-type aliases and donor-vehicle detail, when this site asked for them.
+
+    Off unless ``COREYARD_ENRICH`` is set, because these strings reach the rendered product
+    and therefore the fingerprint: turning it on re-publishes every part it touches, which
+    is a decision to schedule rather than to inherit from an upgrade.
+    """
+    from coreyard.yms.enrich import CatalogEnricher, enabled
+
+    if not (parts and enabled()):
+        return
+    try:
+        CatalogEnricher(conn).attach(parts)
+    except Exception as exc:
+        # Enrichment is additive. Losing it degrades the copy; failing the run over it would
+        # stop parts reaching the storefront at all.
+        print(f"  (enrichment skipped: {exc})")
+
+
+def _delta_baseline():
+    """The server clock to hand the next delta run, or None if this site has no delta mapping.
+
+    Best-effort: a full sync is useful whether or not delta support is configured, so a
+    failure to read the clock must not fail the run — it only means the next delta run has
+    no fresher cursor to start from.
+    """
+    try:
+        from coreyard.yms import schema as schema_mod
+
+        if not schema_mod.load().supports_delta:
+            return None
+        from coreyard.yms.db import connect, server_now
+        from coreyard.yms.delta import DEFAULT_OVERLAP
+
+        with connect() as conn:
+            return server_now(conn) - DEFAULT_OVERLAP
+    except Exception as exc:
+        print(f"  (could not read the source clock for a delta cursor: {exc})")
+        return None
+
+
+def cmd_delta(args) -> int:
+    """Catch-up run: publish what changed since the last cursor, retire what left scope.
+
+    Complements the full sync rather than replacing it. It is cheap enough to run every few
+    minutes, which is what closes the window where a part sold at the counter (or on another
+    sales channel) stays buyable online until the next hourly extract.
+    """
+    from coreyard.yms import schema as schema_mod
+    from coreyard.yms.delta import CURSOR_NAME, fetch_changes
+    from coreyard.yms.inventory import is_configured
+
+    if not is_configured():
+        print("No schema mapping yet — see README 'Map your database'.", file=sys.stderr)
+        return 2
+    mapping = schema_mod.load()
+    if not mapping.supports_delta:
+        print("This mapping has no 'modified_at' expression, so it cannot answer "
+              "'what changed since ...'.\nAdd one (see schema.example.json) or run a full "
+              "sync.", file=sys.stderr)
+        return 2
+
+    settings = load_settings()
+    with SyncState(STATE_DB) as state:
+        cursor = state.get_cursor(CURSOR_NAME)
+        if not cursor:
+            print("No delta cursor yet. Run a full sync first — it records the cursor "
+                  "alongside the snapshot this run has to diff against.", file=sys.stderr)
+            return 2
+
+        print(f"Fetching changes since {cursor} ...")
+        changes = fetch_changes(datetime.fromisoformat(cursor))
+        print("  " + changes.summary())
+        if changes.truncated:
+            print(f"  NOTE: more than {len(changes.listable) + len(changes.left_scope)} rows "
+                  f"changed; this is no longer a delta. Publishing what was read, but NOT "
+                  f"retiring — run a full sync to resynchronise.")
+
+        resolver = _make_part_resolver(args.image_base_url)
+        current, image_fps = fingerprints_with_images(
+            changes.listable, resolver, settings.store)
+        diff = state.diff(current, image_fps, detect_removals=False)
+        print("  vs last publish:", diff.summary())
+
+        # Only parts we believe are published may be retired, and only because we hold the
+        # row that says they left scope. Absence proves nothing here and is never used.
+        published = state.load()
+        retire = [r for r in changes.left_scope if r in published]
+        if changes.truncated:
+            retire = []
+        elif retire and published:
+            share = len(retire) / len(published)
+            if share > args.max_retire_fraction and not args.force_retire:
+                print(f"  REFUSING to retire {len(retire)} part(s) — {share:.0%} of the "
+                      f"catalogue in one delta. Re-run with --force-retire if it is real.")
+                retire = []
+
+        revivals = {r: s for r, s in state.retired_statuses().items() if r in current}
+        todo_keys = set(diff.added) | set(diff.changed)
+        todo = [p for p in changes.listable if p.uid() in todo_keys]
+
+        if args.dry_run:
+            print(f"Dry run: would upsert {len(todo)} product(s) "
+                  f"({len(set(diff.image_changed) & todo_keys)} photo refresh), "
+                  f"revive {len(revivals)}, and retire {len(retire)}.")
+            print("Dry run: cursor NOT advanced.")
+            return 0
+
+        from coreyard.sink.shopify_write import ShopifyPublisher
+
+        publisher = ShopifyPublisher(store=settings.store, status=args.status)
+        if todo:
+            from coreyard.yms.db import connect
+            from coreyard.yms.interchange import InterchangeResolver
+
+            print(f"Resolving fitment for {len(todo)} part(s) ...")
+            with connect() as conn:
+                InterchangeResolver(conn).attach(todo)
+                _enrich(conn, todo)
+
+        # A part whose photos moved needs its media rebuilt even when the fingerprint moved
+        # for an unrelated reason, so both signals are unioned.
+        needs_photos = set(diff.image_changed) | changes.photo_changed
+        revived: set[str] = set()
+        published_ok: set[str] = set()
+        for i, part in enumerate(todo, 1):
+            key = part.uid()
+            try:
+                publisher.publish(part, refresh_images=key in needs_photos,
+                                  revive_status=revivals.get(key))
+            except RuntimeError as exc:
+                # Leave this part out of the state update so the next run retries it.
+                print(f"  R#{key}: {exc}")
+                continue
+            published_ok.add(key)
+            if key in revivals:
+                revived.add(key)
+            if i % 25 == 0 or i == len(todo):
+                print(f"  {i}/{len(todo)}")
+        state.clear_retired(revived)
+
+        retired: set[str] = set()
+        if retire:
+            print(f"Retiring {len(retire)} part(s) that left scope "
+                  f"(qty 0, {publisher.retire_status}) ...")
+            for i, r_number in enumerate(retire, 1):
+                try:
+                    # Out of scope, not sold: leave an already-invisible draft as it is.
+                    publisher.retire(r_number, record_prior=state.record_retired,
+                                     skip_draft=True)
+                    retired.add(r_number)
+                except RuntimeError as exc:
+                    print(f"  R#{r_number}: {exc}")
+                if i % 25 == 0 or i == len(retire):
+                    print(f"  {i}/{len(retire)}")
+
+        # Record only what actually landed, then advance the cursor. A part that failed to
+        # publish keeps its old fingerprint (or none), so the next run picks it up again.
+        state.update({k: v for k, v in current.items() if k in published_ok},
+                     {k: v for k, v in image_fps.items() if k in published_ok})
+        state.forget(retired)
+        if changes.cursor:
+            state.set_cursor(CURSOR_NAME, changes.cursor.isoformat())
+            print(f"Cursor advanced to {changes.cursor.isoformat()}.")
+    return 0
+
+
 def cmd_sync(args) -> int:
-    from coreyard.yms.inventory import fetch_parts, is_configured
+    from coreyard.yms.inventory import fetch_parts, is_configured, photos_required
 
     if not is_configured():
         print(
@@ -116,10 +310,17 @@ def cmd_sync(args) -> int:
         return 2
 
     settings = load_settings()
+
+    # Taken before the extract, not after: rows that move while a long full run is reading
+    # are still ahead of this mark, so the next delta run picks them up instead of assuming
+    # the full run must already have seen them.
+    baseline = _delta_baseline() if not args.limit else None
+
     resolver = _make_resolver(args.image_base_url, scan_images=not args.no_image_scan)
     print(f"Fetching parts (limit={args.limit or 'none'}) ...")
     parts = fetch_parts(limit=args.limit)
-    print(f"  {len(parts)} priced-and-available parts")
+    print(f"  {len(parts)} listable part(s)"
+          f"{' (photos required)' if photos_required() else ''}")
 
     # Incremental diff
     current, image_fps = fingerprints_with_images(parts, resolver, settings.store)
@@ -187,6 +388,7 @@ def cmd_sync(args) -> int:
                 print(f"Resolving fitment for {len(todo)} part(s) ...")
                 with connect() as conn:
                     InterchangeResolver(conn).attach(todo)
+                    _enrich(conn, todo)
 
             needs_photos = set(diff.image_changed)
             if args.retire_only:
@@ -208,16 +410,27 @@ def cmd_sync(args) -> int:
 
             if retire:
                 print(f"Retiring {len(retire)} sold part(s) (qty 0, {publisher.retire_status}) ...")
+                skipped_drafts = 0
                 for i, r_number in enumerate(retire, 1):
                     try:
-                        publisher.retire(r_number, record_prior=state.record_retired)
+                        # Absence is why this part is here, not a sale. A DRAFT product is
+                        # already invisible, so archiving it would only destroy the
+                        # difference between "not ready" and "gone".
+                        outcome = publisher.retire(r_number,
+                                                   record_prior=state.record_retired,
+                                                   skip_draft=True)
+                        # A skipped draft still leaves the snapshot: it is not listable, and
+                        # keeping it would re-propose the same no-op on every future run.
                         retired.add(r_number)
+                        skipped_drafts += outcome == "draft"
                     except RuntimeError as exc:
                         # One stubborn product must not strand the rest, and an R# that was
                         # not retired must stay in the snapshot so the next run tries again.
                         print(f"  R#{r_number}: {exc}")
                     if i % 25 == 0 or i == len(retire):
                         print(f"  {i}/{len(retire)}")
+                if skipped_drafts:
+                    print(f"  ({skipped_drafts} already-draft product(s) left alone)")
 
         if args.retire_only:
             # Nothing was published, so committing `current` would record 26,000 parts as
@@ -233,6 +446,13 @@ def cmd_sync(args) -> int:
             snapshot.update(carried)
             state.commit(snapshot, image_fps)
             print(f"State committed{f' ({len(carried)} unretired carried forward)' if carried else ''}.")
+            if baseline is not None:
+                # Only a full run may set this: it is the only one that has just reconciled
+                # the whole yard, which is what makes "everything before this mark is already
+                # published" true.
+                from coreyard.yms.delta import CURSOR_NAME
+
+                state.set_cursor(CURSOR_NAME, baseline.isoformat())
         else:
             print("Dry run: state NOT committed.")
     return 0
@@ -241,6 +461,9 @@ def cmd_sync(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="coreyard.run_sync", description="source database -> Shopify sync")
     p.add_argument("--check", action="store_true", help="test connectivity and exit")
+    p.add_argument("--delta", action="store_true",
+                   help="publish only what changed since the last run's cursor and retire "
+                        "what left scope (cheap catch-up; needs a prior full sync)")
     p.add_argument("--sink", choices=["csv", "api"], default="csv")
     p.add_argument("--limit", type=int, default=None, help="max parts (for dry runs)")
     p.add_argument("--out", default=str(DEFAULT_CSV), help="CSV output path")
@@ -266,6 +489,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.check:
             return cmd_check(args)
+        if args.delta:
+            if args.sink != "api":
+                print("--delta publishes through the Admin API; pass --sink api.",
+                      file=sys.stderr)
+                return 2
+            return cmd_delta(args)
         return cmd_sync(args)
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
