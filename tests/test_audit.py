@@ -14,7 +14,8 @@ def product(**kw) -> dict:
                 description_html="<p>" + "x" * 200 + "</p>",
                 seo_title="2010 Honda Civic Alternator", seo_description="In stock.",
                 inventory=1, media_count=2, first_media_alt="A photo", sku="51",
-                price="120.00", weight=18.0)
+                price="120.00", weight=18.0,
+                metafields={"fitment": '[{"make":"Honda"}]', "condition": "Used"})
     base.update(kw)
     return base
 
@@ -85,6 +86,37 @@ class Checks(unittest.TestCase):
                          .count("title over the limit"), 1)
 
 
+class ConfiguredChecks(unittest.TestCase):
+    """Two checks that only mean something once the site configured the thing."""
+
+    TAGS = {"ship:free", "ship:freight-299", "ship:pickup-only"}
+
+    def test_a_product_with_no_shipping_tag_is_reported(self):
+        report = evaluate([product(tags=["Honda"])], shipping_tags=self.TAGS)
+        self.assertEqual(report.count("no shipping classification"), 1)
+
+    def test_a_classified_product_is_not(self):
+        report = evaluate([product(tags=["Honda", "ship:free"])], shipping_tags=self.TAGS)
+        self.assertEqual(report.count("no shipping classification"), 0)
+
+    def test_without_a_configured_policy_the_check_stays_silent(self):
+        """A site that classifies nothing must not have its whole catalogue flagged."""
+        report = evaluate([product(tags=["Honda"])])
+        self.assertEqual(report.count("no shipping classification"), 0)
+
+    def test_a_product_with_no_structured_fitment_is_reported(self):
+        report = evaluate([product(metafields={})], namespace="abm")
+        self.assertEqual(report.count("no structured fitment"), 1)
+
+    def test_a_product_with_fitment_is_not(self):
+        report = evaluate([product(metafields={"fitment": "[]"})], namespace="abm")
+        self.assertEqual(report.count("no structured fitment"), 0)
+
+    def test_without_a_namespace_the_fitment_check_stays_silent(self):
+        self.assertEqual(evaluate([product(metafields={})])
+                         .count("no structured fitment"), 0)
+
+
 class Policy(unittest.TestCase):
     def test_every_requirement_can_be_switched_off(self):
         relaxed = AuditPolicy(require_weight=False, require_seo=False, require_photos=False,
@@ -123,6 +155,7 @@ class Scan(unittest.TestCase):
             "status": "ACTIVE", "productType": "Alternator", "vendor": "Test Yard",
             "tags": ["Honda"], "descriptionHtml": "<p>x</p>",
             "seo": {"title": "t", "description": "d"}, "totalInventory": 1,
+            "metafields": {"nodes": [{"key": "fitment", "value": "[]"}]},
             "mediaCount": {"count": 1}, "media": {"nodes": [{"alt": "a"}]},
             "variants": {"nodes": [{"id": "v", "sku": "51", "price": "120.00",
                                     "inventoryItem": {"measurement": {
@@ -145,6 +178,7 @@ class Scan(unittest.TestCase):
         self.assertEqual(rows[0]["sku"], "51")
         self.assertEqual(rows[0]["weight"], 18.0)
         self.assertEqual(rows[0]["first_media_alt"], "a")
+        self.assertEqual(rows[0]["metafields"], {"fitment": "[]"})
         evaluate(rows)          # must not raise on a real-shaped row
 
 

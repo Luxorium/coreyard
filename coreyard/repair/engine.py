@@ -18,14 +18,15 @@ from coreyard.transform.render import RenderedProduct, r_number_from_handle
 from coreyard.transform.weights import GRAMS_PER_UNIT, Weight
 
 # Repairable fields, in the order a report reads best.
-FIELDS = ("title", "type", "tags", "seo", "description", "weight")
+FIELDS = ("title", "type", "tags", "seo", "description", "weight", "metafields")
 
-_SCAN = """query($cursor:String,$first:Int!){
+_SCAN = """query($cursor:String,$first:Int!,$ns:String!){
   products(first:$first, after:$cursor){
     pageInfo{ hasNextPage endCursor }
     nodes{
       id handle title status productType tags descriptionHtml
       seo{ title description }
+      metafields(first:50, namespace:$ns){ nodes{ key type value } }
       variants(first:1){ nodes{ id sku
         inventoryItem{ id measurement{ weight{ value unit } } } } }
     }
@@ -38,6 +39,9 @@ _PRODUCT_UPDATE = """mutation($input:ProductUpdateInput!){
 _ITEM_UPDATE = """mutation($id:ID!,$w:Float!,$u:WeightUnit!){
   inventoryItemUpdate(id:$id, input:{ measurement:{ weight:{ value:$w, unit:$u } } }){
     inventoryItem{ id } userErrors{ field message } } }"""
+
+_METAFIELDS_SET = """mutation($fields:[MetafieldsSetInput!]!){
+  metafieldsSet(metafields:$fields){ metafields{ key } userErrors{ field message } } }"""
 
 
 @dataclass(frozen=True)
@@ -57,6 +61,8 @@ class LiveProduct:
     inventory_item_id: str = ""
     weight_value: Optional[float] = None
     weight_unit: str = ""
+    # key -> (type, value), in this installation's configured namespace.
+    metafields: tuple[tuple[str, str, str], ...] = ()
 
 
 @dataclass
@@ -68,6 +74,7 @@ class Change:
     handle: str
     fields: dict[str, tuple[object, object]] = field(default_factory=dict)
     inventory_item_id: str = ""
+    namespace: str = ""
     dropped_tags: list[str] = field(default_factory=list)
 
     def names(self) -> list[str]:
@@ -78,7 +85,8 @@ def scan(client: ShopifyClient, store: StoreProfile,
          page_size: int = 100) -> dict[str, LiveProduct]:
     """Every product under this installation's handle prefix, with its current copy."""
     found: dict[str, LiveProduct] = {}
-    for node in client.paginate(_SCAN, "products", page_size=page_size):
+    variables = {"ns": store.catalog.metafield_namespace}
+    for node in client.paginate(_SCAN, "products", variables, page_size=page_size):
         r_number = r_number_from_handle(node["handle"], store)
         if not r_number:
             continue
@@ -101,6 +109,9 @@ def scan(client: ShopifyClient, store: StoreProfile,
             inventory_item_id=item.get("id") or "",
             weight_value=weight.get("value"),
             weight_unit=(weight.get("unit") or ""),
+            metafields=tuple(
+                (m["key"], m.get("type") or "", m.get("value") or "")
+                for m in (node.get("metafields") or {}).get("nodes", [])),
         )
     return found
 
@@ -142,7 +153,8 @@ def plan(
         product = desired.get(r_number)
         change = Change(r_number=r_number, product_id=current.product_id,
                         handle=current.handle,
-                        inventory_item_id=current.inventory_item_id)
+                        inventory_item_id=current.inventory_item_id,
+                        namespace=policy.metafield_namespace)
 
         if product is not None:
             if "title" in wanted_fields and current.title != product.title:
@@ -163,13 +175,26 @@ def plan(
             if "tags" in wanted_fields:
                 merged = tag_policy.merge(
                     product.tags, current.tags,
-                    tuple(policy.preserved_tag_prefixes), policy.preserve_namespaced_tags)
+                    tuple(policy.preserved_tag_prefixes), policy.preserve_namespaced_tags,
+                    store.shipping.owned_prefixes)
                 if merged != list(current.tags):
                     change.fields["tags"] = (list(current.tags), merged)
                     change.dropped_tags = tag_policy.dropped(
                         product.tags, current.tags,
                         tuple(policy.preserved_tag_prefixes),
-                        policy.preserve_namespaced_tags)
+                        policy.preserve_namespaced_tags,
+                        store.shipping.owned_prefixes)
+
+            if "metafields" in wanted_fields:
+                live = {k: (t, v) for k, t, v in current.metafields}
+                wanted = {m.key: (m.type, m.value) for m in product.metafields}
+                # Only additions and corrections. Removing a metafield whose value vanished
+                # is the publisher's job during a normal upsert, where it knows the value
+                # really is gone rather than merely unasked-for here.
+                differing = {k: v for k, v in wanted.items() if live.get(k) != v}
+                if differing:
+                    change.fields["metafields"] = (
+                        {k: live.get(k) for k in differing}, differing)
 
         if "weight" in wanted_fields and current.inventory_item_id:
             wanted = (product.weight if product is not None
@@ -208,6 +233,12 @@ def apply(client: ShopifyClient, change: Change) -> None:
             {"id": change.inventory_item_id, "w": float(value), "u": unit},
             "inventoryItemUpdate",
         )
+    if "metafields" in change.fields:
+        client.mutate(_METAFIELDS_SET, {"fields": [
+            {"ownerId": change.product_id, "namespace": change.namespace,
+             "key": key, "type": kind, "value": value}
+            for key, (kind, value) in change.fields["metafields"][1].items()
+        ]}, "metafieldsSet")
 
 
 def weights_by_product_type(store: StoreProfile,

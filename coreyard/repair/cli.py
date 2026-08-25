@@ -5,6 +5,7 @@
     bin/coreyard repair tags   --dry-run
     bin/coreyard repair seo --apply --limit 200
     bin/coreyard repair weights --apply
+    bin/coreyard repair metafields --apply       # grade, mileage, condition, fitment
     bin/coreyard repair all --dry-run
     bin/coreyard repair fingerprints --dry-run     # state only; no Shopify writes
 
@@ -27,6 +28,7 @@ _SUBCOMMANDS = {
     "seo": ("seo",),
     "descriptions": ("description",),
     "weights": ("weight",),
+    "metafields": ("metafields",),
     "all": engine.FIELDS,
 }
 

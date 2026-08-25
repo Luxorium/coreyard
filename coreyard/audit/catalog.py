@@ -30,17 +30,20 @@ CHECKS = (
     "too few tags",
     "no shipping weight",
     "active with zero inventory",
+    "no shipping classification",
+    "no structured fitment",
     "suspicious title",
     "title over the limit",
 )
 
-_SCAN = """query($cursor:String,$first:Int!){
+_SCAN = """query($cursor:String,$first:Int!,$ns:String!){
   products(first:$first, after:$cursor){
     pageInfo{ hasNextPage endCursor }
     nodes{
       id title handle status productType vendor tags descriptionHtml
       seo{ title description }
       totalInventory
+      metafields(first:25, namespace:$ns){ nodes{ key value } }
       mediaCount{ count }
       media(first:1){ nodes{ alt } }
       variants(first:1){ nodes{ id sku price
@@ -83,14 +86,20 @@ def _number(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def evaluate(products: Iterable[dict], policy: Optional[AuditPolicy] = None) -> Report:
+def evaluate(products: Iterable[dict], policy: Optional[AuditPolicy] = None,
+             shipping_tags: Optional[set] = None, namespace: str = "") -> Report:
     """Run every check over a sequence of normalized product dicts.
 
     Each dict carries the keys :func:`scan` produces. Anything absent is treated as missing,
     which is the honest reading: a field the API did not return is a field a shopper does
     not see either.
+
+    ``shipping_tags`` and ``namespace`` enable the two checks that only mean something when
+    the site configured them; without them those checks stay silent rather than reporting
+    every product as broken.
     """
     policy = policy or AuditPolicy()
+    shipping_tags = {t.lower() for t in (shipping_tags or set())}
     report = Report()
     skus: collections.Counter = collections.Counter()
 
@@ -134,6 +143,13 @@ def evaluate(products: Iterable[dict], policy: Optional[AuditPolicy] = None) -> 
         if (policy.flag_active_zero_inventory and product.get("status") == "ACTIVE"
                 and not int(product.get("inventory") or 0)):
             report.add("active with zero inventory", label)
+        # A product carrying no shipping tag is one a shopper cannot be warned about, and
+        # one with no structured fitment is invisible to the vehicle picker. Both are only
+        # checked when the site actually configured them.
+        if shipping_tags and not (shipping_tags & {t.lower() for t in tags}):
+            report.add("no shipping classification", label)
+        if namespace and not (product.get("metafields") or {}).get("fitment"):
+            report.add("no structured fitment", label)
         lowered = title.lower()
         if len(title) < policy.min_title_chars or any(
                 word in lowered for word in policy.suspicious_title_words):
@@ -153,7 +169,8 @@ def scan(client, store: StoreProfile, ours_only: bool = True,
          page_size: int = 100) -> list[dict]:
     """Read the catalogue into the flat dicts :func:`evaluate` expects."""
     out: list[dict] = []
-    for node in client.paginate(_SCAN, "products", page_size=page_size):
+    variables = {"ns": store.catalog.metafield_namespace}
+    for node in client.paginate(_SCAN, "products", variables, page_size=page_size):
         if ours_only and r_number_from_handle(node["handle"], store) is None:
             continue
         variants = node["variants"]["nodes"]
@@ -175,6 +192,8 @@ def scan(client, store: StoreProfile, ours_only: bool = True,
             "inventory": node.get("totalInventory") or 0,
             "media_count": (node.get("mediaCount") or {}).get("count", 0),
             "first_media_alt": (media_nodes[0].get("alt") if media_nodes else "") or "",
+            "metafields": {m["key"]: m.get("value")
+                           for m in (node.get("metafields") or {}).get("nodes", [])},
             "sku": variant.get("sku") or "",
             "price": variant.get("price") or "0",
             "weight": (((item.get("measurement") or {}).get("weight") or {}).get("value") or 0),

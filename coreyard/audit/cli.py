@@ -28,7 +28,9 @@ def run(args) -> int:
     client = ShopifyClient()
     print("Scanning the catalogue ...", flush=True)
     products = scan(client, store, ours_only=not args.all_products)
-    report = evaluate(products, store.catalog.audit)
+    report = evaluate(products, store.catalog.audit,
+                      shipping_tags=set(store.shipping.tags),
+                      namespace=store.catalog.metafield_namespace)
 
     print(f"\n{report.total} product(s) audited\n")
     if report.clean:

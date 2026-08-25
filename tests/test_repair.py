@@ -29,15 +29,28 @@ def wanted(store: StoreProfile = STORE) -> dict:
 
 
 def live(**kw) -> dict[str, LiveProduct]:
+    """A product that already matches the renderer, unless a field is overridden."""
     product = render(PART, [], STORE)
     base = dict(r_number="51", product_id="gid://shopify/Product/1", status="ACTIVE",
                 handle=product.handle, title=product.title,
                 product_type=product.product_type, tags=product.tags,
                 description_html=product.description_html,
                 seo_title=product.seo_title, seo_description=product.seo_description,
-                inventory_item_id="gid://shopify/InventoryItem/1")
+                inventory_item_id="gid://shopify/InventoryItem/1",
+                metafields=tuple((m.key, m.type, m.value) for m in product.metafields))
     base.update(kw)
     return {"51": LiveProduct(**base)}
+
+
+class FakeClient:
+    """Records mutations instead of making them."""
+
+    def __init__(self):
+        self.calls = []
+
+    def mutate(self, document, variables, root):
+        self.calls.append((root, variables))
+        return {}
 
 
 class Idempotence(unittest.TestCase):
@@ -92,6 +105,39 @@ class Fields(unittest.TestCase):
         self.assertEqual(engine.plan(live(title="anything"), {}, ("title",), store=STORE), [])
 
 
+class MetafieldRepair(unittest.TestCase):
+    """Structured data a product was published without, or published wrong."""
+
+    def test_a_product_with_no_metafields_gets_them(self):
+        changes = engine.plan(live(metafields=()), wanted(), ("metafields",), store=STORE)
+        added = changes[0].fields["metafields"][1]
+        self.assertIn("condition", added)
+        self.assertIn("fitment", added)
+
+    def test_a_stale_value_is_corrected(self):
+        product = render(PART, [], STORE)
+        stale = tuple(("condition", "single_line_text_field", "WRONG") if m.key == "condition"
+                      else (m.key, m.type, m.value) for m in product.metafields)
+        changes = engine.plan(live(metafields=stale), wanted(), ("metafields",), store=STORE)
+        self.assertEqual(set(changes[0].fields["metafields"][1]), {"condition"})
+
+    def test_matching_metafields_need_no_write(self):
+        self.assertEqual(engine.plan(live(), wanted(), ("metafields",), store=STORE), [])
+
+    def test_the_namespace_travels_with_the_change(self):
+        changes = engine.plan(live(metafields=()), wanted(), ("metafields",), store=STORE)
+        self.assertEqual(changes[0].namespace, STORE.catalog.metafield_namespace)
+
+    def test_metafields_are_written_with_metafieldsSet(self):
+        client = FakeClient()
+        changes = engine.plan(live(metafields=()), wanted(), ("metafields",), store=STORE)
+        engine.apply(client, changes[0])
+        self.assertEqual([root for root, _ in client.calls], ["metafieldsSet"])
+        sent = client.calls[0][1]["fields"]
+        self.assertTrue(all(set(f) == {"ownerId", "namespace", "key", "type", "value"}
+                            for f in sent))
+
+
 class TagRepair(unittest.TestCase):
     def test_a_doubled_make_tag_is_replaced(self):
         product = render(PART, [], STORE)
@@ -120,16 +166,8 @@ class TagRepair(unittest.TestCase):
 
 
 class Apply(unittest.TestCase):
-    class FakeClient:
-        def __init__(self):
-            self.calls = []
-
-        def mutate(self, document, variables, root):
-            self.calls.append((root, variables))
-            return {}
-
     def test_all_product_fields_go_in_one_mutation(self):
-        client = self.FakeClient()
+        client = FakeClient()
         changes = engine.plan(live(title="wrong", seo_title="wrong", tags=("stale",)),
                               wanted(), ("title", "seo", "tags"), store=STORE)
         engine.apply(client, changes[0])
@@ -141,7 +179,7 @@ class Apply(unittest.TestCase):
         self.assertEqual(payload["id"], "gid://shopify/Product/1")
 
     def test_weight_is_written_against_the_inventory_item(self):
-        client = self.FakeClient()
+        client = FakeClient()
         changes = engine.plan(live(), wanted(WEIGHED), ("weight",), store=WEIGHED)
         engine.apply(client, changes[0])
         self.assertEqual([root for root, _ in client.calls], ["inventoryItemUpdate"])

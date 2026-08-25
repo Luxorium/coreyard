@@ -215,6 +215,7 @@ cat > "$REPO_DIR/bin/coreyard" <<'LAUNCHER'
 #   coreyard reconcile [args]  compare the yard with the store and close the differences
 #   coreyard repair [args]   rewrite catalog output an older renderer produced
 #   coreyard audit  [args]   read-only listing-quality report
+#   coreyard validate [args] check the external config files against their schemas
 #   coreyard images  <R#>    list/fetch one part's photos
 #   coreyard schema          re-dump the source database schema
 set -euo pipefail
@@ -230,6 +231,7 @@ case "${1:-}" in
     reconcile) shift; exec "$PY" -m coreyard.reconcile.cli "$@" ;;
     repair) shift; exec "$PY" -m coreyard.repair.cli "$@" ;;
     audit)  shift; exec "$PY" -m coreyard.audit.cli "$@" ;;
+    validate) shift; exec "$PY" -m coreyard.validate "$@" ;;
     images) shift; exec "$PY" -m coreyard.yms.images "$@" ;;
     schema) shift; exec "$PY" -m coreyard.yms.discover_schema "$@" ;;
     *)      exec "$PY" -m coreyard.run_sync "$@" ;;
