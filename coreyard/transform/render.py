@@ -29,6 +29,7 @@ from coreyard.config import StoreProfile
 from coreyard.models import Part
 from coreyard.transform import seo
 from coreyard.transform.pricing import retail_str
+from coreyard.transform.shipping import ShippingGroup
 from coreyard.transform.weights import GRAMS_PER_UNIT, Weight
 
 # Shopify's product title maximum. Enforced by the SEO builder; restated here because the
@@ -64,6 +65,94 @@ def r_number_from_handle(handle: str, store: Optional[StoreProfile] = None) -> O
 
 
 @dataclass(frozen=True)
+class Metafield:
+    """One structured value published alongside the product.
+
+    Shopper-visible, so it is part of the rendered product and therefore of the
+    fingerprint: a theme that renders a grade or a fitment table is showing catalogue
+    content, and content that can change without moving the hash is content that goes
+    stale forever.
+    """
+
+    namespace: str
+    key: str
+    type: str
+    value: str
+
+    @property
+    def qualified(self) -> str:
+        return f"{self.namespace}.{self.key}"
+
+
+def fitment_rows(part: Part, store: Optional[StoreProfile] = None) -> list[dict]:
+    """Every vehicle this part fits, as structured rows rather than a printed sentence.
+
+    ``{years, make, model, note, label}``. The first four are what a storefront table
+    shows; ``label`` is the exact vehicle string CoreYard also emits as a tag, so a theme
+    can link to that tag without parsing a title back apart.
+
+    A part with no catalogue fitment still fits the car it was pulled from, so the donor
+    vehicle is emitted as a single row. Without that, structured fitment would be empty for
+    every part the interchange catalogue does not cover, and anything built from it — a
+    vehicle picker, a related-parts link — would silently lose them.
+    """
+    rows: list[dict] = []
+    for entry in part.fitment or []:
+        make = seo.clean_make(entry.make)
+        model = seo.clean_model(entry.model)
+        label = seo._vehicle_label(make, model)
+        if not label:
+            continue
+        rows.append({
+            "years": entry.year_label(),
+            "make": make or "",
+            "model": model or "",
+            # The qualifier text only. `Application.label()` prefixes its own year span,
+            # which the row's own `years` column already states.
+            "note": "; ".join(a.note for a in entry.qualifiers()[:4] if a.note),
+            "label": label,
+        })
+    if rows:
+        return rows
+    make = seo.clean_make(part.make)
+    model = seo.clean_model(part.model)
+    label = seo._vehicle_label(make, model)
+    if not label:
+        return []
+    return [{
+        "years": str(part.year) if part.year else "",
+        "make": make or "",
+        "model": model or "",
+        "note": "",
+        "label": label,
+    }]
+
+
+def build_metafields(part: Part, store: StoreProfile) -> tuple[Metafield, ...]:
+    """The structured half of a listing: grade, mileage, condition, fitment.
+
+    Only values the source actually supplied are emitted. An absent one is left out rather
+    than published empty, and the publisher removes any it previously wrote — a grade that
+    disappears from the yard must not keep showing on the storefront.
+    """
+    namespace = store.catalog.metafield_namespace
+    fields: list[Metafield] = []
+    if part.grade:
+        fields.append(Metafield(namespace, "grade", "single_line_text_field",
+                                str(part.grade).strip()))
+    if part.mileage:
+        fields.append(Metafield(namespace, "mileage", "number_integer", str(int(part.mileage))))
+    condition = store.catalog.condition_text(part.grade)
+    if condition:
+        fields.append(Metafield(namespace, "condition", "single_line_text_field", condition))
+    rows = fitment_rows(part, store)
+    if rows:
+        fields.append(Metafield(namespace, "fitment", "json",
+                                json.dumps(rows, ensure_ascii=False, separators=(",", ":"))))
+    return tuple(fields)
+
+
+@dataclass(frozen=True)
 class RenderedProduct:
     """Everything CoreYard considers shopper-visible and sync-controlled for one part.
 
@@ -90,6 +179,10 @@ class RenderedProduct:
     weight_value: Optional[float] = None
     weight_unit: str = ""
     weight_grams: Optional[int] = None
+    metafields: tuple[Metafield, ...] = ()
+    # Which shipping class this part falls in. The tag is already in ``tags``; the id is
+    # kept so repair and audit can report a classification without re-deriving it.
+    shipping_group: str = ""
     # The fitment key drives the entire "Fits" section but is not itself printed, so
     # re-keying a part to a different interchange would otherwise be an invisible change.
     fitment_key: str = ""
@@ -100,7 +193,11 @@ class RenderedProduct:
         data["tags"] = list(self.tags)
         data["images"] = list(self.images)
         data["image_alts"] = list(self.image_alts)
+        data["metafields"] = [asdict(m) for m in self.metafields]
         return data
+
+    def metafield(self, key: str) -> Optional[Metafield]:
+        return next((m for m in self.metafields if m.key == key), None)
 
     def fingerprint(self) -> str:
         """Stable SHA-256 over everything above."""
@@ -127,6 +224,12 @@ def resolve_weight(part: Part, store: StoreProfile, product_type: str = "") -> O
     return store.weights.lookup(product_type or None, part.part_type)
 
 
+def resolve_shipping(part: Part, store: StoreProfile,
+                     product_type: str = "") -> Optional[ShippingGroup]:
+    """Which shipping class this part falls in, or None if the site configured none."""
+    return store.shipping.classify(product_type or None, part.part_type)
+
+
 def render(
     part: Part,
     images: Optional[Sequence[str]] = None,
@@ -137,13 +240,20 @@ def render(
     urls = [str(u) for u in (images or [])]
     product_type = seo.expand_part_type(part.part_type, store)
     weight = resolve_weight(part, store, product_type)
+    # Classified here, not by a later pass over the catalogue: a product that is live and
+    # sellable before anything has said how it ships is a product that can be bought with
+    # the wrong shipping attached to it.
+    shipping = resolve_shipping(part, store, product_type)
+    tags = list(seo.build_tags(part, store))
+    if shipping:
+        tags.append(shipping.tag)
     return RenderedProduct(
         handle=handle_for(part, store),
         title=seo.build_title(part, store),
         description_html=seo.build_body_html(part, store),
         vendor=store.vendor,
         product_type=product_type,
-        tags=tuple(seo.build_tags(part, store)),
+        tags=tuple(tags),
         seo_title=seo.meta_title(part, store),
         seo_description=seo.meta_description(part, store),
         sku=str(part.r_number),
@@ -154,6 +264,8 @@ def render(
         weight_value=weight.value if weight else None,
         weight_unit=weight.unit if weight else "",
         weight_grams=weight.grams if weight else None,
+        metafields=build_metafields(part, store),
+        shipping_group=shipping.id if shipping else "",
         fitment_key=part.interchange_code or "",
     )
 
@@ -169,12 +281,16 @@ def fingerprint(
 
 __all__ = [
     "GRAMS_PER_UNIT",
+    "Metafield",
     "RenderedProduct",
     "TITLE_MAX",
+    "build_metafields",
     "fingerprint",
+    "fitment_rows",
     "handle_for",
     "handle_prefix",
     "r_number_from_handle",
     "render",
+    "resolve_shipping",
     "resolve_weight",
 ]

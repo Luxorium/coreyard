@@ -33,6 +33,7 @@ profile can change wording without being able to inject markup into the storefro
       "preserved_tag_prefixes": ["ship:"],
       "preserve_namespaced_tags": true,
       "part_types":        {"tail lamp": "Tail Light Lamp Assembly"},
+      "metafield_namespace": "abm",
       "audit":             {"min_price": 5, "min_description_chars": 120}
     }
 """
@@ -129,6 +130,12 @@ class CatalogProfile:
 
     # Part-type expansions layered over the built-in table in ``transform.seo``.
     part_types: Mapping[str, str] = field(default_factory=dict)
+
+    # Namespace for the structured metafields CoreYard publishes (grade, mileage,
+    # condition, fitment). A theme reads them as ``product.metafields.<namespace>.<key>``,
+    # so it is the site's choice; the default is neutral because "abm" is somebody's
+    # initials, not a generic name.
+    metafield_namespace: str = "coreyard"
 
     audit: AuditPolicy = field(default_factory=AuditPolicy)
 

@@ -33,6 +33,12 @@ So the site describes them, keyed on the product tags its own storefront already
 groups an external shipper owns. An order with any deferred line is left open — a mixed
 order still has parcels to ship, and closing it early would cost the buyer their tracking.
 With no ``groups`` configured, nothing is ever fulfilled and the job only tags and notes.
+
+**Omit the whole ``fulfillment`` block if a shipping policy is configured.** The shipping
+policy already names every group, its tag, and — through each group's ``fulfillment`` key —
+who ships it, so restating that here is a second copy free to drift from the first. When
+this block is absent it is derived from :mod:`coreyard.transform.shipping`; when it is
+present it wins, so an existing configuration keeps working unchanged.
 """
 
 from __future__ import annotations
@@ -41,6 +47,8 @@ import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
+
+from coreyard.transform.shipping import EXTERNAL
 
 
 class OrderPolicyError(RuntimeError):
@@ -81,6 +89,19 @@ class OrderPolicy:
     reference_tag: str = ""
     note: str = "Source order {reference} invoiced"
     fulfillment: FulfillmentPolicy = field(default_factory=FulfillmentPolicy)
+    # True when the file declared its own fulfillment block, so derivation must not
+    # overwrite a deliberate choice.
+    explicit_fulfillment: bool = False
+
+    def with_shipping(self, shipping) -> "OrderPolicy":
+        """Fill in the fulfillment rules from the shipping policy, if it did not say.
+
+        The shipping policy is the one place a group's tag and its shipper are declared, so
+        an order policy that stays quiet inherits them rather than repeating them.
+        """
+        if self.explicit_fulfillment or not getattr(shipping, "configured", False):
+            return self
+        return replace(self, fulfillment=fulfillment_from_shipping(shipping))
 
     def tags_for(self, reference: str) -> list[str]:
         wanted = [t for t in self.tags if t]
@@ -92,6 +113,16 @@ class OrderPolicy:
         return self.note.format(reference=reference) if self.note else ""
 
 
+def fulfillment_from_shipping(shipping) -> FulfillmentPolicy:
+    """Derive fulfillment rules from the shipping policy's own group declarations."""
+    groups = tuple(g.tag for g in shipping.groups if not g.default)
+    default = next((g.tag for g in shipping.groups if g.default), "")
+    if default:
+        groups = groups + (default,)
+    defer = tuple(g.tag for g in shipping.groups if g.fulfillment == EXTERNAL)
+    return FulfillmentPolicy(groups=groups, default_group=default, defer_groups=defer)
+
+
 DEFAULT_POLICY = OrderPolicy()
 
 
@@ -99,7 +130,7 @@ def from_dict(data: Mapping[str, Any]) -> OrderPolicy:
     if not isinstance(data, Mapping):
         raise OrderPolicyError("an order policy must be a JSON object")
     values = {k: v for k, v in data.items() if not str(k).startswith("_")}
-    known = set(OrderPolicy.__dataclass_fields__)
+    known = set(OrderPolicy.__dataclass_fields__) - {"explicit_fulfillment"}
     unknown = [k for k in values if k not in known]
     if unknown:
         raise OrderPolicyError("unknown key(s) in order policy: " + ", ".join(sorted(unknown)))
@@ -123,6 +154,7 @@ def from_dict(data: Mapping[str, Any]) -> OrderPolicy:
                                if str(g).strip()),
             notify_customer=bool(raw.get("notify_customer", False)),
         )
+        kwargs["explicit_fulfillment"] = True
     return replace(DEFAULT_POLICY, **kwargs)
 
 
@@ -143,10 +175,11 @@ def load(path: "str | Path | None") -> OrderPolicy:
 
 
 def load_configured() -> OrderPolicy:
-    from coreyard.config import _get, load_env
+    from coreyard.config import _get, load_env, load_store
 
     load_env()
-    return load(_get("STORE_ORDER_POLICY_FILE", "") or None)
+    policy = load(_get("STORE_ORDER_POLICY_FILE", "") or None)
+    return policy.with_shipping(load_store().shipping)
 
 
 def resolve(policy: Optional[OrderPolicy] = None) -> OrderPolicy:

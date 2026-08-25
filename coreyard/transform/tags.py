@@ -17,6 +17,11 @@ The rule is ownership, not a list of exceptions:
   survive without CoreYard knowing any of them exist.
 * **Anything else can be named explicitly** through ``STORE_PRESERVED_TAG_PREFIXES`` or the
   profile's ``preserved_tag_prefixes``, for systems that write plain tags.
+* **A namespace CoreYard has taken over is owned, not preserved.** When a site configures a
+  shipping policy, CoreYard generates the ``ship:`` tag itself, and a stale one left over
+  from whatever wrote it before must be *replaced* rather than kept beside the new one — two
+  ``ship:`` tags on one product and the storefront reads whichever it happens to test for
+  first. ``owned_prefixes`` names those namespaces.
 
 Preserved tags keep their original spelling and relative order, and are appended after the
 generated ones, so the result is deterministic — the same inputs always produce the same
@@ -31,10 +36,20 @@ from typing import Iterable, Optional, Sequence
 NAMESPACE_SEPARATOR = ":"
 
 
-def is_external(tag: str, prefixes: Sequence[str] = (), namespaced: bool = True) -> bool:
+def is_owned(tag: str, owned_prefixes: Sequence[str] = ()) -> bool:
+    """Whether ``tag`` sits in a namespace CoreYard now generates itself."""
+    lowered = (tag or "").strip().lower()
+    return bool(lowered) and any(lowered.startswith(p.lower())
+                                 for p in owned_prefixes if p)
+
+
+def is_external(tag: str, prefixes: Sequence[str] = (), namespaced: bool = True,
+                owned_prefixes: Sequence[str] = ()) -> bool:
     """Whether ``tag`` looks like it belongs to a system other than CoreYard."""
     text = (tag or "").strip()
     if not text:
+        return False
+    if is_owned(text, owned_prefixes):
         return False
     if namespaced and NAMESPACE_SEPARATOR in text:
         return True
@@ -47,12 +62,17 @@ def merge(
     existing: Optional[Iterable[str]] = None,
     prefixes: Sequence[str] = (),
     namespaced: bool = True,
+    owned_prefixes: Sequence[str] = (),
 ) -> list[str]:
     """CoreYard's tags plus the external tags already on the product.
 
     ``existing`` is the live product's current tag list — ``None`` for a product that does
     not exist yet, where there is nothing to preserve. Comparison is case-insensitive so a
     tag is never duplicated in a different case, and generated spelling wins.
+
+    ``owned_prefixes`` names namespaces CoreYard generates. An existing tag in one of them
+    is dropped unless it was regenerated, which is what makes a reclassification replace the
+    old tag instead of accumulating next to it.
     """
     out: list[str] = []
     seen: set[str] = set()
@@ -65,7 +85,7 @@ def merge(
         text = (tag or "").strip()
         if not text or text.lower() in seen:
             continue
-        if is_external(text, prefixes, namespaced):
+        if is_external(text, prefixes, namespaced, owned_prefixes):
             seen.add(text.lower())
             out.append(text)
     return out
@@ -76,11 +96,13 @@ def dropped(
     existing: Iterable[str],
     prefixes: Sequence[str] = (),
     namespaced: bool = True,
+    owned_prefixes: Sequence[str] = (),
 ) -> list[str]:
     """Existing tags a merge would remove — the CoreYard-owned ones that no longer apply.
 
     Repair reports this so an operator can see what a rewrite is about to delete before it
     happens, rather than discovering it in the storefront's filters afterwards.
     """
-    keep = {t.lower() for t in merge(generated, existing, prefixes, namespaced)}
+    keep = {t.lower() for t in merge(generated, existing, prefixes, namespaced,
+                                     owned_prefixes)}
     return [t for t in existing if (t or "").strip() and t.strip().lower() not in keep]

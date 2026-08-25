@@ -14,6 +14,9 @@ from pathlib import Path
 
 from coreyard.profile import CatalogProfile, DEFAULT_PROFILE
 from coreyard.profile import load as load_profile
+from coreyard.transform.shipping import EMPTY as NO_SHIPPING
+from coreyard.transform.shipping import ShippingPolicy
+from coreyard.transform.shipping import load as load_shipping_policy
 from coreyard.transform.weights import EMPTY as NO_WEIGHTS
 from coreyard.transform.weights import WeightRules
 from coreyard.transform.weights import load as load_weight_rules
@@ -146,6 +149,10 @@ class StoreProfile:
     # Estimated packed shipping weights by part type (STORE_WEIGHT_RULES_FILE).
     weights: WeightRules = field(default_factory=lambda: NO_WEIGHTS)
 
+    # How each part ships, and the tag that tells the storefront so
+    # (STORE_SHIPPING_POLICY_FILE). Empty means CoreYard classifies nothing.
+    shipping: ShippingPolicy = field(default_factory=lambda: NO_SHIPPING)
+
     def origin(self) -> str:
         """"Vendor, City" with missing pieces dropped."""
         return ", ".join(part for part in (self.vendor, self.city) if part)
@@ -219,6 +226,7 @@ def load_store() -> StoreProfile:
         handle_prefix=_get("SHOPIFY_HANDLE_PREFIX", "coreyard") or "coreyard",
         catalog=load_profile(_get("STORE_PROFILE_FILE", "") or None),
         weights=load_weight_rules(_get("STORE_WEIGHT_RULES_FILE", "") or None),
+        shipping=load_shipping_policy(_get("STORE_SHIPPING_POLICY_FILE", "") or None),
     )
 
 

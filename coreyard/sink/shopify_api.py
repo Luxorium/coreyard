@@ -237,12 +237,14 @@ def product_set_input(
     existing_tags: Optional[list[str]] = None,
     preserved_prefixes: tuple[str, ...] = (),
     preserve_namespaced: bool = True,
+    owned_prefixes: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Serialize the canonical rendered product into a ``ProductSetInput``.
 
     ``productSet`` replaces the fields it is given, so the tag list has to be the *whole*
     intended list. ``existing_tags`` is the live product's current tags: tags another system
-    owns are merged back in, because sending only CoreYard's would delete them. See
+    owns are merged back in, because sending only CoreYard's would delete them, while tags
+    in a namespace CoreYard now generates are replaced rather than accumulated. See
     :mod:`coreyard.transform.tags`.
     """
     variant: dict[str, Any] = {
@@ -260,7 +262,7 @@ def product_set_input(
                 "weight": {"value": float(product.weight_value), "unit": product.weight_unit}
             }
         }
-    return {
+    payload: dict[str, Any] = {
         "handle": product.handle,
         "title": product.title,
         "descriptionHtml": product.description_html,
@@ -268,13 +270,22 @@ def product_set_input(
         "productType": product.product_type,
         "status": status,
         "tags": tag_policy.merge(product.tags, existing_tags, preserved_prefixes,
-                                 preserve_namespaced),
+                                 preserve_namespaced, owned_prefixes),
         "seo": {"title": product.seo_title, "description": product.seo_description},
         "productOptions": [
             {"name": "Title", "values": [{"name": "Default Title"}]}
         ],
         "variants": [variant],
     }
+    if product.metafields:
+        # Only the fields that have a value are sent. productSet leaves an unmentioned
+        # metafield alone, so removing a stale one is the publisher's job, not an empty
+        # string here — "" is not a valid number_integer and would be rejected outright.
+        payload["metafields"] = [
+            {"namespace": m.namespace, "key": m.key, "type": m.type, "value": m.value}
+            for m in product.metafields
+        ]
+    return payload
 
 
 def part_to_product_set_input(
@@ -291,6 +302,7 @@ def part_to_product_set_input(
         render(part, part.images, store), status, existing_tags,
         tuple(store.catalog.preserved_tag_prefixes),
         store.catalog.preserve_namespaced_tags,
+        store.shipping.owned_prefixes,
     )
 
 

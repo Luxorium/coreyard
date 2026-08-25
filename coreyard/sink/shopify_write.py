@@ -24,8 +24,10 @@ from coreyard.transform.render import RenderedProduct, handle_for, render
 
 # Tags come back with the product because productSet replaces the whole tag list: without
 # knowing what is already there, a routine update deletes whatever another system added.
-_FIND = """query($h:String!){ productByIdentifier(identifier:{handle:$h}){
-  id status tags media(first:250){ nodes{ id } } } }"""
+_FIND = """query($h:String!,$ns:String!){ productByIdentifier(identifier:{handle:$h}){
+  id status tags
+  media(first:250){ nodes{ id } }
+  metafields(first:50, namespace:$ns){ nodes{ id key } } } }"""
 
 _RETIRE_FIND = """query($h:String!){ productByIdentifier(identifier:{handle:$h}){
   id status variants(first:1){ nodes{ id inventoryItem{ id tracked } } } } }"""
@@ -52,6 +54,11 @@ _STAGE = """mutation($input:[StagedUploadInput!]!){ stagedUploadsCreate(input:$i
 
 _PUBLISH = """mutation($id:ID!,$input:[PublicationInput!]!){
   publishablePublish(id:$id, input:$input){ userErrors{ field message } } }"""
+
+# productSet leaves a metafield it was not told about untouched, so a value that vanished
+# from the yard would keep showing on the storefront forever. Deleting is explicit.
+_METAFIELDS_DELETE = """mutation($ids:[MetafieldIdentifierInput!]!){
+  metafieldsDelete(metafields:$ids){ deletedMetafields{ key } userErrors{ field message } } }"""
 
 # productCreateMedia was removed from the Admin API; photos are now attached by passing
 # `files` to productSet in the same upsert.
@@ -97,13 +104,28 @@ class ShopifyPublisher:
         return ids
 
     # -- product ------------------------------------------------------------
-    def _find(self, handle: str) -> tuple[Optional[str], list[str], Optional[str], list[str]]:
-        """Return (product id, existing media ids, current status, current tags)."""
-        r = self.client.graphql(_FIND, {"h": handle})["productByIdentifier"]
+    def _find(self, handle: str):
+        """Return (product id, media ids, status, tags, metafield keys) for a handle."""
+        r = self.client.graphql(
+            _FIND, {"h": handle, "ns": self.store.catalog.metafield_namespace}
+        )["productByIdentifier"]
         if not r:
-            return None, [], None, []
+            return None, [], None, [], []
+        metafields = [n["key"] for n in (r.get("metafields") or {}).get("nodes", [])]
         return (r["id"], [n["id"] for n in r["media"]["nodes"]], r.get("status"),
-                list(r.get("tags") or []))
+                list(r.get("tags") or []), metafields)
+
+    def _prune_metafields(self, product_id: str, present: list[str],
+                          product: RenderedProduct) -> None:
+        """Delete metafields in our namespace that this render no longer produces."""
+        wanted = {m.key for m in product.metafields}
+        stale = [key for key in present if key not in wanted]
+        if not stale:
+            return
+        namespace = self.store.catalog.metafield_namespace
+        self.client.mutate(_METAFIELDS_DELETE, {"ids": [
+            {"ownerId": product_id, "namespace": namespace, "key": key} for key in stale
+        ]}, "metafieldsDelete")
 
     def _upsert(self, product: RenderedProduct, quantity: int, product_id: Optional[str],
                 files: Optional[list] = None, status: Optional[str] = None,
@@ -112,6 +134,7 @@ class ShopifyPublisher:
         inp = product_set_input(
             product, status or self.status, existing_tags,
             tuple(policy.preserved_tag_prefixes), policy.preserve_namespaced_tags,
+            self.store.shipping.owned_prefixes,
         )
         if files:
             inp["files"] = files
@@ -220,7 +243,8 @@ class ShopifyPublisher:
         applied only to an archived product, so it can never override a hand-set status.
         """
         rendered = render(part, part.images, self.store)
-        product_id, media_ids, status, existing_tags = self._find(rendered.handle)
+        product_id, media_ids, status, existing_tags, metafield_keys = self._find(
+            rendered.handle)
         if revive_status and status == self.retire_status:
             status = revive_status
         if refresh_images and media_ids:
@@ -234,6 +258,8 @@ class ShopifyPublisher:
         # would make the holding state for "not ready yet" mean nothing.
         if (status or self.status) == "ACTIVE":
             self.publish_to_channels(product_id)
+        if metafield_keys:
+            self._prune_metafields(product_id, metafield_keys, rendered)
         return product_id, len(files)
 
     def _alt_text(self, part: Part):
