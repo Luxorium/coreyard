@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any, Iterator
 
 from coreyard.config import _get, load_env, load_smb_config
@@ -62,6 +63,22 @@ def scalar(conn: Any, sql: str) -> Any:
     if not rows:
         return None
     return next(iter(rows[0].values()))
+
+
+def server_now(conn: Any) -> "datetime":
+    """The source server's own clock, as the next delta cursor.
+
+    A delta cursor must come from the same clock that stamps the rows it selects. Using this
+    host's time instead would silently skip every row written during the offset whenever the
+    two machines disagree — and they are different machines, one of them a Windows server
+    nobody is keeping in NTP lockstep with this one.
+    """
+    value = scalar(conn, "SELECT CONVERT(varchar(19), GETDATE(), 126)")
+    text = str(value).strip()
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise RuntimeError(f"source server returned an unusable clock value: {text!r}") from exc
 
 
 def ping() -> str:

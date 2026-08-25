@@ -14,6 +14,11 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Optional
 
+# Donor-vehicle detail keys carried on ``Part.vehicle``, in the order they are rendered.
+# Defined here, on the neutral contract, so the extract layer that fills the dict and the
+# transform layer that renders it agree without either importing the other.
+VEHICLE_FIELDS = ("engine", "transmission", "drivetrain", "body", "trim", "doors")
+
 
 @dataclass
 class Part:
@@ -67,6 +72,15 @@ class Part:
     location: Optional[str] = None         # bin/row/yard location
     vin: Optional[str] = None              # donor VIN (not published; internal)
     weight_grams: Optional[int] = None
+
+    # Alternate shopper vocabulary for this part type ("taillamp" for "Tail Light"), used to
+    # widen search/tag coverage. Empty unless the site maps a source for it *and* enables it:
+    # these strings reach the rendered product, so filling them in moves every fingerprint.
+    aliases: list[str] = field(default_factory=list)
+
+    # Donor-vehicle specifics (engine, transmission, drivetrain, body, trim, doors) when the
+    # source system decoded them. Same fingerprint caveat as ``aliases``.
+    vehicle: dict = field(default_factory=dict)
 
     # Media — resolved image references (paths or URLs), ordered as they should appear
     images: list[str] = field(default_factory=list)
