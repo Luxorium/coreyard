@@ -6,12 +6,14 @@ Preference order, chosen so the common case needs no root:
 2. **systemd system timer** — when running as root, or ``--system`` is asked for.
 3. **cron** — Alpine/OpenRC, containers, WSL, or anything without systemd.
 
-    python -m coreyard.schedule install --every 30m
-    python -m coreyard.schedule status
-    python -m coreyard.schedule uninstall
+    coreyard schedule install --every 30m
+    coreyard schedule install --every 5m --task "sync delta"
+    coreyard schedule status
+    coreyard schedule uninstall
 
 Runs are serialised with a lock file, because a sync that takes longer than the interval
-must never have a second copy start on top of it.
+must never have a second copy start on top of it. The CLI takes ``--lock`` itself, so the
+serialisation holds even where ``flock`` is not installed.
 """
 
 from __future__ import annotations
@@ -29,7 +31,9 @@ from coreyard.config import REPO_ROOT
 NAME = "coreyard-sync"
 LOCK = REPO_ROOT / "out" / ".sync.lock"
 LOG = REPO_ROOT / "out" / "sync.log"
-DEFAULT_TASK = "--sink api"
+# What a new installation schedules. `sync` publishes: the operator-facing command assumes
+# Shopify, so a scheduled job cannot end up quietly writing a CSV that nobody reads.
+DEFAULT_TASK = "sync"
 DEFAULT_EVERY = "30m"
 
 
@@ -55,12 +59,20 @@ def launcher() -> Path:
 
 
 def command_for(task: str) -> str:
+    """The full command line for one scheduled run.
+
+    ``--lock`` is passed to the CLI rather than relying on ``flock`` alone: the tool now
+    serialises itself, on the same lock file, so an installation without flock(1) is no
+    longer quietly unprotected against a slow run being lapped by the next tick.
+    """
     exe = launcher()
+    lock = f"--lock {LOCK.stem.lstrip('.')}"
     if exe.name == "coreyard":
-        base = f"{exe} {task}"
+        base = f"{exe} {lock} {task}"
     else:                                   # no launcher yet: call the module directly
-        base = f"{exe} -m coreyard.run_sync {task}"
-    # flock keeps a slow run from being lapped by the next tick.
+        base = f"{exe} -m coreyard {lock} {task}"
+    # Belt and braces where it is available: flock(1) also covers the moment before the
+    # interpreter has started and taken the lock itself.
     if shutil.which("flock"):
         return f"flock -n {LOCK} {base}"
     return base
@@ -257,8 +269,8 @@ def do_status(args) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="coreyard.schedule", description=__doc__.splitlines()[0])
+def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Populate a parser with the scheduling actions."""
     sub = ap.add_subparsers(dest="action", required=True)
 
     install = sub.add_parser("install", help="install the recurring job")
@@ -271,13 +283,22 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("uninstall", help="remove it").set_defaults(func=do_uninstall)
     sub.add_parser("status", help="show what is scheduled").set_defaults(func=do_status)
+    return ap
 
-    args = ap.parse_args(argv)
+
+def dispatch(args) -> int:
     try:
         return args.func(args)
     except (ValueError, subprocess.CalledProcessError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="coreyard.schedule",
+                                 description=__doc__.splitlines()[0])
+    add_arguments(ap)
+    return dispatch(ap.parse_args(argv))
 
 
 if __name__ == "__main__":

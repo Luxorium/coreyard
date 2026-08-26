@@ -190,37 +190,23 @@ fi
 mkdir -p "$REPO_DIR/bin"
 cat > "$REPO_DIR/bin/coreyard" <<'LAUNCHER'
 #!/usr/bin/env bash
-# CoreYard launcher — runs a CLI entry point inside the project virtualenv.
+# CoreYard launcher — runs the CLI inside the project virtualenv.
 #
-#   coreyard [sync args]     incremental sync   (default; see --help)
-#   coreyard bulk   [args]   resumable bulk publish
-#   coreyard oauth           exchange client id/secret for an admin token
-#   coreyard altfix [args]   backfill alt text onto existing product photos
-#   coreyard orders [args]   orders: serve / poll / register / retry / replay / status
-#   coreyard reconcile [args]  compare the yard with the store and close the differences
-#   coreyard repair [args]   rewrite catalog output an older renderer produced
-#   coreyard audit  [args]   read-only listing-quality report
-#   coreyard validate [args] check the external config files against their schemas
-#   coreyard images  <R#>    list/fetch one part's photos
-#   coreyard schema          re-dump the source database schema
+# Deliberately holds no command list. Routing lives in coreyard/cli.py, where `--help`
+# can show it, a test can walk it, and code review can see it change. A `case` statement
+# here was invisible to all three: it named module paths that a refactor could rename out
+# from under it, and the only thing checking them was a regex over this file.
+#
+#   coreyard --help          every command
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$HERE/.venv/bin/python"
 [ -x "$PY" ] || { echo "coreyard: virtualenv missing — run ./install.sh" >&2; exit 1; }
 cd "$HERE"
-case "${1:-}" in
-    bulk)   shift; exec "$PY" -m coreyard.sink.shopify_bulk "$@" ;;
-    oauth)  shift; exec "$PY" -m coreyard.sink.shopify_oauth "$@" ;;
-    altfix) shift; exec "$PY" -m coreyard.sink.backfill_alt "$@" ;;
-    orders) shift; exec "$PY" -m coreyard.webhook "$@" ;;
-    reconcile) shift; exec "$PY" -m coreyard.reconcile.cli "$@" ;;
-    repair) shift; exec "$PY" -m coreyard.repair.cli "$@" ;;
-    audit)  shift; exec "$PY" -m coreyard.audit.cli "$@" ;;
-    validate) shift; exec "$PY" -m coreyard.validate "$@" ;;
-    images) shift; exec "$PY" -m coreyard.yms.images "$@" ;;
-    schema) shift; exec "$PY" -m coreyard.yms.discover_schema "$@" ;;
-    *)      exec "$PY" -m coreyard.run_sync "$@" ;;
-esac
+# -u: scheduled runs redirect into a log file, where block buffering would hold a job's
+# output back for minutes. `coreyard doctor` decides the order poller is alive by watching
+# orders.log grow, so a buffered log is indistinguishable from a dead poller.
+exec "$PY" -u -m coreyard "$@"
 LAUNCHER
 chmod +x "$REPO_DIR/bin/coreyard"
 ok "installed bin/coreyard launcher"
@@ -248,9 +234,10 @@ if [ "${NEEDS_CONFIG:-0}" -eq 1 ]; then
     printf '  · SHOPIFY_HANDLE_PREFIX  (choose once — see the comment in .env)\n\n'
 fi
 printf 'Then:\n'
-printf '  bin/coreyard --check                          test connectivity\n'
-printf '  bin/coreyard --sink csv --limit 25 --dry-run  preview 25 parts\n'
-printf '  bin/coreyard bulk --limit 50                  bulk publish as drafts\n\n'
+printf '  bin/coreyard doctor                           check the installation\n'
+printf '  bin/coreyard status                           what the pipeline believes\n'
+printf '  bin/coreyard sync --dry-run                   what a sync would do\n'
+printf '  bin/coreyard --help                           every command\n\n'
 printf 'Tip: add it to your PATH with\n'
 printf '  ln -s "%s/bin/coreyard" ~/.local/bin/coreyard\n\n' "$REPO_DIR"
 printf 'Docs: %shttps://github.com/Luxorium/coreyard%s\n\n' "$C_BOLD" "$C_RESET"

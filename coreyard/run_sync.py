@@ -20,16 +20,46 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
+from coreyard import ops
 from coreyard.config import REPO_ROOT, load_settings
-from coreyard.state import DEFAULT_STATE_DB, SyncState, fingerprints_with_images
+from coreyard.state import DEFAULT_STATE_DB, SyncState, fingerprints_all
+from coreyard.state import subset as fp_subset
 from coreyard.transform.shopify_csv import ImageResolver
 
 STATE_DB = DEFAULT_STATE_DB
+
+# How often a long publish run writes its progress to the snapshot.
+#
+# Without this a run that does not finish records nothing, and "does not finish" is the
+# normal case for a large backlog: the scheduled job is wrapped in a timeout so it cannot
+# overrun the next launch, so a backlog bigger than one window could never be worked off.
+# It is not a hypothetical — an installation here spent twelve consecutive hourly runs
+# publishing the same ~2,000 of the same ~9,200 products, because each run was stopped
+# before its commit and the next one started again from the beginning.
+#
+# Checkpointing is only safe because a fingerprint is recorded strictly after the publish
+# it describes returned cleanly, so an interrupted run leaves a smaller snapshot, never a
+# wrong one.
+CHECKPOINT_EVERY = 100
 DEFAULT_CSV = REPO_ROOT / "out" / "products.csv"
 
 
-def _make_resolver(image_base_url: str | None, scan_images: bool = True) -> ImageResolver:
+class Photos(NamedTuple):
+    """How one run reads the photo share.
+
+    ``resolve`` yields the references that reach the rendered product; ``stamps`` yields the
+    share's manifest for the same part — the same filenames plus size and modification time.
+    They are separate because they answer different questions, and because only the second
+    can see a photo overwritten under its own name.
+    """
+
+    resolve: "ImageResolver"
+    stamps: object
+
+
+def _make_resolver(image_base_url: str | None, scan_images: bool = True) -> Photos:
     """Resolve each part's photos, for both the CSV rows and the change fingerprint.
 
     With a public base URL (e.g. a mirrored bucket) this emits ``{base}/{R#}/{file}``, which
@@ -42,23 +72,26 @@ def _make_resolver(image_base_url: str | None, scan_images: bool = True) -> Imag
     lookups would take over an hour, a single directory listing takes one round trip.
     """
     if not scan_images:
-        return lambda part: []
+        return Photos(lambda part: [], lambda part: [])
 
     from coreyard.yms.images import SmbImageStore
 
     store = SmbImageStore()
     base = image_base_url.rstrip("/") if image_base_url else None
-    index = store.list_all_inventory_images()
+    index = store.list_all_inventory_manifest()
 
     def resolver(part) -> list[str]:
         key = part.image_key()  # R# — the photo filename stem on the share
-        names = index.get(key, [])
-        return [f"{base}/{key}/{n}" for n in names] if base else list(names)
+        names = [name for name, _ in index.get(key, [])]
+        return [f"{base}/{key}/{n}" for n in names] if base else names
 
-    return resolver
+    def stamps(part) -> list[str]:
+        return [stamp for _, stamp in index.get(part.image_key(), [])]
+
+    return Photos(resolver, stamps)
 
 
-def _make_part_resolver(image_base_url: str | None) -> ImageResolver:
+def _make_part_resolver(image_base_url: str | None) -> Photos:
     """Per-part photo lookup, for the small candidate sets a delta run produces.
 
     The full sync lists the whole share once because it asks about 26,000 parts. A delta run
@@ -71,13 +104,26 @@ def _make_part_resolver(image_base_url: str | None) -> ImageResolver:
 
     store = SmbImageStore()
     base = image_base_url.rstrip("/") if image_base_url else None
+    # One listing per part, reused by both callbacks, so a delta run makes one round trip
+    # per part rather than two — and so the references and the manifest describe the same
+    # instant. Two listings could straddle a photo being replaced.
+    cache: dict[str, list[tuple[str, str]]] = {}
+
+    def entries(part) -> list[tuple[str, str]]:
+        key = part.image_key()
+        if key not in cache:
+            cache[key] = store.list_inventory_manifest(key)
+        return cache[key]
 
     def resolver(part) -> list[str]:
         key = part.image_key()
-        names = store.list_inventory_images(key)
-        return [f"{base}/{key}/{n}" for n in names] if base else list(names)
+        names = [name for name, _ in entries(part)]
+        return [f"{base}/{key}/{n}" for n in names] if base else names
 
-    return resolver
+    def stamps(part) -> list[str]:
+        return [stamp for _, stamp in entries(part)]
+
+    return Photos(resolver, stamps)
 
 
 def cmd_check(args) -> int:
@@ -108,16 +154,22 @@ def _retirement_plan(diff, args) -> tuple[list[str], str]:
     the extract" has innocent causes as well as guilty ones: a partial run, a schema edit, a
     database that answered but returned nothing. Two guards, both aimed at unattended runs:
 
-    * ``--limit`` means the extract deliberately saw only a slice of the yard, so almost
-      everything is "missing". Never retire from a partial view.
+    * A partial view — ``--limit``, ``--r-number`` — means the extract deliberately saw only
+      a slice of the yard, so almost everything is "missing". Never retire from one.
+    * A scope other than inventory has no opinion about availability at all: a photo run
+      that archived parts would be taking a decision it did not gather evidence for.
     * A removal fraction above the threshold is treated as a fault, not as a sale. Real
       sales trickle; a sudden majority means the extract, not the yard, changed.
     """
     if args.sink != "api" or not diff.removed:
         return [], ""
-    if args.limit:
-        return [], (f"  NOT retiring {len(diff.removed)} missing part(s): --limit means this run "
-                    f"only saw part of the yard.")
+    scope = getattr(args, "scope", None)
+    if scope not in (None, "inventory"):
+        return [], (f"  NOT retiring {len(diff.removed)} missing part(s): `sync {scope}` "
+                    f"does not decide availability — use `coreyard sync inventory`.")
+    partial = _partial_view(args)
+    if partial:
+        return [], (f"  NOT retiring {len(diff.removed)} missing part(s): {partial}.")
     known = len(diff.removed) + len(diff.added) + len(diff.changed) + len(diff.unchanged)
     share = len(diff.removed) / known if known else 0.0
     if share > args.max_retire_fraction and not args.force_retire:
@@ -206,10 +258,12 @@ def cmd_delta(args) -> int:
                   f"changed; this is no longer a delta. Publishing what was read, but NOT "
                   f"retiring — run a full sync to resynchronise.")
 
-        resolver = _make_part_resolver(args.image_base_url)
-        current, image_fps = fingerprints_with_images(
-            changes.listable, resolver, settings.store)
-        diff = state.diff(current, image_fps, detect_removals=False)
+        photos = _make_part_resolver(args.image_base_url)
+        resolver = photos.resolve
+        fingerprints = fingerprints_all(changes.listable, resolver, settings.store,
+                                        stamps=photos.stamps)
+        current, image_fps = fingerprints.content, fingerprints.images
+        diff = state.diff(fingerprints, detect_removals=False)
         print("  vs last publish:", diff.summary())
 
         # Only parts we believe are published may be retired, and only because we hold the
@@ -253,6 +307,7 @@ def cmd_delta(args) -> int:
         needs_photos = set(diff.image_changed) | changes.photo_changed
         revived: set[str] = set()
         published_ok: set[str] = set()
+        checkpointed: set[str] = set()
         for i, part in enumerate(todo, 1):
             key = part.uid()
             try:
@@ -267,6 +322,14 @@ def cmd_delta(args) -> int:
                 revived.add(key)
             if i % 25 == 0 or i == len(todo):
                 print(f"  {i}/{len(todo)}")
+            # Bank progress here too. A delta run is normally a handful of parts, but it is
+            # scheduled on a short timeout, and a window it cannot finish inside that
+            # timeout would otherwise be republished in full on every tick forever — which
+            # is what happens after a long full sync has held the shared lock for an hour.
+            # The cursor still only advances at the end, so nothing is skipped.
+            if len(published_ok) - len(checkpointed) >= CHECKPOINT_EVERY:
+                state.update(fp_subset(fingerprints, published_ok - checkpointed))
+                checkpointed |= published_ok
         state.clear_retired(revived)
 
         retired: set[str] = set()
@@ -286,13 +349,35 @@ def cmd_delta(args) -> int:
 
         # Record only what actually landed, then advance the cursor. A part that failed to
         # publish keeps its old fingerprint (or none), so the next run picks it up again.
-        state.update({k: v for k, v in current.items() if k in published_ok},
-                     {k: v for k, v in image_fps.items() if k in published_ok})
+        state.update(fp_subset(fingerprints, published_ok))
         state.forget(retired)
         if changes.cursor:
             state.set_cursor(CURSOR_NAME, changes.cursor.isoformat())
             print(f"Cursor advanced to {changes.cursor.isoformat()}.")
     return 0
+
+
+def _partial_view(args) -> str:
+    """Why this run saw only part of the yard, or "" if it saw all of it.
+
+    Absence is the only evidence a full sync has that a part sold, so a run that deliberately
+    looked at a slice must never reason from it. ``--limit`` has always blocked retirement
+    for this reason; ``--r-number`` is the same argument, and a scope other than inventory
+    is a third: a photo run has no opinion about whether a part is still in the yard.
+    """
+    if getattr(args, "r_numbers", None):
+        return "--r-number selected specific parts"
+    if args.limit:
+        return "--limit means this run only saw part of the yard"
+    return ""
+
+
+def _selected(diff, args) -> set[str]:
+    """Which parts this run publishes: everything that moved, or one scope's share of it."""
+    scope = getattr(args, "scope", None)
+    if scope in (None, "delta"):
+        return set(diff.added) | set(diff.changed)
+    return set(diff.changed_in(scope))
 
 
 def cmd_sync(args) -> int:
@@ -310,23 +395,38 @@ def cmd_sync(args) -> int:
         return 2
 
     settings = load_settings()
+    scope = getattr(args, "scope", None)
+    partial = _partial_view(args)
 
     # Taken before the extract, not after: rows that move while a long full run is reading
     # are still ahead of this mark, so the next delta run picks them up instead of assuming
     # the full run must already have seen them.
-    baseline = _delta_baseline() if not args.limit else None
+    baseline = _delta_baseline() if not partial else None
 
-    resolver = _make_resolver(args.image_base_url, scan_images=not args.no_image_scan)
+    photos = _make_resolver(args.image_base_url, scan_images=not args.no_image_scan)
+    resolver = photos.resolve
     print(f"Fetching parts (limit={args.limit or 'none'}) ...")
     parts = fetch_parts(limit=args.limit)
+    if getattr(args, "r_numbers", None):
+        wanted = {str(r).strip() for r in args.r_numbers}
+        parts = [p for p in parts if p.uid() in wanted]
+        missing = sorted(wanted - {p.uid() for p in parts})
+        print(f"  {len(parts)} of {len(wanted)} requested part(s) are listable"
+              + (f"; not listable: {missing}" if missing else ""))
     print(f"  {len(parts)} listable part(s)"
           f"{' (photos required)' if photos_required() else ''}")
 
     # Incremental diff
-    current, image_fps = fingerprints_with_images(parts, resolver, settings.store)
+    fingerprints = fingerprints_all(parts, resolver, settings.store, stamps=photos.stamps)
+    current, image_fps = fingerprints.content, fingerprints.images
     with SyncState(STATE_DB) as state:
-        diff = state.diff(current, image_fps)
+        # A partial view cannot tell "gone" from "not looked at", so it never asks.
+        diff = state.diff(fingerprints, detect_removals=not partial)
         print("Diff vs last run:", diff.summary())
+        if diff.scope_changed:
+            print("  by scope: " + "  ".join(
+                f"{name}={len(diff.changed_in(name))}"
+                for name in ("inventory", "catalog", "photos")))
 
         publisher = None
         if args.sink == "api":
@@ -340,7 +440,7 @@ def cmd_sync(args) -> int:
                 # on sale forever with no record that they were ever published.
                 print("Reconciling against the live store ...")
                 published = publisher.published_r_numbers()
-                diff.removed = sorted(published - set(current))
+                diff.removed = [] if partial else sorted(published - set(current))
                 print(f"  {len(published)} published, {len(diff.removed)} no longer listable")
 
         retire, why = _retirement_plan(diff, args)
@@ -348,6 +448,9 @@ def cmd_sync(args) -> int:
             print(why)
 
         retired: set[str] = set()
+        revived: set[str] = set()
+        todo: list = []
+        published_ok: set[str] = set()
         # Parts that were archived and are listable again — a voided work order puts one
         # back in the yard. They come back as whatever they were before, not as ARCHIVED
         # (which the status read-back would otherwise re-send) and not as DRAFT (which
@@ -370,13 +473,16 @@ def cmd_sync(args) -> int:
             # A dry run against the API sink must not write to the live store. Writing the
             # CSV above is harmless and is the point of that path; upserting 9,000 products
             # "as a preview" is not.
-            upserts = 0 if args.retire_only else len(diff.added) + len(diff.changed)
+            selected = _selected(diff, args)
+            upserts = 0 if args.retire_only else len(selected)
             print(f"Dry run: would upsert {upserts} product(s) "
-                  f"({0 if args.retire_only else len(diff.image_changed)} photo refresh), "
+                  f"({0 if args.retire_only else len(set(diff.image_changed) & selected)} "
+                  f"photo refresh), "
                   f"revive {0 if args.retire_only else len(revivals)}, "
                   f"and retire {len(retire)}.")
         else:  # api
-            todo = [p for p in parts if p.uid() in set(diff.added) | set(diff.changed)]
+            selected = _selected(diff, args)
+            todo = [p for p in parts if p.uid() in selected]
             if todo:
                 # Resolve fitment BEFORE publishing. Without it the renderer falls back to
                 # the donor vehicle alone and a routine incremental run would strip the
@@ -390,20 +496,36 @@ def cmd_sync(args) -> int:
                     InterchangeResolver(conn).attach(todo)
                     _enrich(conn, todo)
 
-            needs_photos = set(diff.image_changed)
+            # Media is torn down and re-uploaded only for parts whose photo set actually
+            # moved, and only among the ones this run is touching.
+            needs_photos = set(diff.image_changed) & selected
             if args.retire_only:
                 print(f"Retire-only: skipping {len(todo)} upsert(s).")
                 todo = []
             print(f"Upserting {len(todo)} new/changed products to Shopify "
                   f"({len(needs_photos & {p.uid() for p in todo})} with changed photos) ...")
-            revived: set[str] = set()
+            checkpointed: set[str] = set()
             for i, part in enumerate(todo, 1):
-                publisher.publish(part, refresh_images=part.uid() in needs_photos,
-                                  revive_status=revivals.get(part.uid()))
-                if part.uid() in revivals:
-                    revived.add(part.uid())
+                key = part.uid()
+                try:
+                    publisher.publish(part, refresh_images=key in needs_photos,
+                                      revive_status=revivals.get(key))
+                except RuntimeError as exc:
+                    # Leave this part out of the state update so the next run retries it.
+                    print(f"  R#{key}: {exc}")
+                    continue
+                published_ok.add(key)
+                if key in revivals:
+                    revived.add(key)
                 if i % 25 == 0 or i == len(todo):
                     print(f"  {i}/{len(todo)}")
+                # Bank the work so far. A run stopped by its timeout keeps everything it
+                # published instead of starting the same backlog again next hour.
+                if not args.dry_run and len(published_ok) - len(checkpointed) >= CHECKPOINT_EVERY:
+                    state.update(fp_subset(fingerprints, published_ok - checkpointed))
+                    checkpointed |= published_ok
+            if published_ok - checkpointed and not args.dry_run:
+                state.update(fp_subset(fingerprints, published_ok - checkpointed))
             # Only after the upsert landed: a part whose revival failed must still be
             # remembered, or the retry would republish it as ARCHIVED.
             state.clear_retired(revived)
@@ -436,7 +558,18 @@ def cmd_sync(args) -> int:
             # Nothing was published, so committing `current` would record 26,000 parts as
             # live and the next run would skip every one of them as "unchanged".
             print("Retire-only: state NOT committed.")
-        elif not args.dry_run:
+        elif args.dry_run:
+            print("Dry run: state NOT committed.")
+        elif partial or scope:
+            # This run either saw a slice of the yard or was allowed to act on only part of
+            # what moved. Committing would record every part it *declined* to publish as
+            # up to date, and the change it skipped would never be published by anything.
+            # So record exactly what landed and leave the rest of the snapshot alone.
+            state.update(fp_subset(fingerprints, published_ok))
+            state.forget(retired)
+            print(f"State updated for {len(published_ok)} published part(s); "
+                  f"the rest of the snapshot is untouched.")
+        else:
             # Anything we believed was published but did not retire is carried forward at
             # its old fingerprint. Dropping it here would silently forget a part that is
             # still live on the storefront with stock it no longer has.
@@ -445,6 +578,9 @@ def cmd_sync(args) -> int:
                        if r in set(diff.removed) - retired}
             snapshot.update(carried)
             state.commit(snapshot, image_fps)
+            # The scope columns follow the same rule the canonical map just did: only the
+            # parts this run actually rendered get fresh values.
+            state.update(fp_subset(fingerprints, set(current)))
             print(f"State committed{f' ({len(carried)} unretired carried forward)' if carried else ''}.")
             if baseline is not None:
                 # Only a full run may set this: it is the only one that has just reconciled
@@ -453,18 +589,61 @@ def cmd_sync(args) -> int:
                 from coreyard.yms.delta import CURSOR_NAME
 
                 state.set_cursor(CURSOR_NAME, baseline.isoformat())
-        else:
-            print("Dry run: state NOT committed.")
+
+        _summarise(diff, published_ok, revived, retired, todo, args)
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="coreyard.run_sync", description="source database -> Shopify sync")
+def _summarise(diff, published_ok, revived, retired, todo, args) -> None:
+    """One block an operator can read at a glance, and the counts `status` remembers."""
+    created = len(set(diff.added) & published_ok)
+    counts = {
+        "created": created,
+        "updated": len(published_ok) - created,
+        "revived": len(revived),
+        "retired": len(retired),
+        "unchanged": len(diff.unchanged),
+        "failed": len(todo) - len(published_ok),
+    }
+    ops.count(scope=getattr(args, "scope", None) or "full", dry_run=bool(args.dry_run),
+              **counts)
+    if args.dry_run:
+        return
+    print("\nSync complete.\n")
+    for label, value in counts.items():
+        print(f"  {label.replace('_', ' ').capitalize():<14}{value:>10,}")
+    if counts["failed"]:
+        print(f"\n  {counts['failed']} part(s) failed to publish and keep their previous "
+              f"state, so the next run retries them.")
+
+
+SCOPE_HELP = {
+    "delta": "publish only what changed since the stored cursor (cheap catch-up)",
+    "inventory": "availability only: new, revived, repriced, restocked, retired",
+    "photos": "media only: parts whose photo set moved on the share",
+    "catalog": "copy only: parts whose rendered text, tags, weight or metafields moved",
+}
+
+
+def _sync_flags(p: argparse.ArgumentParser,
+                default_sink: str = "api") -> argparse.ArgumentParser:
+    """The flags every sync scope accepts.
+
+    Applied to the ``sync`` parser and to each scope subparser, so ``coreyard sync
+    --dry-run`` and ``coreyard sync photos --dry-run`` mean the same thing.
+
+    ``default_sink`` differs between the two entry points on purpose. ``coreyard sync`` is
+    the operator's convergence command and publishes; asking it to also be told *where* to
+    publish, every time, is how a scheduled job ends up quietly writing a CSV nobody reads.
+    The legacy ``python -m coreyard.run_sync`` keeps its original CSV default, because this
+    installation's crontab names it and a default is not worth a surprise.
+    """
     p.add_argument("--check", action="store_true", help="test connectivity and exit")
     p.add_argument("--delta", action="store_true",
                    help="publish only what changed since the last run's cursor and retire "
                         "what left scope (cheap catch-up; needs a prior full sync)")
-    p.add_argument("--sink", choices=["csv", "api"], default="csv")
+    p.add_argument("--sink", choices=["csv", "api"], default=default_sink,
+                   help=f"where to publish (default {default_sink})")
     p.add_argument("--limit", type=int, default=None, help="max parts (for dry runs)")
     p.add_argument("--out", default=str(DEFAULT_CSV), help="CSV output path")
     p.add_argument("--image-base-url", default=None,
@@ -475,19 +654,62 @@ def main(argv: list[str] | None = None) -> int:
                    help="status for NEW products; existing products keep theirs (default DRAFT)")
     p.add_argument("--retire-only", action="store_true",
                    help="retire sold parts without publishing anything (pairs with --reconcile)")
-    p.add_argument("--reconcile", action="store_true",
-                   help="ask Shopify what is published instead of trusting the state file "
-                        "(use for the first run, or after a bulk load)")
+    deep = p.add_mutually_exclusive_group()
+    deep.add_argument("--deep", dest="reconcile", action="store_true",
+                      help="ask the live store what it holds instead of trusting the state "
+                           "file. Slower (it pages the whole catalogue), so it belongs on a "
+                           "daily run rather than an hourly one — but it is the only thing "
+                           "that sees drift the snapshot cannot.")
+    # The name this flag shipped under. The crontab and the README both used it, and a
+    # scheduled job that silently stops reconciling looks exactly like one that works.
+    deep.add_argument("--reconcile", dest="reconcile", action="store_true",
+                      help=argparse.SUPPRESS)
+    p.add_argument("--r-number", dest="r_numbers", metavar="R#", action="append",
+                   default=None,
+                   help="act on these parts only (repeatable). Never retires anything: a "
+                        "part outside the selection is unexamined, not missing.")
     p.add_argument("--force-retire", action="store_true",
                    help="retire sold parts even if they exceed the safety fraction")
     p.add_argument("--max-retire-fraction", type=float, default=0.10,
                    help="refuse to retire more than this share of the catalogue (default 0.10)")
     p.add_argument("--dry-run", action="store_true",
                    help="report the diff only: no Shopify writes, no state commit")
-    args = p.parse_args(argv)
+    return p
 
+
+def add_arguments(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Populate a parser with the sync flags and the scope subcommands.
+
+    Shared by ``coreyard sync`` and the legacy ``python -m coreyard.run_sync`` entry point
+    that this installation's crontab still names, so the two can never drift into
+    disagreeing about what a flag means.
+
+    The scopes are selectors over one plan, not separate engines. There is one extract, one
+    renderer and one diff; a scope only decides which of the parts that moved this run is
+    allowed to act on. Building them as independent commands would have meant a second
+    answer to "what changed", which is the bug `transform/render.py` exists to prevent.
+    """
+    _sync_flags(p)
+    p.set_defaults(func=dispatch, scope=None)
+    sub = p.add_subparsers(dest="scope", metavar="<scope>")
+    for name, help_text in SCOPE_HELP.items():
+        scoped = sub.add_parser(name, help=help_text, description=help_text)
+        _sync_flags(scoped)
+        scoped.set_defaults(func=dispatch, scope=name)
+    return p
+
+
+def dispatch(args) -> int:
+    """Route parsed sync arguments to the right run. The one place that decision is made."""
+    scope = getattr(args, "scope", None)
+    if scope == "delta":
+        args.delta = True
+    # A scope subcommand is an operator command against the live store; the bare `--sink`
+    # default only exists because the CSV preview predates the API sink.
+    if scope and args.sink != "api":
+        args.sink = "api"
     try:
-        if args.check:
+        if getattr(args, "check", False):
             return cmd_check(args)
         if args.delta:
             if args.sink != "api":
@@ -499,6 +721,20 @@ def main(argv: list[str] | None = None) -> int:
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    """The legacy ``python -m coreyard.run_sync`` entry point.
+
+    Kept working, and kept behaving exactly as it did, because this installation's crontab
+    invokes it by module path — and a scheduled job that changes behaviour silently is the
+    failure mode that costs a day before anyone notices.
+    """
+    p = argparse.ArgumentParser(prog="coreyard.run_sync",
+                                description="source database -> Shopify sync")
+    _sync_flags(p, default_sink="csv")
+    p.set_defaults(func=dispatch, scope=None)
+    return dispatch(p.parse_args(argv))
 
 
 if __name__ == "__main__":

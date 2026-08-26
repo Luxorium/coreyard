@@ -1,0 +1,287 @@
+"""What a scoped or targeted sync is allowed to do, and what it must record afterwards.
+
+Two failure modes are worth the whole file. A scoped run that *commits* records every part
+it declined to publish as up to date, so the change it skipped is never published by
+anything — the catalogue silently stops converging. And a run that saw a slice of the yard
+must never read absence as a sale, because absence is the only evidence retirement has.
+"""
+
+import argparse
+import sqlite3
+import tempfile
+import unittest
+from decimal import Decimal
+from pathlib import Path
+
+from coreyard import run_sync
+from coreyard.config import StoreProfile
+from coreyard.models import Part
+from coreyard.state import (SCOPES, DiffResult, Fingerprints, SyncState,
+                            fingerprints_all, subset)
+from coreyard.transform.render import SCOPE_FIELDS, render
+
+STORE = StoreProfile()
+NO_IMG = lambda part: []                                              # noqa: E731
+
+
+def part(r_number="51", **kw):
+    fields = dict(r_number=r_number, part_type="Door", price=Decimal("100.00"),
+                  quantity=1, make="Honda", model="Civic", year=2015)
+    fields.update(kw)
+    return Part(**fields)
+
+
+def sync_args(argv):
+    parser = argparse.ArgumentParser()
+    run_sync.add_arguments(parser)
+    args = parser.parse_args(argv)
+    args.sink = "api"
+    return args
+
+
+class ScopeProjections(unittest.TestCase):
+    """Each scope must move for its own changes and stay still for everyone else's."""
+
+    def moved(self, before_part, after_part, before_images=("51_01.jpg",),
+              after_images=None):
+        after_images = before_images if after_images is None else after_images
+        before = render(before_part, list(before_images), STORE)
+        after = render(after_part, list(after_images), STORE)
+        return {scope for scope in SCOPE_FIELDS
+                if before.scope_fingerprint(scope) != after.scope_fingerprint(scope)}
+
+    def test_a_quantity_change_is_inventory_only(self):
+        self.assertEqual(self.moved(part(), part(quantity=0)), {"inventory"})
+
+    def test_a_price_change_is_inventory_only(self):
+        self.assertEqual(self.moved(part(), part(price=Decimal("90.00"))), {"inventory"})
+
+    def test_a_copy_change_does_not_move_the_photo_scope(self):
+        """Alt text is generated from the part's copy. If it counted as a photo change, a
+        retitled part would have its media torn down and re-uploaded — the one expensive
+        thing a scoped run exists to avoid."""
+        self.assertNotIn("photos", self.moved(part(), part(part_type="Hood")))
+
+    def test_a_photo_set_change_moves_the_photo_scope(self):
+        self.assertIn("photos", self.moved(part(), part(),
+                                           after_images=("51_01.jpg", "51_02.jpg")))
+
+    def test_nothing_moves_when_nothing_changed(self):
+        self.assertEqual(self.moved(part(), part()), set())
+
+    def test_a_scope_fingerprint_is_a_projection_of_the_canonical_payload(self):
+        """Not a second rendering. If a scope hashed its own idea of the product, it could
+        disagree with the renderer that actually publishes."""
+        rendered = render(part(), ["51_01.jpg"], STORE)
+        payload = rendered.payload()
+        for scope in SCOPE_FIELDS:
+            with self.subTest(scope=scope):
+                self.assertEqual(rendered.scope_fingerprint(scope),
+                                 render(part(), ["51_01.jpg"], STORE)
+                                 .scope_fingerprint(scope))
+        self.assertIn("inventory", payload)
+
+
+class ChangedIn(unittest.TestCase):
+    def test_a_new_part_belongs_to_every_scope(self):
+        """Creating the product is what makes it right in all of them."""
+        diff = DiffResult(added=["1"], scope_changed={"inventory": [], "catalog": []})
+        for scope in ("inventory", "catalog", "photos"):
+            with self.subTest(scope=scope):
+                self.assertIn("1", diff.changed_in(scope))
+
+    def test_a_scope_sees_only_its_own_changes(self):
+        diff = DiffResult(changed=["1", "2"], image_changed=["3"],
+                          scope_changed={"inventory": ["1"], "catalog": ["2"]})
+        self.assertEqual(diff.changed_in("inventory"), ["1"])
+        self.assertEqual(diff.changed_in("catalog"), ["2"])
+        self.assertEqual(diff.changed_in("photos"), ["3"])
+
+
+class RetirementGuards(unittest.TestCase):
+    """Retirement is the one destructive act, so every way of narrowing a run blocks it."""
+
+    def setUp(self):
+        self.diff = DiffResult(removed=["1", "2"],
+                               unchanged=[str(i) for i in range(100)])
+
+    def _retires(self, argv):
+        return run_sync._retirement_plan(self.diff, sync_args(argv))[0]
+
+    def test_a_full_run_retires(self):
+        self.assertEqual(self._retires([]), ["1", "2"])
+
+    def test_the_inventory_scope_retires(self):
+        self.assertEqual(self._retires(["inventory"]), ["1", "2"])
+
+    def test_limit_blocks_retirement(self):
+        self.assertEqual(self._retires(["--limit", "5"]), [])
+
+    def test_targeting_specific_parts_blocks_retirement(self):
+        """A part outside the selection is unexamined, not missing."""
+        self.assertEqual(self._retires(["--r-number", "51"]), [])
+
+    def test_the_photo_scope_never_retires(self):
+        self.assertEqual(self._retires(["photos"]), [])
+
+    def test_the_catalog_scope_never_retires(self):
+        self.assertEqual(self._retires(["catalog"]), [])
+
+    def test_a_mass_removal_is_still_refused(self):
+        diff = DiffResult(removed=[str(i) for i in range(50)],
+                          unchanged=[str(i) for i in range(50, 100)])
+        retire, why = run_sync._retirement_plan(diff, sync_args([]))
+        self.assertEqual(retire, [])
+        self.assertIn("REFUSING", why)
+
+    def test_force_retire_overrides_the_fraction_but_not_a_partial_view(self):
+        diff = DiffResult(removed=[str(i) for i in range(50)],
+                          unchanged=[str(i) for i in range(50, 100)])
+        self.assertEqual(len(run_sync._retirement_plan(
+            diff, sync_args(["--force-retire"]))[0]), 50)
+        self.assertEqual(run_sync._retirement_plan(
+            diff, sync_args(["--force-retire", "--limit", "5"]))[0], [])
+
+
+class PartialView(unittest.TestCase):
+    def test_a_full_run_sees_the_whole_yard(self):
+        self.assertEqual(run_sync._partial_view(sync_args([])), "")
+        self.assertEqual(run_sync._partial_view(sync_args(["catalog"])), "")
+
+    def test_narrowing_flags_are_reported_with_a_reason(self):
+        self.assertIn("--limit", run_sync._partial_view(sync_args(["--limit", "5"])))
+        self.assertIn("--r-number",
+                      run_sync._partial_view(sync_args(["--r-number", "51"])))
+
+
+class Selection(unittest.TestCase):
+    def test_an_unscoped_run_publishes_everything_that_moved(self):
+        diff = DiffResult(added=["1"], changed=["2"],
+                          scope_changed={"inventory": ["2"], "catalog": []})
+        self.assertEqual(run_sync._selected(diff, sync_args([])), {"1", "2"})
+
+    def test_a_scoped_run_publishes_only_its_share(self):
+        diff = DiffResult(added=[], changed=["2", "3"],
+                          scope_changed={"inventory": ["2"], "catalog": ["3"]})
+        self.assertEqual(run_sync._selected(diff, sync_args(["inventory"])), {"2"})
+        self.assertEqual(run_sync._selected(diff, sync_args(["catalog"])), {"3"})
+
+
+class Defaults(unittest.TestCase):
+    """Where each entry point publishes, if nobody says."""
+
+    def test_the_operator_command_publishes(self):
+        """`coreyard sync` in a crontab must not quietly write a CSV nobody reads."""
+        parser = argparse.ArgumentParser()
+        run_sync.add_arguments(parser)
+        self.assertEqual(parser.parse_args([]).sink, "api")
+
+    def test_the_legacy_entry_point_keeps_its_original_default(self):
+        """This installation's crontab names `python -m coreyard.run_sync` directly, and a
+        scheduled job whose behaviour changes silently is the expensive kind of surprise."""
+        parser = argparse.ArgumentParser()
+        run_sync._sync_flags(parser, default_sink="csv")
+        self.assertEqual(parser.parse_args([]).sink, "csv")
+
+    def test_a_scope_always_publishes_through_the_api(self):
+        parser = argparse.ArgumentParser()
+        run_sync.add_arguments(parser)
+        parsed = parser.parse_args(["photos"])
+        self.assertEqual(parsed.scope, "photos")
+
+    def test_dry_run_is_accepted_by_every_scope(self):
+        parser = argparse.ArgumentParser()
+        run_sync.add_arguments(parser)
+        for scope in ("delta", "inventory", "photos", "catalog"):
+            with self.subTest(scope=scope):
+                self.assertTrue(parser.parse_args([scope, "--dry-run"]).dry_run)
+
+
+class StateMigration(unittest.TestCase):
+    """An existing installation must upgrade without republishing its catalogue."""
+
+    def _legacy_db(self, path):
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE parts (r_number TEXT PRIMARY KEY,"
+                     " fingerprint TEXT NOT NULL, last_seen TEXT NOT NULL,"
+                     " image_fingerprint TEXT NOT NULL DEFAULT '')")
+        conn.executemany("INSERT INTO parts VALUES (?,?,?,?)",
+                         [("1", "fp-one", "2026-01-01", "img-one"),
+                          ("2", "fp-two", "2026-01-01", "img-two")])
+        conn.commit()
+        conn.close()
+
+    def test_upgrading_adds_the_columns_and_changes_no_fingerprint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state.sqlite3"
+            self._legacy_db(db)
+            with SyncState(db) as state:
+                self.assertEqual(state.load(), {"1": "fp-one", "2": "fp-two"})
+                self.assertEqual(state.load_images(), {"1": "img-one", "2": "img-two"})
+                columns = {row[1] for row in state.conn.execute("PRAGMA table_info(parts)")}
+                for scope in SCOPES:
+                    self.assertIn(f"{scope}_fingerprint", columns)
+
+    def test_the_first_run_after_upgrading_reports_no_scope_changes(self):
+        """An unknown scope value must read as "not changed". Reading it as changed would
+        publish the whole catalogue once per scope on the upgrade run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state.sqlite3"
+            self._legacy_db(db)
+            with SyncState(db) as state:
+                fingerprints = Fingerprints(
+                    content={"1": "fp-one", "2": "fp-two"},
+                    images={"1": "img-one", "2": "img-two"},
+                    scopes={"inventory": {"1": "x", "2": "y"},
+                            "catalog": {"1": "p", "2": "q"}})
+                diff = state.diff(fingerprints)
+                self.assertEqual(diff.changed, [])
+                self.assertEqual(diff.scope_changed["inventory"], [])
+                self.assertEqual(diff.scope_changed["catalog"], [])
+
+
+class SnapshotDiscipline(unittest.TestCase):
+    def test_subset_narrows_every_map_together(self):
+        """A part that failed to publish must keep its old fingerprints in all of them."""
+        fps = fingerprints_all([part("1"), part("2")], NO_IMG, STORE)
+        narrowed = subset(fps, {"1"})
+        self.assertEqual(set(narrowed.content), {"1"})
+        self.assertEqual(set(narrowed.images), {"1"})
+        for scope in SCOPES:
+            with self.subTest(scope=scope):
+                self.assertEqual(set(narrowed.scopes[scope]), {"1"})
+
+    def test_update_records_scope_columns_and_leaves_others_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state.sqlite3"
+            with SyncState(db) as state:
+                fps = fingerprints_all([part("1"), part("2")], NO_IMG, STORE)
+                state.commit(fps)
+                self.assertEqual(set(state.load()), {"1", "2"})
+                self.assertEqual(set(state.load_scope("inventory")), {"1", "2"})
+
+                # A scoped run publishes only R#1; R#2 must keep what it had.
+                moved = fingerprints_all([part("1", quantity=7), part("2", quantity=7)],
+                                         NO_IMG, STORE)
+                state.update(subset(moved, {"1"}))
+                self.assertEqual(state.load()["1"], moved.content["1"])
+                self.assertEqual(state.load()["2"], fps.content["2"])
+
+    def test_a_scoped_run_would_strand_changes_if_it_committed(self):
+        """The regression this discipline exists to prevent: commit() replaces the whole
+        snapshot, so a part whose catalog moved but which a photo run never published
+        would be recorded as up to date and never published by anything."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state.sqlite3"
+            with SyncState(db) as state:
+                state.commit(fingerprints_all([part("1"), part("2")], NO_IMG, STORE))
+                moved = fingerprints_all([part("1", part_type="Hood"), part("2")],
+                                         NO_IMG, STORE)
+                # What a scoped run does: record only what it published (nothing here).
+                state.update(subset(moved, set()))
+                self.assertEqual(state.diff(moved).changed, ["1"],
+                                 "R#1's catalog change must still be pending")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -52,6 +52,40 @@ def image_fingerprint(image_urls: list[str]) -> str:
     return hashlib.sha256(blob).hexdigest()
 
 
+# The scope columns, and the render projection each one stores. Adding a scope here and in
+# ``render.SCOPE_FIELDS`` is all it takes; the migration below adds the column.
+SCOPES = ("inventory", "catalog")
+
+# Bumped when the photo manifest changes shape. Version 1 hashed filenames alone, which
+# could not see a photo replaced under its own name; version 2 hashes name, size and
+# modification time.
+#
+# The upgrade cannot simply re-hash: every stored value would differ, every photographed
+# part would read as "photos changed", and the next run would tear down and re-upload the
+# media of the entire catalogue. So a run whose stored version is behind records the new
+# manifest and reports *no* photo changes — it rebaselines. Only a full commit may declare
+# the new version, because only a full commit rewrites every row; a scoped or delta run
+# that claimed it would leave most rows at version 1 and the run after that would compare
+# the two shapes against each other.
+IMAGE_MANIFEST_VERSION = "2"
+_MANIFEST_KEY = "image_manifest_version"
+
+
+@dataclass
+class Fingerprints:
+    """Every fingerprint one run computed, keyed by R#.
+
+    ``content`` is the canonical one the diff has always used and is unchanged. The rest are
+    projections of the same rendered product (see ``RenderedProduct.scope_fingerprint``),
+    carried alongside so a run can say *why* a part moved rather than only that it did —
+    which is what ``coreyard sync inventory`` and ``coreyard sync photos`` select on.
+    """
+
+    content: dict[str, str] = field(default_factory=dict)
+    images: dict[str, str] = field(default_factory=dict)
+    scopes: dict[str, dict[str, str]] = field(default_factory=dict)
+
+
 @dataclass
 class DiffResult:
     added: list[str] = field(default_factory=list)
@@ -59,6 +93,19 @@ class DiffResult:
     unchanged: list[str] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)  # R# was published, now gone/sold
     image_changed: list[str] = field(default_factory=list)  # subset of added+changed
+    # Why the changed ones changed. Subsets of added+changed, and deliberately allowed to
+    # overlap: a part can have been repriced *and* retitled in the same tick.
+    scope_changed: dict[str, list[str]] = field(default_factory=dict)
+
+    def changed_in(self, scope: str) -> list[str]:
+        """Parts a scoped run should act on: this scope moved, or the part is brand new.
+
+        A new part has no previous fingerprint in any scope, so every scope claims it —
+        correct, because creating the product is what makes it right in all of them.
+        """
+        if scope == "photos":
+            return sorted(set(self.image_changed) | set(self.added))
+        return sorted(set(self.scope_changed.get(scope, ())) | set(self.added))
 
     def summary(self) -> str:
         return (
@@ -105,6 +152,17 @@ class SyncState:
         if "stock" in columns and "r_number" not in columns:
             # Older snapshots already stored the R# in a misleadingly named column.
             self.conn.execute("ALTER TABLE parts RENAME COLUMN stock TO r_number")
+        for scope in SCOPES:
+            # Same contract as image_fingerprint below: an existing row gets '', which reads
+            # as "this scope is unknown for this part", so the first run after upgrading
+            # reports no scope changes rather than claiming the whole catalogue moved. The
+            # canonical `fingerprint` column is never touched by this migration — rewriting
+            # it would republish every product on the store.
+            if f"{scope}_fingerprint" not in columns:
+                self.conn.execute(
+                    f"ALTER TABLE parts ADD COLUMN {scope}_fingerprint TEXT NOT NULL"
+                    " DEFAULT ''"
+                )
         if "image_fingerprint" not in columns:
             # Added later. Existing rows get '' — which reads as "photos unknown", so the
             # first run after upgrading reports no photo changes rather than claiming every
@@ -138,9 +196,21 @@ class SyncState:
             if fp
         }
 
+    def load_scope(self, scope: str) -> dict[str, str]:
+        """One scope's stored fingerprints, skipping the rows that predate the column."""
+        if scope not in SCOPES:
+            raise ValueError(f"unknown scope {scope!r}")
+        return {
+            r_number: fp
+            for r_number, fp in self.conn.execute(
+                f"SELECT r_number, {scope}_fingerprint FROM parts"
+            )
+            if fp
+        }
+
     def diff(
         self,
-        current: dict[str, str],
+        current,
         images: dict[str, str] | None = None,
         detect_removals: bool = True,
     ) -> DiffResult:
@@ -152,7 +222,14 @@ class SyncState:
         ``detect_removals`` must be False when ``current`` is a *subset* of the yard, as it
         is for a delta run. Removal is inferred from absence, and every part the subset did
         not look at is absent — so leaving this on would report the entire catalogue as sold.
+
+        ``current`` may be a :class:`Fingerprints` bundle instead of the bare content map,
+        in which case the per-scope classification is filled in too and ``images`` is taken
+        from the bundle.
         """
+        bundle = current if isinstance(current, Fingerprints) else None
+        if bundle is not None:
+            current, images = bundle.content, bundle.images
         previous = self.load()
         result = DiffResult()
         for r_number, fp in current.items():
@@ -166,7 +243,11 @@ class SyncState:
             for r_number in previous:
                 if r_number not in current:
                     result.removed.append(r_number)
-        if images:
+        if images and self.get_cursor(_MANIFEST_KEY) != IMAGE_MANIFEST_VERSION:
+            # Rebaselining. The stored fingerprints were taken with an older manifest, so
+            # comparing them against these would flag every photographed part.
+            result.image_changed = []
+        elif images:
             previous_images = self.load_images()
             result.image_changed = [
                 r_number
@@ -175,6 +256,16 @@ class SyncState:
                 # as changed would re-upload the entire catalogue on the upgrade run.
                 if r_number in previous_images and previous_images[r_number] != fp
             ]
+        if bundle is not None:
+            for scope, fingerprints in bundle.scopes.items():
+                stored = self.load_scope(scope)
+                # An R# with no stored value for this scope predates the column. Treating it
+                # as changed would make the upgrade run publish the whole catalogue once per
+                # scope, which is exactly what the image column's default avoids.
+                result.scope_changed[scope] = sorted(
+                    r for r, fp in fingerprints.items()
+                    if r in stored and stored[r] != fp
+                )
         for lst in (result.added, result.changed, result.unchanged,
                     result.removed, result.image_changed):
             lst.sort()
@@ -225,23 +316,42 @@ class SyncState:
         with self.conn:
             self.conn.executemany("DELETE FROM retired WHERE r_number = ?", keys)
 
-    def update(self, current: dict[str, str], images: dict[str, str] | None = None) -> None:
+    @staticmethod
+    def _rows(current, images):
+        """(columns, rows) for a snapshot write, from either a bundle or a bare map."""
+        bundle = current if isinstance(current, Fingerprints) else None
+        if bundle is not None:
+            current, images = bundle.content, bundle.images
+        images = images or {}
+        now = datetime.now(timezone.utc).isoformat()
+        columns = ["r_number", "fingerprint", "image_fingerprint"]
+        columns += [f"{scope}_fingerprint" for scope in SCOPES]
+        columns.append("last_seen")
+        rows = []
+        for r_number, fp in current.items():
+            row = [r_number, fp, images.get(r_number, "")]
+            for scope in SCOPES:
+                row.append(
+                    bundle.scopes.get(scope, {}).get(r_number, "") if bundle else "")
+            row.append(now)
+            rows.append(tuple(row))
+        return columns, rows
+
+    def update(self, current, images: dict[str, str] | None = None) -> None:
         """Merge a *subset* of fingerprints into the snapshot, leaving the rest alone.
 
         The delta path's counterpart to :meth:`commit`. Calling ``commit`` with a delta's
         handful of parts would delete every part it did not look at, and the next full run
         would then republish the whole catalogue as new.
         """
-        if not current:
+        columns, rows = self._rows(current, images)
+        if not rows:
             return
-        now = datetime.now(timezone.utc).isoformat()
-        images = images or {}
+        placeholders = ",".join("?" * len(columns))
         with self.conn:
             self.conn.executemany(
-                "INSERT OR REPLACE INTO parts"
-                "(r_number, fingerprint, image_fingerprint, last_seen) VALUES (?,?,?,?)",
-                [(r_number, fp, images.get(r_number, ""), now)
-                 for r_number, fp in current.items()],
+                f"INSERT OR REPLACE INTO parts({','.join(columns)})"
+                f" VALUES ({placeholders})", rows,
             )
 
     def forget(self, r_numbers: Iterable[str]) -> None:
@@ -252,18 +362,70 @@ class SyncState:
         with self.conn:
             self.conn.executemany("DELETE FROM parts WHERE r_number = ?", keys)
 
-    def commit(self, current: dict[str, str], images: dict[str, str] | None = None) -> None:
+    def commit(self, current, images: dict[str, str] | None = None) -> None:
         """Replace the snapshot with the current set (removes vanished R#s)."""
-        now = datetime.now(timezone.utc).isoformat()
-        images = images or {}
+        columns, rows = self._rows(current, images)
+        placeholders = ",".join("?" * len(columns))
         with self.conn:
             self.conn.execute("DELETE FROM parts")
             self.conn.executemany(
-                "INSERT INTO parts(r_number, fingerprint, image_fingerprint, last_seen)"
-                " VALUES (?,?,?,?)",
-                [(r_number, fp, images.get(r_number, ""), now)
-                 for r_number, fp in current.items()],
+                f"INSERT INTO parts({','.join(columns)}) VALUES ({placeholders})", rows,
             )
+        # Every row was just rewritten with the current manifest shape, so — and only
+        # here — the stored version is true of the whole snapshot. A run that carried no
+        # photo fingerprints at all (`--no-image-scan`) has not established anything and
+        # must leave the version where it was.
+        carried_images = (current.images if isinstance(current, Fingerprints)
+                          else (images or {}))
+        if any(carried_images.values()):
+            self.set_cursor(_MANIFEST_KEY, IMAGE_MANIFEST_VERSION)
+
+
+def fingerprints_all(
+    parts: Iterable[Part],
+    resolver,
+    store: StoreProfile,
+    stamps=None,
+) -> Fingerprints:
+    """Every fingerprint for a run, rendering each part exactly once.
+
+    One render per part is the point: the canonical hash and every scope projection come off
+    the same :class:`RenderedProduct`, so they cannot describe different products.
+    """
+    from coreyard.transform.render import SCOPE_FIELDS, render
+
+    result = Fingerprints(scopes={scope: {} for scope in SCOPES})
+    for part in parts:
+        if not part.is_listable():
+            continue
+        urls = resolver(part)
+        rendered = render(part, urls, store)
+        key = part.uid()
+        result.content[key] = rendered.fingerprint()
+        # The product hashes the photo *references* it publishes; the image fingerprint
+        # hashes the share's manifest, which also carries size and modification time. They
+        # answer different questions: "does the listing name different files" versus "did
+        # any of those files change on disk".
+        result.images[key] = image_fingerprint(stamps(part) if stamps else urls)
+        for scope in SCOPES:
+            if scope in SCOPE_FIELDS:
+                result.scopes[scope][key] = rendered.scope_fingerprint(scope)
+    return result
+
+
+def subset(fingerprints: Fingerprints, keys: Iterable[str]) -> Fingerprints:
+    """The bundle narrowed to ``keys`` — what a run records after publishing only some.
+
+    A part that failed to publish must keep its *old* fingerprints, so the next run tries it
+    again. Filtering here rather than at each call site keeps the four maps in step.
+    """
+    wanted = set(keys)
+    return Fingerprints(
+        content={k: v for k, v in fingerprints.content.items() if k in wanted},
+        images={k: v for k, v in fingerprints.images.items() if k in wanted},
+        scopes={scope: {k: v for k, v in values.items() if k in wanted}
+                for scope, values in fingerprints.scopes.items()},
+    )
 
 
 def fingerprints_for(
@@ -280,13 +442,11 @@ def fingerprints_with_images(
     resolver,
     store: StoreProfile,
 ) -> tuple[dict[str, str], dict[str, str]]:
-    """Both fingerprint maps in one pass, so the resolver is called once per part."""
-    content: dict[str, str] = {}
-    images: dict[str, str] = {}
-    for part in parts:
-        if not part.is_listable():
-            continue
-        urls = resolver(part)
-        content[part.uid()] = product_fingerprint(part, urls, store)
-        images[part.uid()] = image_fingerprint(urls)
-    return content, images
+    """The content and photo maps alone, for callers that want no scope classification.
+
+    A view onto :func:`fingerprints_all` rather than a second pass over the parts: two
+    implementations of "fingerprint this run" is exactly the shape of the bug that let a
+    stale product read as unchanged forever.
+    """
+    both = fingerprints_all(parts, resolver, store)
+    return both.content, both.images

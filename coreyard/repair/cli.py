@@ -84,7 +84,7 @@ def cmd_fingerprints(args) -> int:
     first, or the snapshot will record output nobody ever published and the sync will never
     notice again.
     """
-    from coreyard.state import DEFAULT_STATE_DB, SyncState, fingerprints_with_images
+    from coreyard.state import DEFAULT_STATE_DB, SyncState, fingerprints_all
     from coreyard.yms.inventory import fetch_parts, is_configured
 
     if not is_configured():
@@ -97,16 +97,17 @@ def cmd_fingerprints(args) -> int:
 
     from coreyard.run_sync import _make_resolver
 
-    resolver = _make_resolver(None, scan_images=not args.no_image_scan)
-    current, images = fingerprints_with_images(parts, resolver, store)
+    photos = _make_resolver(None, scan_images=not args.no_image_scan)
+    fingerprints = fingerprints_all(parts, photos.resolve, store, stamps=photos.stamps)
+    current, images = fingerprints.content, fingerprints.images
     with SyncState(DEFAULT_STATE_DB) as state:
-        diff = state.diff(current, images)
+        diff = state.diff(fingerprints)
         print("  vs stored snapshot:", diff.summary())
         if not args.apply:
             print(f"\nDry run: would re-baseline {len(diff.added) + len(diff.changed)} "
                   f"entr(ies) without publishing anything.")
             return 0
-        state.update(current, images)
+        state.update(fingerprints)
         print(f"Re-baselined {len(current)} entr(ies). The next sync publishes only what "
               f"moves from here.")
     return 0
@@ -201,9 +202,8 @@ def cmd_repair(args) -> int:
     return 1 if failed else 0
 
 
-def main(argv: "list[str] | None" = None) -> int:
-    ap = argparse.ArgumentParser(prog="coreyard repair",
-                                 description=__doc__.splitlines()[0])
+def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Populate a parser with one subcommand per repairable group of rendered fields."""
     sub = ap.add_subparsers(dest="what", required=True)
     for name in _SUBCOMMANDS:
         p = sub.add_parser(name, help=f"repair {name}")
@@ -225,13 +225,22 @@ def main(argv: "list[str] | None" = None) -> int:
     f.add_argument("--no-image-scan", action="store_true",
                    help="skip the photo-share listing")
     f.set_defaults(func=cmd_fingerprints)
+    return ap
 
-    args = ap.parse_args(argv)
+
+def dispatch(args) -> int:
     try:
         return args.func(args)
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    ap = argparse.ArgumentParser(prog="coreyard repair",
+                                 description=__doc__.splitlines()[0])
+    add_arguments(ap)
+    return dispatch(ap.parse_args(argv))
 
 
 if __name__ == "__main__":

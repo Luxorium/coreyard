@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -77,8 +78,8 @@ def _write_result(log_file, result: dict[str, Any]) -> None:
     log_file.flush()
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+def add_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Populate a parser with the bulk-publish flags."""
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--status", choices=("DRAFT",), default="DRAFT")
@@ -92,9 +93,14 @@ def main(argv: list[str] | None = None) -> int:
                              "(default: this installation's STORE_REQUIRE_IMAGES policy)")
     images.add_argument("--all-parts", dest="images_only", action="store_false",
                         help="publish every listable part, photographed or not")
-    args = parser.parse_args(argv)
+    parser.set_defaults(func=run)
+    return parser
+
+
+def run(args) -> int:
     if args.workers < 1:
-        parser.error("--workers must be positive")
+        print("error: --workers must be positive", file=sys.stderr)
+        return 2
 
     # The same definition of "listable" the sync and reconciliation use, so a bulk load
     # cannot create products that the next reconcile immediately archives.
@@ -162,6 +168,12 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Finished: successes={successes} failures={failures} log={args.log}", flush=True)
     return 1 if failures else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="coreyard bulk", description=__doc__)
+    add_arguments(parser)
+    return run(parser.parse_args(argv))
 
 
 if __name__ == "__main__":

@@ -121,8 +121,8 @@ def _record(log, payload: dict[str, Any]) -> None:
     log.flush()
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
+def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Populate a parser with the alt-text backfill flags."""
     ap.add_argument("--dry-run", action="store_true", help="report only; write nothing")
     ap.add_argument("--overwrite", action="store_true", help="replace alt text that is already set")
     ap.add_argument("--limit", type=int, default=None, help="max products to update")
@@ -130,8 +130,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-resume", action="store_true")
     ap.add_argument("--max-pages", type=int, default=None,
                     help="stop scanning after N pages of 50 products (for a quick sample)")
-    args = ap.parse_args(argv)
+    ap.set_defaults(func=run)
+    return ap
 
+
+def run(args) -> int:
     store = load_store()
     client = ShopifyClient()
     done = set() if args.no_resume or args.dry_run else _completed(args.log)
@@ -200,6 +203,12 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"\nFinished: photos updated={ok} failed={failed} log={args.log}")
     return 1 if failed else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="coreyard altfix", description=__doc__)
+    add_arguments(ap)
+    return run(ap.parse_args(argv))
 
 
 if __name__ == "__main__":

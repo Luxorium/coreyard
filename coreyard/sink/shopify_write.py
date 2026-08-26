@@ -233,8 +233,9 @@ class ShopifyPublisher:
         A product that already has media keeps it, so re-runs never duplicate images.
 
         ``refresh_images`` is for the case the state diff says this part's photo set changed
-        on the share: the old media are deleted and the current set re-uploaded. It costs a
-        full re-upload, so callers should pass it only on a detected change, never blanket.
+        on the share: the current set is uploaded and attached, and the superseded media are
+        deleted only once that has succeeded. It costs a full re-upload, so callers should
+        pass it only on a detected change, never blanket.
 
         ``revive_status`` is the status this product held before it was retired. A part can
         come back — a voided work order returns it to the yard — and the status read-back
@@ -247,13 +248,32 @@ class ShopifyPublisher:
             rendered.handle)
         if revive_status and status == self.retire_status:
             status = revive_status
-        if refresh_images and media_ids:
-            self.client.mutate(_DELETE_FILES, {"ids": media_ids}, "fileDelete")
-            media_ids = []
         alt_for = self._alt_text(part)
-        files = self._staged_files(part, alt_for) if not media_ids else []
+
+        # Stage the replacements before removing anything, and remove the old media only
+        # once the write that attached the new set has come back clean.
+        #
+        # The old order deleted first. Everything after that point can fail — the share can
+        # be unreachable, a staged upload can be rejected, an HTTP PUT can time out four
+        # times, productSet can return userErrors — and each of those left a live product
+        # with no photographs at all, which is worse than the stale photo the refresh was
+        # called to correct.
+        stale_media: list[str] = []
+        if refresh_images and media_ids:
+            files = self._staged_files(part, alt_for)
+            if files:
+                stale_media = media_ids
+            # No replacement could be staged: keep what the product already has rather
+            # than stripping it. The next run tries again.
+        elif not media_ids:
+            files = self._staged_files(part, alt_for)
+        else:
+            files = []
+
         product_id = self._upsert(rendered, part.quantity, product_id, files, status,
                                   existing_tags)
+        if stale_media:
+            self.client.mutate(_DELETE_FILES, {"ids": stale_media}, "fileDelete")
         # Only a product that is meant to be visible is put on a channel: publishing a DRAFT
         # would make the holding state for "not ready yet" mean nothing.
         if (status or self.status) == "ACTIVE":

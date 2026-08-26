@@ -351,12 +351,14 @@ def _sync_status(args) -> int:
     return run(args)
 
 
-def main(argv: list[str] | None = None) -> int:
-    # Before the parser is built, not after: argparse evaluates its defaults at construction
-    # time, so a value living in .env would otherwise never be seen as a flag default.
+def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Populate a parser with the order transports and their flags.
+
+    ``load_env`` runs before the parser is built, not after: argparse evaluates its defaults
+    at construction time, so a value living in .env would otherwise never be seen as a flag
+    default.
+    """
     load_env()
-    ap = argparse.ArgumentParser(prog="coreyard.webhook",
-                                 description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="action", required=True)
 
     s = sub.add_parser("serve", help="run the receiver")
@@ -443,13 +445,22 @@ def main(argv: list[str] | None = None) -> int:
     y.add_argument("--apply", action="store_true",
                    help="write the tags, note and any fulfillment (default: plan)")
     y.set_defaults(func=_sync_status)
+    return ap
 
-    args = ap.parse_args(argv)
+
+def dispatch(args) -> int:
     try:
         return args.func(args)
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="coreyard.webhook",
+                                 description=__doc__.splitlines()[0])
+    add_arguments(ap)
+    return dispatch(ap.parse_args(argv))
 
 
 if __name__ == "__main__":

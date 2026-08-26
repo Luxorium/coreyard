@@ -181,15 +181,17 @@ def _configured() -> dict:
     }
 
 
-def main(argv: "list[str] | None" = None) -> int:
-    ap = argparse.ArgumentParser(prog="coreyard validate",
-                                 description=__doc__.splitlines()[0])
+def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Populate a parser with one flag per external config file."""
     ap.add_argument("--profile", default=None, help="catalog profile JSON")
     ap.add_argument("--weights", default=None, help="weight rules JSON")
     ap.add_argument("--orders", default=None, help="order policy JSON")
     ap.add_argument("--shipping", default=None, help="shipping policy JSON")
-    args = ap.parse_args(argv)
+    ap.set_defaults(func=run)
+    return ap
 
+
+def run(args) -> int:
     paths = {"profile": args.profile, "weights": args.weights,
              "orders": args.orders, "shipping": args.shipping}
     if not any(paths.values()):
@@ -210,6 +212,13 @@ def main(argv: "list[str] | None" = None) -> int:
             print(f"  {name:9s} {path}")
     print()
     return validate(**paths).report()
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    ap = argparse.ArgumentParser(prog="coreyard validate",
+                                 description=__doc__.splitlines()[0])
+    add_arguments(ap)
+    return run(ap.parse_args(argv))
 
 
 if __name__ == "__main__":

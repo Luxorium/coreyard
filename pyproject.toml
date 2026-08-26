@@ -1,0 +1,21 @@
+# Packaging metadata. The supported install is ./install.sh, which builds the venv and the
+# bin/coreyard launcher; this file exists so `pip install -e .` also works and so the
+# `coreyard` console script is defined in exactly one place alongside `python -m coreyard`.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coreyard"
+version = "1.0.0"
+description = "Publish a salvage yard's inventory to Shopify, and keep it in step."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = ["impacket>=0.13", "requests>=2.31"]
+
+[project.scripts]
+coreyard = "coreyard.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["coreyard*"]

@@ -61,8 +61,8 @@ def run(args) -> int:
     return 0
 
 
-def main(argv: "list[str] | None" = None) -> int:
-    ap = argparse.ArgumentParser(prog="coreyard audit", description=__doc__.splitlines()[0])
+def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Populate a parser with the read-only audit reports."""
     sub = ap.add_subparsers(dest="what", required=True)
     c = sub.add_parser("catalog", help="listing-quality report")
     c.add_argument("--show", type=int, default=6, help="offenders to print per finding")
@@ -70,12 +70,21 @@ def main(argv: "list[str] | None" = None) -> int:
                    help="audit every product on the store, not only CoreYard's")
     c.add_argument("--json", default=None, help="also write the full report here")
     c.set_defaults(func=run)
-    args = ap.parse_args(argv)
+    return ap
+
+
+def dispatch(args) -> int:
     try:
         return args.func(args)
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    ap = argparse.ArgumentParser(prog="coreyard audit", description=__doc__.splitlines()[0])
+    add_arguments(ap)
+    return dispatch(ap.parse_args(argv))
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ Then approve the install in the browser window that opens.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import time
@@ -104,7 +105,22 @@ def _upsert_env(key: str, value: str) -> None:
     os.chmod(ENV_PATH, 0o600)
 
 
-def main() -> int:
+def add_arguments(ap: "argparse.ArgumentParser") -> "argparse.ArgumentParser":
+    """No flags: the exchange is driven entirely by .env. Present so the root CLI can
+    mount this command the same way it mounts every other one."""
+    ap.set_defaults(func=lambda args: run())
+    return ap
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    ap = argparse.ArgumentParser(prog="coreyard oauth",
+                                 description=__doc__.splitlines()[0])
+    add_arguments(ap)
+    ap.parse_args(argv)
+    return run()
+
+
+def run() -> int:
     load_env()
     store = (_get("SHOPIFY_STORE", "") or "").strip()
     client_id = (_get("SHOPIFY_CLIENT_ID", "") or "").strip()

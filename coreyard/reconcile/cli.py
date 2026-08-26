@@ -162,9 +162,13 @@ def run(args) -> int:
     return 0
 
 
-def main(argv: "list[str] | None" = None) -> int:
-    ap = argparse.ArgumentParser(prog="coreyard reconcile", description=__doc__.splitlines()[0])
+def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Populate a parser with the reconciliation flags."""
     ap.add_argument("--apply", action="store_true", help="write the status changes")
+    # Accepted everywhere, so an operator never has to remember which commands plan by
+    # default and which write. Here it is the explicit spelling of "do not --apply".
+    ap.add_argument("--dry-run", action="store_true",
+                    help="plan only, writing nothing (the default)")
     ap.add_argument("--activate", action="store_true",
                     help="promote listable DRAFT products to ACTIVE")
     ap.add_argument("--no-retire", action="store_true", help="publish and revive only")
@@ -175,12 +179,25 @@ def main(argv: "list[str] | None" = None) -> int:
     ap.add_argument("--repair-state", action="store_true",
                     help="forget snapshot entries whose product does not exist, so the "
                          "next sync creates them")
-    args = ap.parse_args(argv)
+    ap.set_defaults(func=dispatch)
+    return ap
+
+
+def dispatch(args) -> int:
+    if getattr(args, "dry_run", False):
+        args.apply = False
     try:
         return run(args)
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    ap = argparse.ArgumentParser(prog="coreyard reconcile",
+                                 description=__doc__.splitlines()[0])
+    add_arguments(ap)
+    return dispatch(ap.parse_args(argv))
 
 
 if __name__ == "__main__":

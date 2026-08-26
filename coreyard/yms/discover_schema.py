@@ -11,6 +11,7 @@ you use to fill in the real names in your local ``schema.json``.
 
 from __future__ import annotations
 
+import argparse
 import json
 from datetime import date, datetime
 from decimal import Decimal
@@ -145,7 +146,21 @@ def _write(report: dict[str, Any]) -> None:
     (OUT_DIR / "schema_report.txt").write_text("\n".join(lines), encoding="utf-8")
 
 
-def main() -> int:
+def add_arguments(ap: "argparse.ArgumentParser") -> "argparse.ArgumentParser":
+    """No flags: discovery introspects whatever the configured account can see."""
+    ap.set_defaults(func=lambda args: run())
+    return ap
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    ap = argparse.ArgumentParser(prog="coreyard schema",
+                                 description=__doc__.splitlines()[0])
+    add_arguments(ap)
+    ap.parse_args(argv)
+    return run()
+
+
+def run() -> int:
     report = discover()
     _write(report)
     print(f"Server: {report['server_version'].splitlines()[0]}")

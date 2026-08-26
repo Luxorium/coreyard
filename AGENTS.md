@@ -31,8 +31,11 @@ Python 3.10+ is required; there is no build step.
 .venv/bin/python -m unittest discover -s tests -v
 .venv/bin/python scripts/check_neutrality.py
 .venv/bin/python scripts/demo_offline.py
-bin/coreyard --check
-bin/coreyard --sink csv --limit 25 --dry-run
+bin/coreyard --help                 # every command; routing lives in coreyard/cli.py
+bin/coreyard doctor                 # installation + liveness, read-only
+bin/coreyard status                 # what the pipeline believes, read-only
+bin/coreyard sync --dry-run
+bin/coreyard sync --sink csv --limit 25 --dry-run
 bin/coreyard reconcile              # plan only; writes nothing
 bin/coreyard repair titles --dry-run
 bin/coreyard audit catalog          # read-only
@@ -40,9 +43,15 @@ bin/coreyard validate               # external config against its schemas, offli
 bin/coreyard schema
 ```
 
-The installer creates the venv and launcher. The demo is database-free but fetches
-SMB photos. `--check` performs configured live checks; the limited CSV dry run
-previews output without committing sync state.
+The installer creates the venv and launcher; the launcher is one `exec` onto `python -m
+coreyard` and holds no command list. The demo is database-free but fetches SMB photos.
+`doctor` performs configured live checks; the limited CSV dry run previews output without
+committing sync state.
+
+Commands are mounted in `coreyard/cli.py` by calling each module's `add_arguments(parser)`
+— the same function that module's own `main(argv)` uses, so `coreyard sync` and the legacy
+`python -m coreyard.run_sync` cannot disagree about a flag. Keep the legacy module entry
+points working: schedulers name them.
 
 ## Coding Style & Naming Conventions
 
@@ -125,6 +134,17 @@ failed payloads may remain only in the owner-only queue for the bounded retry wi
   anywhere lets them publish and archive the same part in turn.
 - Retirement archives rather than deletes. API sync guards mass retirement with
   `--limit` and `--max-retire-fraction`; the webhook also retires ordered parts.
+- **Anything that narrows a run blocks retirement**: `--limit`, `--r-number`, and any scope
+  other than `inventory`. Absence is the only evidence retirement has, and a run that looked
+  at a slice of the yard has none. `run_sync._partial_view` is the single place that decides.
+- A narrowed or scoped run records only what it published and never replaces the snapshot.
+  Committing would mark the parts it skipped as up to date and strand their changes forever.
+- Sync scopes are projections of the one `RenderedProduct`, never a second rendering. Media
+  is rebuilt only for a part whose photo *set* moved, never for a copy change.
+- Photo refresh stages and attaches before deleting the superseded media, so a failure part
+  way through leaves a stale photograph rather than a product with none.
+- A long run banks its progress (`run_sync.CHECKPOINT_EVERY`), so a scheduled job stopped by
+  its timeout keeps what it published instead of starting the same backlog again.
 - Both retirement paths record the pre-archive status in the sync state, and a part that
   returns to the yard is revived as that status. Never let a re-retire overwrite the
   memory with the archived status, and keep the memory outside the `parts` snapshot,

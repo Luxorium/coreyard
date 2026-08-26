@@ -152,6 +152,22 @@ def build_metafields(part: Part, store: StoreProfile) -> tuple[Metafield, ...]:
     return tuple(fields)
 
 
+# What each sync scope owns, so a scoped run can tell an availability change from a copy
+# change. ``catalog`` is deliberately "everything else": a field added to RenderedProduct
+# lands in the catalog scope automatically rather than falling silently outside every scope.
+INVENTORY_FIELDS = ("inventory", "price")
+# The media *set*, not its alt text. Alt text is generated from the part's copy, so folding
+# it in here would make a retitled part look like it needed its photos torn down and
+# re-uploaded — the one expensive thing a scoped run exists to avoid. It is copy, and it
+# lands in the catalog scope with the rest of the copy.
+IMAGE_FIELDS = ("images",)
+SCOPE_FIELDS: dict = {
+    "inventory": INVENTORY_FIELDS,
+    "photos": IMAGE_FIELDS,
+    "catalog": None,
+}
+
+
 @dataclass(frozen=True)
 class RenderedProduct:
     """Everything CoreYard considers shopper-visible and sync-controlled for one part.
@@ -202,6 +218,25 @@ class RenderedProduct:
     def fingerprint(self) -> str:
         """Stable SHA-256 over everything above."""
         blob = json.dumps(self.payload(), sort_keys=True, ensure_ascii=False).encode("utf-8")
+        return hashlib.sha256(blob).hexdigest()
+
+    def scope_fingerprint(self, scope: str) -> str:
+        """SHA-256 over the fields one sync scope owns.
+
+        A projection of the *same* payload :meth:`fingerprint` hashes, never a second
+        rendering — which is what stops a domain fingerprint from disagreeing with the
+        renderer that actually publishes. These never decide what gets written (``productSet``
+        has set semantics, so a publish always sends the whole product); they only answer
+        *why* a part changed, which is what lets ``coreyard sync inventory`` push a repriced
+        part while leaving a merely retitled one alone.
+        """
+        payload = self.payload()
+        keys = SCOPE_FIELDS[scope]
+        if keys is None:                       # catalog: everything nobody else owns
+            owned = set(INVENTORY_FIELDS) | set(IMAGE_FIELDS)
+            keys = tuple(k for k in payload if k not in owned)
+        blob = json.dumps({k: payload[k] for k in sorted(keys)},
+                          sort_keys=True, ensure_ascii=False).encode("utf-8")
         return hashlib.sha256(blob).hexdigest()
 
     @property
