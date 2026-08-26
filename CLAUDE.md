@@ -291,7 +291,11 @@ actually publishes would recreate the exact bug `transform/render.py` exists to 
 
 New scope columns migrate on the pattern `image_fingerprint` established: `DEFAULT ''` reads
 as "unknown", so the first run after an upgrade reports no scope changes rather than
-republishing the catalogue once per scope. **`parts.fingerprint` is never rewritten by a
+republishing the catalogue once per scope. But unknown is not the same as unchanged: a part
+whose canonical fingerprint moved while its scope baseline is unknown lands in
+`DiffResult.unattributed`, and **every scope claims it**, exactly as every scope claims a
+new part. Dropping those made `sync inventory` print "0 to publish" against 1,264 pending
+changes, which reads as "the catalogue is in step". It self-heals as runs rewrite rows. **`parts.fingerprint` is never rewritten by a
 migration.**
 
 ### The photo manifest, and banking progress

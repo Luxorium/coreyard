@@ -96,16 +96,29 @@ class DiffResult:
     # Why the changed ones changed. Subsets of added+changed, and deliberately allowed to
     # overlap: a part can have been repriced *and* retitled in the same tick.
     scope_changed: dict[str, list[str]] = field(default_factory=dict)
+    # Changed parts whose scope baseline predates the scope columns, so nothing can say
+    # *which* scope moved. Every part written before the upgrade is in here until a run
+    # rewrites it.
+    unattributed: list[str] = field(default_factory=list)
 
     def changed_in(self, scope: str) -> list[str]:
-        """Parts a scoped run should act on: this scope moved, or the part is brand new.
+        """Parts a scoped run should act on.
 
-        A new part has no previous fingerprint in any scope, so every scope claims it —
-        correct, because creating the product is what makes it right in all of them.
+        Three ways in. This scope's fingerprint moved; or the part is brand new, which every
+        scope claims because creating the product is what makes it right in all of them; or
+        the part changed but has no baseline for this scope, which is the same epistemic
+        position as a new part — something moved and nothing can say what.
+
+        That last case is why a scoped run does not quietly under-report. Excluding it made
+        `sync inventory` print "0 to publish" on an installation with 1,264 genuinely
+        pending changes, which reads as "the catalogue is in step" and is the most
+        expensive thing a status line can get wrong.
         """
         if scope == "photos":
-            return sorted(set(self.image_changed) | set(self.added))
-        return sorted(set(self.scope_changed.get(scope, ())) | set(self.added))
+            return sorted(set(self.image_changed) | set(self.added)
+                          | set(self.unattributed))
+        return sorted(set(self.scope_changed.get(scope, ())) | set(self.added)
+                      | set(self.unattributed))
 
     def summary(self) -> str:
         return (
@@ -257,15 +270,19 @@ class SyncState:
                 if r_number in previous_images and previous_images[r_number] != fp
             ]
         if bundle is not None:
+            changed = set(result.changed)
+            attributed: set[str] = set()
             for scope, fingerprints in bundle.scopes.items():
                 stored = self.load_scope(scope)
-                # An R# with no stored value for this scope predates the column. Treating it
-                # as changed would make the upgrade run publish the whole catalogue once per
-                # scope, which is exactly what the image column's default avoids.
+                # An R# with no stored value for this scope predates the column, so it
+                # cannot be classified. It is *not* silently dropped: a part that changed
+                # without a baseline is recorded below so every scope still claims it.
                 result.scope_changed[scope] = sorted(
                     r for r, fp in fingerprints.items()
                     if r in stored and stored[r] != fp
                 )
+                attributed |= {r for r in fingerprints if r in stored}
+            result.unattributed = sorted(changed - attributed)
         for lst in (result.added, result.changed, result.unchanged,
                     result.removed, result.image_changed):
             lst.sort()

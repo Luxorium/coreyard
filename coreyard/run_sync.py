@@ -424,9 +424,15 @@ def cmd_sync(args) -> int:
         diff = state.diff(fingerprints, detect_removals=not partial)
         print("Diff vs last run:", diff.summary())
         if diff.scope_changed:
-            print("  by scope: " + "  ".join(
+            line = "  by scope: " + "  ".join(
                 f"{name}={len(diff.changed_in(name))}"
-                for name in ("inventory", "catalog", "photos")))
+                for name in ("inventory", "catalog", "photos"))
+            if diff.unattributed:
+                # Otherwise three zeroes beside a four-figure `changed` reads as "nothing
+                # to do" rather than "nothing can say which scope yet".
+                line += (f"   ({len(diff.unattributed)} changed before the scope columns "
+                         f"existed, so every scope claims them)")
+            print(line)
 
         publisher = None
         if args.sink == "api":
@@ -479,7 +485,13 @@ def cmd_sync(args) -> int:
                   f"({0 if args.retire_only else len(set(diff.image_changed) & selected)} "
                   f"photo refresh), "
                   f"revive {0 if args.retire_only else len(revivals)}, "
-                  f"and retire {len(retire)}.")
+                  f"and consider {len(retire)} for retirement.")
+            if retire:
+                # The plan cannot tell a DRAFT from an ACTIVE without asking per product,
+                # and retirement skips drafts: they are already invisible, so archiving one
+                # only destroys the difference between "not ready" and "gone". So this
+                # figure is an upper bound, and saying "would retire 912" overstates it.
+                print("  (that is an upper bound — already-draft products are left alone)")
         else:  # api
             selected = _selected(diff, args)
             todo = [p for p in parts if p.uid() in selected]

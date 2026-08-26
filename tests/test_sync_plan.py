@@ -98,6 +98,66 @@ class ChangedIn(unittest.TestCase):
         self.assertEqual(diff.changed_in("photos"), ["3"])
 
 
+class UnattributedChanges(unittest.TestCase):
+    """A change nothing can classify must not vanish from every scope.
+
+    Parts written before the scope columns existed have no baseline to compare against, so
+    no scope's fingerprint can be said to have moved. Dropping them made `sync inventory`
+    report "0 to publish" on an installation with 1,264 pending changes — which reads as
+    "the catalogue is in step", the most expensive thing a status line can get wrong.
+    """
+
+    def _state(self, tmp):
+        return SyncState(Path(tmp) / "state.sqlite3")
+
+    def test_a_change_with_no_scope_baseline_is_claimed_by_every_scope(self):
+        with tempfile.TemporaryDirectory() as tmp, self._state(tmp) as state:
+            # A pre-upgrade row: canonical fingerprint only, both scope columns empty.
+            state.conn.execute(
+                "INSERT INTO parts(r_number, fingerprint, image_fingerprint, last_seen)"
+                " VALUES ('1','old-fp','','2026-01-01')")
+            state.conn.commit()
+            moved = fingerprints_all([part("1")], NO_IMG, STORE)
+            diff = state.diff(moved)
+            self.assertEqual(diff.changed, ["1"])
+            self.assertEqual(diff.unattributed, ["1"])
+            for scope in ("inventory", "catalog", "photos"):
+                with self.subTest(scope=scope):
+                    self.assertIn("1", diff.changed_in(scope))
+
+    def test_a_change_with_a_baseline_is_claimed_only_by_its_own_scope(self):
+        with tempfile.TemporaryDirectory() as tmp, self._state(tmp) as state:
+            state.commit(fingerprints_all([part("1")], NO_IMG, STORE))
+            repriced = fingerprints_all([part("1", price=Decimal("90.00"))], NO_IMG, STORE)
+            diff = state.diff(repriced)
+            self.assertEqual(diff.unattributed, [], "this one can be classified")
+            self.assertIn("1", diff.changed_in("inventory"))
+            self.assertNotIn("1", diff.changed_in("catalog"))
+
+    def test_an_unchanged_part_is_never_unattributed(self):
+        with tempfile.TemporaryDirectory() as tmp, self._state(tmp) as state:
+            state.conn.execute(
+                "INSERT INTO parts(r_number, fingerprint, image_fingerprint, last_seen)"
+                " VALUES ('1',?,'','2026-01-01')",
+                (fingerprints_all([part("1")], NO_IMG, STORE).content["1"],))
+            state.conn.commit()
+            diff = state.diff(fingerprints_all([part("1")], NO_IMG, STORE))
+            self.assertEqual(diff.unchanged, ["1"])
+            self.assertEqual(diff.unattributed, [])
+            self.assertEqual(diff.changed_in("inventory"), [])
+
+    def test_it_self_heals_once_a_run_records_the_scopes(self):
+        with tempfile.TemporaryDirectory() as tmp, self._state(tmp) as state:
+            state.conn.execute(
+                "INSERT INTO parts(r_number, fingerprint, image_fingerprint, last_seen)"
+                " VALUES ('1','old-fp','','2026-01-01')")
+            state.conn.commit()
+            current = fingerprints_all([part("1")], NO_IMG, STORE)
+            self.assertEqual(state.diff(current).unattributed, ["1"])
+            state.update(current)                       # a run publishes it
+            self.assertEqual(state.diff(current).unattributed, [])
+
+
 class RetirementGuards(unittest.TestCase):
     """Retirement is the one destructive act, so every way of narrowing a run blocks it."""
 
