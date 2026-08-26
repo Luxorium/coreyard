@@ -11,8 +11,9 @@ So this checks the things whose staleness *is* the symptom, and says so loudly:
     freshness  the delta cursor should advance every few minutes, and the full sync should
                have completed within the last day. Either going stale means the pipeline is
                down, whatever the cause — credentials, network, schema drift, cron itself.
+    orders     the storefront poller should speak every ten minutes, order or no order.
     liveness   the source database and Shopify both answer.
-    errors     a recent traceback in any job log.
+    errors     a recent traceback — or a job that died before it could produce one.
 
 Exit status is 0 healthy, 1 degraded (warnings), 2 failed — so cron, a monitor, or a human
 can all use it.
@@ -51,9 +52,21 @@ CURSOR_STALE = timedelta(minutes=30)
 # The full sync only runs during business hours on weekdays, so this has to tolerate a
 # weekend. It is here to catch "the full run has stopped entirely", not to time it.
 SNAPSHOT_STALE = timedelta(hours=30)
+# The order poller runs every ten minutes, all week. Three missed ticks is past any
+# plausible slow run and still catches a dead poller inside half an hour.
+ORDERS_STALE = timedelta(minutes=35)
 # Only re-alert about an unchanged problem this often, so a multi-day outage does not
 # produce a notification every 15 minutes and train everyone to ignore them.
 REALERT = timedelta(hours=1)
+
+# A job that dies before its first line of output leaves no traceback: the interpreter or
+# the shell says its piece on stderr and exits 1. That is exactly how the order poller
+# failed silently for a day — the storefront scripts moved into the CoreYard CLI, cron kept
+# invoking the paths they used to live at, and every tick logged one "can't open file ...
+# No such file or directory" that matched none of the patterns below. "The job never
+# started" is the failure least likely to be noticed by hand, so it gets its own patterns.
+FATAL = ("Traceback", "No such file or directory", "command not found",
+         "ModuleNotFoundError", "ImportError", "cannot import name")
 
 
 def _age(then: datetime) -> timedelta:
@@ -109,6 +122,32 @@ def check_freshness() -> list[tuple[str, str, str]]:
     return out
 
 
+def check_orders() -> list[tuple[str, str, str]]:
+    """Watch the one pipeline whose silence costs money rather than face.
+
+    A stale catalog is embarrassing. A storefront sale that never reaches the yard is a part
+    still on the shelf for the counter to sell twice, and a customer waiting on a pull ticket
+    nobody printed — so this is checked separately from the catalog freshness above.
+
+    Freshness has to come from the log, not from the poll cursor. The cursor only advances
+    when an order actually arrives, so on a quiet Tuesday a healthy poller and a dead one
+    leave identical state. What happens every ten minutes either way is that the job runs and
+    says how many orders it saw, so an orders.log that has stopped growing is the signal.
+    """
+    log = LOG_DIR / "orders.log"
+    if not log.exists():
+        return [(FAIL, "orders", "no orders.log — is the poller still scheduled?")]
+    try:
+        age = timedelta(seconds=time.time() - log.stat().st_mtime)
+    except OSError as exc:
+        return [(WARN, "orders", f"cannot stat orders.log: {exc}")]
+    mins = int(age.total_seconds() // 60)
+    if age > ORDERS_STALE:
+        return [(FAIL, "orders",
+                 f"poller silent {mins} min — storefront sales are not reaching the yard")]
+    return [(OK, "orders", f"polled {mins} min ago")]
+
+
 def check_liveness() -> list[tuple[str, str, str]]:
     out = []
     try:
@@ -147,7 +186,7 @@ def check_logs(within=timedelta(hours=2)) -> list[tuple[str, str, str]]:
         except OSError:
             continue
         bad = [ln for ln in tail
-               if "Traceback" in ln or ln.lstrip().startswith("!!")
+               if any(sig in ln for sig in FATAL) or ln.lstrip().startswith("!!")
                or "FAILED" in ln or "REFUSING" in ln]
         if bad:
             out.append((WARN, log.stem, bad[-1].strip()[:110]))
@@ -187,6 +226,7 @@ def main() -> int:
     args = ap.parse_args()
 
     results = check_freshness()
+    results += check_orders()
     if not args.no_network:
         results += check_liveness()
     results += check_logs()
