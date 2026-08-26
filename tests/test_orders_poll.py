@@ -1,6 +1,6 @@
 """Order polling: the same pipeline, reached by pulling instead of being pushed.
 
-The two things worth pinning are that polling normalizes an order into the shape the ticket
+The two things worth pinning are that polling normalizes an order into the shape the work
 renderer and the work-order writer actually parse, and that an order which arrives twice —
 by two transports, or by two polls with overlapping windows — is handled once.
 """
@@ -58,7 +58,7 @@ class FakeClient:
 
 class Payloads(unittest.TestCase):
     def test_the_order_is_re_read_in_the_shape_the_pipeline_parses(self):
-        """GraphQL answers camelCase; the ticket renderer and order writer read snake_case.
+        """GraphQL answers camelCase; the order writer reads snake_case.
 
         Feeding the GraphQL shape downstream is worse than an error: the writer finds no
         line items, decides the order holds nothing of ours, and reports success.
@@ -119,8 +119,8 @@ class Queueing(Quiet):
     def _worker(self):
         worker = MagicMock()
         worker.handle.return_value = MagicMock(
-            order_name="#1042", r_numbers=["51"], ticket="/tmp/t.html",
-            work_order="", print_error="", booking_error="", retire_error="", error="")
+            order_name="#1042", r_numbers=["51"],
+            work_order="", booking_error="", retire_error="", error="")
         return worker
 
     def test_a_paid_order_is_queued_and_handled(self):

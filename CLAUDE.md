@@ -129,7 +129,7 @@ rendering and fingerprinting so customer-facing strings are not hardcoded.
 
 ```text
 coreyard/yms/        schema mapping, SMB/TDS reads, images, fitment, opt-in orders
-coreyard/transform/  the canonical renderer, SEO, tags, shipping, weights, CSV, tickets
+coreyard/transform/  the canonical renderer, SEO, tags, shipping, weights, CSV
 coreyard/sink/       the Shopify client, CSV output, publisher, bulk, OAuth, alt text
 coreyard/orders/     order pipeline + queue, poll transport, lifecycle sync, policy
 coreyard/reconcile/  yard-vs-store comparison, planning, and guarded application
@@ -157,8 +157,8 @@ the store:
    additions/changes, refreshes changed photos, and retires removals.
 2. `shopify_bulk.py` performs resumable concurrent initial loads, recording progress
    in `out/shopify_bulk_results.jsonl`; it does not share progress with sync state.
-3. `webhook.py` immediately prints, optionally books, and retires parts from paid
-   orders. `--no-retire` disables its Shopify retirement.
+3. `webhook.py` optionally books, and retires parts from paid orders. `--no-retire`
+   disables its Shopify retirement.
 4. `run_sync --sink api --delta` (`yms/delta.py`) publishes only what moved since the
    stored cursor and retires what left scope. It is a catch-up for the hourly full sync,
    not a replacement.
@@ -243,11 +243,11 @@ assuming a mutation or input field exists.
 
 ## Webhook and Order Invariants
 
-The order *pipeline* — queue, worker, ticket, booking, delisting — is
+The order *pipeline* — queue, worker, booking, delisting — is
 `coreyard/orders/pipeline.py`, and `webhook.py` is one transport onto it. `orders/poll.py` is
 the other, for hosts that cannot accept an inbound connection; `replay` is a third. All three
 write to the same queue, which is why a site can run polling and webhooks at once without
-printing a ticket twice. Add a transport, never a second pipeline.
+booking a sale twice. Add a transport, never a second pipeline.
 
 Registration uses `ORDERS_PAID`, and the worker independently requires
 `financial_status=paid` before any side effect. The receiver verifies the raw-body HMAC
@@ -255,11 +255,13 @@ in constant time, queues the delivery, and returns promptly; slow work happens o
 worker. Shopify delivery is at-least-once, so the queue deduplicates on both delivery ID
 and order ID. This also protects the transition from a legacy create subscription.
 
-Payloads contain customer PII: never log request bodies. Queue/ticket paths are
-owner-only. Successful payloads are securely erased immediately; failed payloads remain
-only for the configured retry window, and rendered tickets have bounded retention.
-Printing, booking, and retirement errors are independent, and `orders retry` reruns only
-failed stages. Database idempotence still comes from the stored storefront order
+Payloads contain customer PII: never log request bodies, and write no copy of one outside
+the owner-only queue. CoreYard deliberately produces no pull ticket or other document: the
+source system already renders the work order in a printable form, and a second document is
+both a PII copy with its own retention problem and a chance for the two to disagree about
+what was sold. Successful payloads are securely erased immediately; failed payloads remain
+only for the configured retry window. Booking and retirement errors are independent, and
+`orders retry` reruns only failed stages. Database idempotence still comes from the stored storefront order
 reference, not from webhook delivery identity.
 
 Tax behavior is deliberate. When Shopify collects and remits the sale tax,

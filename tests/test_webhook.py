@@ -1,4 +1,4 @@
-"""Webhook signature checking and pull-ticket rendering, offline."""
+"""Webhook signature checking and the order pipeline, offline."""
 
 import base64
 import contextlib
@@ -18,7 +18,6 @@ from unittest.mock import Mock, patch
 from coreyard.config import StoreProfile
 from coreyard.models import Part
 from coreyard.state import SyncState
-from coreyard.transform import pull_ticket
 from coreyard.webhook import (
     DEFAULT_TOPICS,
     EventQueue,
@@ -26,7 +25,6 @@ from coreyard.webhook import (
     OrderWorker,
     drain,
     order_is_paid,
-    purge_tickets,
     register,
     verify,
 )
@@ -128,7 +126,7 @@ class Queue(unittest.TestCase):
         return event_queue
 
     def test_duplicate_delivery_is_dropped(self):
-        """Shopify delivers at least once; a resend must not reprint the order."""
+        """Shopify delivers at least once; a resend must not rebook the order."""
         with TemporaryDirectory() as d:
             q = self._queue(Path(d) / "q.sqlite3")
             self.assertTrue(q.add("wh-1", "orders/paid", b'{"name":"#1"}'))
@@ -155,7 +153,7 @@ class Queue(unittest.TestCase):
         with TemporaryDirectory() as d:
             q = self._queue(Path(d) / "q.sqlite3")
             q.add("wh-1", "orders/paid", json.dumps(ORDER).encode())
-            q.finish("wh-1", "#1042", ["51"], "/tmp/t.html")
+            q.finish("wh-1", "#1042", ["51"])
             self.assertEqual(q.pending(), [])
             stored = q.conn.execute("SELECT payload FROM events").fetchone()[0]
             self.assertIsNone(stored)
@@ -165,19 +163,19 @@ class Queue(unittest.TestCase):
         with TemporaryDirectory() as d:
             q = self._queue(Path(d) / "q.sqlite3")
             q.add("wh-1", "orders/paid", json.dumps(ORDER).encode())
-            q.finish("wh-1", "#1042", ["51"], "/tmp/t.html", work_order="1790")
+            q.finish("wh-1", "#1042", ["51"], work_order="1790")
             self.assertEqual(q.recent()[0][-1], "1790")
 
-    def test_a_failed_booking_is_flagged_without_losing_the_ticket(self):
-        """The ticket is what somebody works from when the database write did not land."""
+    def test_a_failed_booking_is_flagged_and_stays_retryable(self):
+        """A booking that did not land must be visible as work still owed to the counter."""
         with TemporaryDirectory() as d:
             q = self._queue(Path(d) / "q.sqlite3")
             q.add("wh-1", "orders/paid", json.dumps(ORDER).encode())
-            q.finish("wh-1", "#1042", ["51"], "/tmp/t.html",
+            q.finish("wh-1", "#1042", ["51"],
                      error="work order not created: R#51 is not available")
-            received, topic, state, order, r_numbers, ticket, error, wo = q.recent()[0]
+            received, topic, state, order, r_numbers, error, wo = q.recent()[0]
             self.assertEqual(state, "error")
-            self.assertEqual(ticket, "/tmp/t.html")     # not thrown away
+            self.assertEqual(order, "#1042")            # not thrown away
             self.assertEqual(r_numbers, "51")
             self.assertIn("not available", error)
             payload = q.conn.execute("SELECT payload FROM events").fetchone()[0]
@@ -187,8 +185,7 @@ class Queue(unittest.TestCase):
         with TemporaryDirectory() as d:
             q = self._queue(Path(d) / "q.sqlite3")
             q.add("wh-1", "orders/paid", json.dumps(ORDER).encode())
-            q.finish("wh-1", "#1042", ["51"], "/tmp/t.html",
-                     booking_error="database unavailable")
+            q.finish("wh-1", "#1042", ["51"], booking_error="database unavailable")
             self.assertEqual(q.requeue("wh-1"), 1)
             event = q.pending()[0]
             self.assertEqual(event.retry_stages(), {"book"})
@@ -197,13 +194,11 @@ class Queue(unittest.TestCase):
         with TemporaryDirectory() as d:
             q = self._queue(Path(d) / "q.sqlite3")
             q.add("wh-1", "orders/paid", json.dumps(ORDER).encode())
-            q.finish("wh-1", "#1042", ["51"], "/tmp/t.html",
-                     booking_error="database unavailable")
+            q.finish("wh-1", "#1042", ["51"], booking_error="database unavailable")
             q.requeue("wh-1")
             worker = Mock()
             worker.handle.return_value = Handled(
-                order_name="#1042", r_numbers=["51"], ticket="/tmp/t.html",
-                work_order="1790",
+                order_name="#1042", r_numbers=["51"], work_order="1790",
             )
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(drain(q, worker), 1)
@@ -215,13 +210,11 @@ class Queue(unittest.TestCase):
         with TemporaryDirectory() as d:
             q = self._queue(Path(d) / "q.sqlite3")
             q.add("wh-1", "orders/paid", json.dumps(ORDER).encode())
-            q.finish("wh-1", "#1042", ["51"], "/tmp/t.html", work_order="1790",
+            q.finish("wh-1", "#1042", ["51"], work_order="1790",
                      retire_error="API unavailable")
             q.requeue("wh-1")
             worker = Mock()
-            worker.handle.return_value = Handled(
-                order_name="#1042", r_numbers=["51"], ticket="/tmp/t.html",
-            )
+            worker.handle.return_value = Handled(order_name="#1042", r_numbers=["51"])
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(drain(q, worker), 1)
             self.assertEqual(q.recent()[0][-1], "1790")
@@ -262,8 +255,7 @@ class Worker(unittest.TestCase):
         kwargs.setdefault("state_db", directory / "sync-state.sqlite3")
         # The worker lives in the order pipeline; the webhook module is only one of the
         # transports that feed it.
-        with patch("coreyard.orders.pipeline.TICKET_DIR", directory), \
-                patch("coreyard.orders.pipeline.load_store", return_value=STORE):
+        with patch("coreyard.orders.pipeline.load_store", return_value=STORE):
             return OrderWorker(**kwargs)
 
     def test_unpaid_order_is_refused_before_lookup(self):
@@ -275,15 +267,21 @@ class Worker(unittest.TestCase):
                     worker.handle(unpaid)
             fetch.assert_not_called()
 
-    def test_ticket_and_directory_are_owner_only(self):
+    def test_handling_an_order_writes_no_document_to_disk(self):
+        """The work order is the artefact; a second copy of the customer's details is not.
+
+        Guards the reason the ticket renderer was removed: an order payload carries a name,
+        phone and street address, and anything this writes outside the owner-only queue is
+        PII with its own retention problem.
+        """
         with TemporaryDirectory() as d:
-            directory = Path(d) / "tickets"
+            directory = Path(d)
             worker = self._worker(directory, retire=False, write_orders=False)
             with patch("coreyard.yms.inventory.fetch_parts_by_r_number",
                        return_value={"51": PART}):
                 done = worker.handle(ORDER)
-            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
-            self.assertEqual(stat.S_IMODE(Path(done.ticket).stat().st_mode), 0o600)
+            self.assertEqual(done.order_name, "#1042")
+            self.assertEqual(list(directory.iterdir()), [])
 
     def test_retirement_failure_is_recorded_for_retry(self):
         with TemporaryDirectory() as d:
@@ -358,63 +356,6 @@ class Worker(unittest.TestCase):
                 done = worker.handle(ORDER)
             self.assertIn("part lookup failed", done.booking_error)
             self.assertIn("database offline", done.booking_error)
-
-    def test_print_retry_requires_an_explicit_reprint(self):
-        with TemporaryDirectory() as d:
-            worker = self._worker(Path(d), retire=False, write_orders=False)
-            with patch("coreyard.yms.inventory.fetch_parts_by_r_number",
-                       return_value={"51": PART}):
-                done = worker.handle(ORDER, {"print"})
-            self.assertIn("--reprint", done.print_error)
-
-
-class Retention(unittest.TestCase):
-    def test_old_tickets_are_removed_but_recent_ones_stay(self):
-        with TemporaryDirectory() as d:
-            directory = Path(d)
-            old = directory / "old.html"
-            new = directory / "new.html"
-            old.write_text("old", encoding="utf-8")
-            new.write_text("new", encoding="utf-8")
-            os.utime(old, (0, 0))
-            self.assertEqual(purge_tickets(directory, 30), 1)
-            self.assertFalse(old.exists())
-            self.assertTrue(new.exists())
-
-
-class Ticket(unittest.TestCase):
-    def setUp(self):
-        self.ticket = pull_ticket.from_order(ORDER, {"51": PART}, STORE)
-        self.html = pull_ticket.render(self.ticket, STORE)
-
-    def test_carries_both_halves_of_the_job(self):
-        """Bin location comes from the yard, the address from Shopify; both must appear."""
-        self.assertIn("A-12-3", self.html)      # where to find it
-        self.assertIn("88 Elm St", self.html)   # where it goes
-        self.assertIn("#1042", self.html)
-
-    def test_unmatched_sku_is_flagged_not_blank(self):
-        """A silent empty bin column reads as 'no location', which is a different fact."""
-        self.assertIn("NOT FOUND", self.html)
-        self.assertIn("had no matching part", self.html)
-
-    def test_shows_the_identifiers_a_puller_needs(self):
-        self.assertIn("Stock #251026", self.html)
-        self.assertIn("545-01883", self.html)
-
-    def test_escapes_order_content(self):
-        """Order fields are attacker-supplied text going into HTML."""
-        hostile = dict(ORDER, note="<script>alert(1)</script>")
-        html = pull_ticket.render(pull_ticket.from_order(hostile, {}, STORE), STORE)
-        self.assertNotIn("<script>", html)
-        self.assertIn("&lt;script&gt;", html)
-
-    def test_renders_without_a_store_profile(self):
-        self.assertIn("#1042", pull_ticket.render(self.ticket))
-
-    def test_line_quantities_and_prices_survive(self):
-        self.assertEqual([l.quantity for l in self.ticket.lines], [1, 2])
-        self.assertEqual(self.ticket.lines[0].sku, "51")
 
 
 if __name__ == "__main__":

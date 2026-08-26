@@ -126,8 +126,8 @@ def check_orders() -> list[tuple[str, str, str]]:
     """Watch the one pipeline whose silence costs money rather than face.
 
     A stale catalog is embarrassing. A storefront sale that never reaches the yard is a part
-    still on the shelf for the counter to sell twice, and a customer waiting on a pull ticket
-    nobody printed — so this is checked separately from the catalog freshness above.
+    still on the shelf for the counter to sell twice, and a work order nobody ever raised —
+    so this is checked separately from the catalog freshness above.
 
     Freshness has to come from the log, not from the poll cursor. The cursor only advances
     when an order actually arrives, so on a quiet Tuesday a healthy poller and a dead one

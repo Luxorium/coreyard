@@ -6,13 +6,13 @@ morning, learning about an order a few minutes late costs nothing.
 
 So this asks the same question from the other direction. It is a *transport*, not a second
 pipeline: every order it finds is written to the same durable queue and handled by the same
-worker as a webhook delivery, which means the same ticket, the same optional work-order
+worker as a webhook delivery, which means the same optional work-order
 booking, the same delisting, and — importantly — the same de-duplication. A site can run
-both transports during a migration without printing anything twice, because the queue keys
+both transports during a migration without booking anything twice, because the queue keys
 on the order's identity as well as on the delivery id.
 
     bin/coreyard orders poll --check          # scopes and connectivity only
-    bin/coreyard orders poll                  # fetch new orders, render tickets
+    bin/coreyard orders poll                  # fetch new orders
     bin/coreyard orders poll --since 2026-08-01
     bin/coreyard orders poll --write-orders   # also book each sale in the source system
 
@@ -70,9 +70,9 @@ def fetch_payload(client, order_id: str) -> dict:
     """The order in the shape the pipeline parses.
 
     The GraphQL search above is how new orders are discovered, but it answers in camelCase
-    (``lineItems``, ``shippingAddress``) while the ticket renderer and the work-order writer
-    parse the snake_case payload Shopify POSTs to a webhook. Feeding the GraphQL shape to
-    those is not an error, it is worse: the writer finds no line items, concludes the order
+    (``lineItems``, ``shippingAddress``) while the work-order writer parses the snake_case
+    payload Shopify POSTs to a webhook. Feeding the GraphQL shape to it is not an error, it
+    is worse: the writer finds no line items, concludes the order
     contains nothing of ours, and reports success having booked nothing. So each order is
     re-read over REST, which returns exactly the webhook shape.
     """
@@ -151,8 +151,7 @@ def run(args) -> int:
         start = _parse(args.since) if args.since else since_default(cursor)
         print(f"Looking for orders created after {_stamp(start)} ...")
 
-        worker = OrderWorker(retire=not args.no_retire, print_cmd=args.print_cmd,
-                             write_orders=args.write_orders)
+        worker = OrderWorker(retire=not args.no_retire, write_orders=args.write_orders)
         with EventQueue() as spool:
             queued, seen, latest = poll(client, spool, worker, start, limit=args.limit,
                                         paid_only=not args.include_unpaid)

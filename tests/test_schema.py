@@ -21,7 +21,7 @@ class LookupQuery(unittest.TestCase):
         self.assertIn("i.Bin AS location", sql)
 
     def test_ignores_scope(self):
-        """A part that just sold has left scope; the ticket still needs its bin."""
+        """A part that just sold has left scope; the work order still needs its detail."""
         sql = MAPPING.build_lookup_query(["51"])
         self.assertNotIn("i.Qty > 0", sql)
 

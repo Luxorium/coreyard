@@ -36,7 +36,7 @@ def sealed_environment():
     """Run something that may call `load_env`, and leave the environment as it was.
 
     Several CLIs load `.env` before building their parser, which is correct — a
-    `COREYARD_PRINT_CMD` in there has to be seen as an argparse default. In a test process
+    a `YMS_WRITE_ORDERS` in there has to be seen as an argparse default. In a test process
     it is poison: the installation's real settings land in `os.environ` and stay there for
     every later test, which is how a `STORE_CHARM_PRICES=true` on this machine turned an
     unrelated price assertion red.

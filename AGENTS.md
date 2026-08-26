@@ -7,7 +7,7 @@
 extraction, SMB/TDS transport, photos, fitment, changed-since deltas (`delta.py`), optional
 catalogue enrichment (`enrich.py`), and the narrowly scoped order write. `transform/` holds
 the canonical renderer (`render.py`) plus the SEO engine, tag ownership, weights, pricing,
-CSV framing, and pull tickets; `sink/` contains the one Shopify client and the CSV and API
+CSV framing; `sink/` contains the one Shopify client and the CSV and API
 publishers. `orders/` owns the order pipeline and its transports, `reconcile/` compares the
 store with the yard, `repair/` rewrites output an older renderer produced, and `audit/`
 reports listing quality. `run_sync.py` orchestrates syncs, `state.py` tracks fingerprints,

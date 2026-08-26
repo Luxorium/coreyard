@@ -1,8 +1,10 @@
 """The order pipeline: what happens to a paid storefront order, whatever brought it in.
 
-A paid order has to become three things — a printable pull ticket, optionally a work order
-in the source system, and an archived product so the part cannot be sold twice — and each of
-those has to survive the other two failing. That work is here rather than in the webhook
+A paid order has to become two things — optionally a work order in the source system, and an
+archived product so the part cannot be sold twice — and each has to survive the other
+failing. The work order is the deliverable: the source system already renders one in a
+printable form, so CoreYard does not produce a document of its own. That work is here
+rather than in the webhook
 receiver because the receiver is only one way an order arrives. An installation behind NAT
 with no inbound port polls instead (:mod:`coreyard.orders.poll`), and a person replaying a
 saved payload is a third. All three feed the same queue and the same worker, so an order is
@@ -12,24 +14,22 @@ Two properties drive the design:
 
 * **Shopify wants a 2xx within about five seconds** and retries for two days otherwise. So a
   delivery is verified, written to the queue and acknowledged immediately; the slow work — a
-  database lookup, a print, an API call — happens on a worker. A ticket that takes eight
-  seconds to render must not turn into four duplicate orders.
+  database lookup, a source-system transaction, an API call — happens on a worker. A booking
+  that takes eight seconds must not turn into four duplicate orders.
 * **Delivery is at-least-once.** Shopify resends on any doubt, so the queue de-duplicates on
   both the delivery ID and the order ID. A retry, a topic migration, or a poll that overlaps
-  a webhook cannot print or book the same order twice.
+  a webhook cannot book the same order twice.
 
-Order payloads carry a customer's name, phone and address. Nothing here logs a body;
-successful payloads are erased immediately and failed ones live only in the owner-only queue
-for a bounded retry window.
+Order payloads carry a customer's name, phone and address. Nothing here logs a body, and no
+copy is written to disk; successful payloads are erased immediately and failed ones live only
+in the owner-only queue for a bounded retry window.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shlex
 import sqlite3
-import subprocess
 import sys
 import threading
 from contextlib import contextmanager
@@ -41,9 +41,7 @@ from typing import Optional
 from coreyard.config import REPO_ROOT, _get, load_env, load_store
 
 QUEUE_DB = REPO_ROOT / "coreyard_webhook_queue.sqlite3"
-TICKET_DIR = REPO_ROOT / "out" / "tickets"
 DEFAULT_ERROR_RETENTION_DAYS = 7
-DEFAULT_TICKET_RETENTION_DAYS = 30
 
 
 def order_is_paid(payload: object) -> bool:
@@ -63,28 +61,14 @@ def _order_key(payload: dict) -> str:
     ).strip()
 
 
-def _write_private(path: Path, content: str) -> None:
-    """Create or replace a PII-bearing file with owner-only permissions."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as out:
-        out.write(content)
-    path.chmod(0o600)
+def _order_name(payload: dict) -> str:
+    """The order's human name, e.g. "#1042".
 
-
-def purge_tickets(directory: Path, retention_days: int) -> int:
-    """Delete generated pull tickets older than the configured PII retention window."""
-    if retention_days < 1 or not directory.exists():
-        return 0
-    cutoff = datetime.now(timezone.utc).timestamp() - retention_days * 86400
-    removed = 0
-    for path in directory.glob("*.html"):
-        try:
-            if path.stat().st_mtime < cutoff:
-                path.unlink()
-                removed += 1
-        except FileNotFoundError:  # another cleanup pass won the race
-            continue
-    return removed
+    Kept identical to the reference ``yms.orders`` writes into the work order, because that
+    string is the cross-reference a person uses to tie a source-system order back to the
+    storefront one — and the duplicate guard keys on it.
+    """
+    return payload.get("name") or f"#{payload.get('order_number', '')}"
 
 
 def _retention_days(key: str, default: int) -> int:
@@ -106,7 +90,6 @@ class QueuedEvent:
     payload: str
     attempts: int = 0
     fatal_error: str = ""
-    print_error: str = ""
     booking_error: str = ""
     retire_error: str = ""
 
@@ -115,8 +98,6 @@ class QueuedEvent:
         if self.attempts == 0 or self.fatal_error:
             return None
         stages = set()
-        if self.print_error:
-            stages.add("print")
         if self.booking_error:
             stages.add("book")
         if self.retire_error:
@@ -127,8 +108,8 @@ class QueuedEvent:
 class EventQueue:
     """Durable, de-duplicating spool of received webhooks.
 
-    Only the fields the ticket needs are kept. An order payload carries a name, email, phone
-    and street address, so it is erased immediately after success. A failed event retains its
+    Only the fields the work order needs are kept. An order payload carries a name, email,
+    phone and street address, so it is erased immediately after success. A failed event retains its
     payload for a short, configured retry window in this owner-only database.
     """
 
@@ -150,12 +131,10 @@ class EventQueue:
             " state TEXT NOT NULL,"   # pending | done | error
             " order_name TEXT,"
             " r_numbers TEXT,"
-            " ticket TEXT,"
             " error TEXT,"
             " work_order TEXT,"
             " attempts INTEGER NOT NULL DEFAULT 0,"
             " fatal_error TEXT,"
-            " print_error TEXT,"
             " booking_error TEXT,"
             " retire_error TEXT,"
             " order_key TEXT)"
@@ -167,7 +146,6 @@ class EventQueue:
             "work_order": "TEXT",
             "attempts": "INTEGER NOT NULL DEFAULT 0",
             "fatal_error": "TEXT",
-            "print_error": "TEXT",
             "booking_error": "TEXT",
             "retire_error": "TEXT",
             "order_key": "TEXT",
@@ -209,7 +187,7 @@ class EventQueue:
     def pending(self) -> list[QueuedEvent]:
         with self.lock:
             rows = self.conn.execute(
-                "SELECT webhook_id, topic, payload, attempts, fatal_error, print_error,"
+                "SELECT webhook_id, topic, payload, attempts, fatal_error,"
                 " booking_error, retire_error FROM events"
                 " WHERE state='pending' AND payload IS NOT NULL ORDER BY received_at"
             )
@@ -217,38 +195,36 @@ class EventQueue:
                                   for i, value in enumerate(row))) for row in rows]
 
     def finish(self, webhook_id: str, order_name: str, r_numbers: list[str],
-               ticket: str, error: str = "", work_order: str = "",
-               print_error: str = "", booking_error: str = "",
+               error: str = "", work_order: str = "", booking_error: str = "",
                retire_error: str = "") -> None:
-        problems = [e for e in (error, print_error, booking_error, retire_error) if e]
+        problems = [e for e in (error, booking_error, retire_error) if e]
         combined = "; ".join(problems)
         with self.lock:
             self.conn.execute(
                 "UPDATE events SET state=?,"
                 " payload=CASE WHEN ? THEN payload ELSE NULL END,"
                 " order_name=COALESCE(NULLIF(?, ''), order_name),"
-                " r_numbers=COALESCE(NULLIF(?, ''), r_numbers),"
-                " ticket=COALESCE(NULLIF(?, ''), ticket), error=?,"
+                " r_numbers=COALESCE(NULLIF(?, ''), r_numbers), error=?,"
                 " work_order=COALESCE(NULLIF(?, ''), work_order),"
-                " attempts=attempts+1, fatal_error=?, print_error=?, booking_error=?,"
+                " attempts=attempts+1, fatal_error=?, booking_error=?,"
                 " retire_error=? WHERE webhook_id=?",
                 ("error" if combined else "done", bool(combined), order_name,
-                 ",".join(r_numbers), ticket, combined, work_order, error,
-                 print_error, booking_error, retire_error, webhook_id),
+                 ",".join(r_numbers), combined, work_order, error,
+                 booking_error, retire_error, webhook_id),
             )
             self.conn.commit()
 
     def recent(self, limit: int = 20) -> list[tuple]:
         with self.lock:
             return list(self.conn.execute(
-                "SELECT received_at, topic, state, order_name, r_numbers, ticket, error,"
+                "SELECT received_at, topic, state, order_name, r_numbers, error,"
                 " work_order FROM events ORDER BY received_at DESC LIMIT ?", (limit,)))
 
     def recent_with_ids(self, limit: int = 20) -> list[tuple]:
         with self.lock:
             return list(self.conn.execute(
                 "SELECT webhook_id, received_at, topic, state, order_name, r_numbers,"
-                " ticket, error, work_order FROM events"
+                " error, work_order FROM events"
                 " ORDER BY received_at DESC LIMIT ?", (limit,)))
 
     def requeue(self, webhook_id: str | None = None) -> int:
@@ -291,34 +267,28 @@ class EventQueue:
 class Handled:
     """What became of one order, including independently retryable stage failures.
 
-    A failure to book the work order must not erase the fact that the ticket printed and
-    which parts it was for — that is exactly the information somebody needs in order to
-    finish the job by hand.
+    A failure to book the work order must not erase which parts it was for — that is exactly
+    the information somebody needs in order to finish the job by hand.
     """
 
     order_name: str = ""
     r_numbers: list[str] = field(default_factory=list)
-    ticket: str = ""
     work_order: str = ""
-    print_error: str = ""
     booking_error: str = ""
     retire_error: str = ""
 
     @property
     def error(self) -> str:
-        return "; ".join(e for e in (
-            self.print_error, self.booking_error, self.retire_error
-        ) if e)
+        return "; ".join(e for e in (self.booking_error, self.retire_error) if e)
 
 
 class OrderWorker:
-    """Turns a queued order into a printed ticket, a work order, and an archived product."""
+    """Turns a queued order into a source-system work order and an archived product."""
 
-    def __init__(self, retire: bool = True, print_cmd: Optional[str] = None,
+    def __init__(self, retire: bool = True,
                  write_orders: Optional[bool] = None,
                  state_db: Optional[Path] = None) -> None:
         self.retire = retire
-        self.print_cmd = print_cmd
         # Which sync-state file holds the retirement memory. Injectable so a test never
         # opens — let alone writes to — the installation's real state database.
         self.state_db = state_db
@@ -332,9 +302,6 @@ class OrderWorker:
         self.write_orders = write_orders
         self.store = load_store()
         self._publisher = None
-        self.ticket_dir = TICKET_DIR
-        self.ticket_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
-        self.ticket_dir.chmod(0o700)
 
     def publisher(self):
         # Built on first use so `serve` starts (and can answer Shopify) even if the Shopify
@@ -379,14 +346,12 @@ class OrderWorker:
                 state.close()
 
     def handle(self, payload: dict, stages: set[str] | None = None) -> Handled:
-        """Process one order: print the ticket, book the work order, delist the parts.
+        """Process one order: book the work order, delist the parts.
 
-        The ticket is produced first and unconditionally. It is the one artefact a person
-        can act on without any system being up, so it must not depend on the database write
-        succeeding — an oversell, a deadlock or a dropped SMB pipe still leaves a puller
-        holding a sheet of paper with a bin location on it.
+        The work order is the deliverable. The source system renders it in a printable form
+        of its own, so CoreYard produces no document here — booking the sale is what puts a
+        pullable order in front of the counter, and the two stages fail independently.
         """
-        from coreyard.transform import pull_ticket
         from coreyard.yms.inventory import fetch_parts_by_r_number
 
         if not order_is_paid(payload):
@@ -396,7 +361,7 @@ class OrderWorker:
             )
 
         retrying = stages is not None
-        wanted = stages or {"print", "book", "retire"}
+        wanted = stages or {"book", "retire"}
         skus = [str(i.get("sku") or "").strip()
                 for i in (payload.get("line_items") or []) if i.get("sku")]
         parts = {}
@@ -406,22 +371,13 @@ class OrderWorker:
                 parts = fetch_parts_by_r_number(skus)
             except Exception as exc:
                 lookup_error = str(exc)
-                # The yard database being unreachable must not lose the order. Print the
-                # ticket with the Shopify half filled in and the bin column flagged.
-                print(f"  ! part lookup failed ({exc}); printing without yard detail",
+                # The yard database being unreachable must not lose the order: the delisting
+                # below still has to happen, and the booking is reported as a retryable
+                # failure rather than throwing the delivery away.
+                print(f"  ! part lookup failed ({exc}); work order will be skipped",
                       file=sys.stderr)
 
-        ticket = pull_ticket.from_order(payload, parts, self.store)
-        path = self.ticket_dir / f"{_safe_name(ticket.order_name)}.html"
-        _write_private(path, pull_ticket.render(ticket, self.store))
-
-        result = Handled(order_name=ticket.order_name, r_numbers=skus, ticket=str(path))
-        if "print" in wanted:
-            if retrying and not self.print_cmd:
-                result.print_error = "print retry skipped; pass --reprint to try again"
-            else:
-                result.print_error = self._print(path)
-
+        result = Handled(order_name=_order_name(payload), r_numbers=skus)
         if "book" in wanted:
             if lookup_error and self.write_orders:
                 result.booking_error = (
@@ -453,8 +409,8 @@ class OrderWorker:
         """Create the work order. Returns (order number, error) — never raises.
 
         A failure here is reported, not thrown: the sale has already happened on Shopify,
-        and losing the ticket and the delisting because the yard system was unreachable
-        would turn one problem into three. The transaction either committed in full or
+        and losing the delisting too because the yard system was unreachable would turn one
+        problem into two. The transaction either committed in full or
         changed nothing, so a retry after the cause is fixed is always safe.
         """
         from coreyard.yms import orders
@@ -474,25 +430,6 @@ class OrderWorker:
             print(f"  ! could not create the work order: {exc}", file=sys.stderr)
             return "", f"work order not created: {exc}"
 
-    def _print(self, path: Path) -> str:
-        if not self.print_cmd:
-            return ""
-        quoted = shlex.quote(str(path))
-        cmd = (self.print_cmd.replace("{file}", quoted) if "{file}" in self.print_cmd
-               else f"{self.print_cmd} {quoted}")
-        try:
-            subprocess.run(cmd, shell=True, check=True, capture_output=True, timeout=120)
-        except (OSError, subprocess.SubprocessError) as exc:
-            # A dead printer is not a reason to lose the order; the file is already on disk.
-            print(f"  ! print command failed: {exc}", file=sys.stderr)
-            return f"print failed: {exc}"
-        return ""
-
-
-def _safe_name(order_name: str) -> str:
-    keep = [c for c in order_name if c.isalnum() or c in "-_"]
-    return ("order-" + "".join(keep)) if keep else f"order-{int(datetime.now().timestamp())}"
-
 
 def drain(spool: EventQueue, worker: OrderWorker) -> int:
     """Process everything pending. Returns how many were handled."""
@@ -501,17 +438,16 @@ def drain(spool: EventQueue, worker: OrderWorker) -> int:
         try:
             done = worker.handle(json.loads(event.payload), event.retry_stages())
             spool.finish(
-                event.webhook_id, done.order_name, done.r_numbers, done.ticket,
-                work_order=done.work_order, print_error=done.print_error,
+                event.webhook_id, done.order_name, done.r_numbers,
+                work_order=done.work_order,
                 booking_error=done.booking_error, retire_error=done.retire_error,
             )
-            wo = f" -> work order {done.work_order}" if done.work_order else ""
-            print(f"  {event.topic} {done.order_name}: {len(done.r_numbers)} line(s) "
-                  f"-> {done.ticket}{wo}")
+            wo = f" -> work order {done.work_order}" if done.work_order else " -> not booked"
+            print(f"  {event.topic} {done.order_name}: {len(done.r_numbers)} line(s){wo}")
             if done.error:
                 print(f"  {event.topic} {done.order_name}: {done.error}", file=sys.stderr)
         except Exception as exc:
-            spool.finish(event.webhook_id, "", [], "", str(exc))
+            spool.finish(event.webhook_id, "", [], str(exc))
             print(f"  {event.topic} {event.webhook_id}: FAILED {exc}", file=sys.stderr)
         handled += 1
     return handled

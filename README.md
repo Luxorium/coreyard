@@ -52,7 +52,7 @@ Source of truth is the yard system's own database — no middleware, no export f
 | Shopify Admin API sink (products + photos + inventory) | **working** — validated on a live catalog of ~9,400 image-backed parts |
 | Sold-part retirement (qty 0 → archived, with safety guards) | **working, unit-tested** |
 | Photo-change detection (share listing folded into the fingerprint) | **working, unit-tested** |
-| Paid-order webhook → printable pull ticket + instant delist | **working, unit-tested** |
+| Paid-order webhook → yard work order + instant delist | **working, unit-tested** |
 | Shipping classification applied during publish, from a site policy | **working, unit-tested** |
 | Structured metafields (grade, mileage, condition, fitment) | **working, unit-tested** |
 | Offline validation of every external config file (`validate`) | **working, unit-tested** |
@@ -96,7 +96,6 @@ coreyard/
     pricing.py               optional storefront-only charm pricing
     shopify_product.py       RenderedProduct -> Shopify CSV rows
     shopify_csv.py           Shopify product-CSV writer
-    pull_ticket.py           paid order + yard detail -> printable HTML
   sink/
     csv_sink.py              write out/products.csv
     shopify_api.py           the Shopify client + RenderedProduct -> productSet input
@@ -105,7 +104,7 @@ coreyard/
     shopify_oauth.py         one-time Client ID/Secret -> SHOPIFY_ADMIN_TOKEN exchange
     backfill_alt.py          alt text for photos published before it was generated
   orders/
-    pipeline.py              ticket + optional work order + delisting, and the queue
+    pipeline.py              optional work order + delisting, and the queue
     poll.py                  pull transport, for hosts that cannot receive webhooks
     lifecycle.py             push source-system order status back onto Shopify
     policy.py                site order policy (which shipping groups others fulfill)
@@ -116,7 +115,6 @@ coreyard/
   schedule.py                systemd/cron sync scheduling helper
 scripts/demo_offline.py      offline proof (no DB needed)
 scripts/check_neutrality.py  CI guard: no vendor or site names in the tree
-scripts/print_ticket.sh      Chromium -> PDF -> CUPS ticket printing
 scripts/test_db_connection.py  one-off live DB connectivity check
 tests/                       unittest suite - offline, no DB, no network, no .env
 ```
@@ -503,25 +501,27 @@ bin/coreyard oauth        # re-runs consent, rewrites SHOPIFY_ADMIN_TOKEN in .en
 Check what a token actually carries with
 `{ currentAppInstallation { accessScopes { handle } } }`.
 
-### Online orders → a printable pull ticket
+### Online orders → a work order in the yard system
 
-A worker fulfilling an online order needs the bin location and donor vehicle (yard database)
-and the buyer and shipping address (Shopify) on one page. Neither system can print that sheet
-alone, so CoreYard renders it.
+A paid storefront order has to reach the counter as something a puller can act on, and it has
+to stop the part being sold again. CoreYard does both by booking the sale into the source
+system — which already renders a work order in a printable form — and archiving the product.
+It writes no document of its own: a second sheet of paper would be a copy of the customer's
+details with its own retention problem, and a chance for the two to disagree about what sold.
 
 ```bash
 bin/coreyard orders register --url https://yard.example.com/webhook  # ORDERS_PAID
-bin/coreyard orders serve --print-cmd 'lp -d yardprinter'
+bin/coreyard orders serve --write-orders
 bin/coreyard orders status                      # recent deliveries
 bin/coreyard orders retry --id <webhook-id>     # retry only failed stages
-bin/coreyard orders replay out/test_order.json  # re-print, no store or signature needed
+bin/coreyard orders replay out/test_order.json  # re-run, no store or signature needed
 ```
 
 If the yard machine cannot accept an inbound connection — behind NAT, no port, no tunnel —
 poll instead. It is a different transport onto the same pipeline, not a second one: every
-order it finds goes through the same queue, the same worker, the same ticket, the same
-optional booking and the same delisting, and the queue de-duplicates on order identity, so
-running both during a migration cannot print anything twice.
+order it finds goes through the same queue, the same worker, the same optional booking and
+the same delisting, and the queue de-duplicates on order identity, so running both during a
+migration cannot book anything twice.
 
 ```bash
 bin/coreyard orders poll --check                # scopes and connectivity, writes nothing
@@ -544,16 +544,11 @@ at-least-once retries can't print an order twice, and the receiver answers immed
 than holding the connection open while a printer warms up.
 
 Sold parts are archived on Shopify as each paid order arrives, which closes the window where a
-part stays buyable until the next timer tick. `--no-retire` prints only. Order payloads carry
-a customer's name, phone and address, so no request body is logged. Successful payloads are
-securely erased immediately. Failed payloads remain in the owner-only queue for seven days so
-only their failed print, booking, or retirement stage can be retried. Rendered tickets are
-owner-only and expire after 30 days. Configure the windows with
-`COREYARD_WEBHOOK_ERROR_RETENTION_DAYS` and `COREYARD_TICKET_RETENTION_DAYS`.
-
-`scripts/print_ticket.sh` renders HTML through Chromium/Chrome and submits the PDF with CUPS
-`lp`. Install both tools, set `COREYARD_PRINTER`, then configure
-`COREYARD_PRINT_CMD=scripts/print_ticket.sh {file}`.
+part stays buyable until the next timer tick. `--no-retire` leaves them on sale. Order payloads
+carry a customer's name, phone and address, so no request body is logged and no copy is written
+outside the queue. Successful payloads are securely erased immediately. Failed payloads remain
+in the owner-only queue for seven days so only their failed booking or retirement stage can be
+retried. Configure the window with `COREYARD_WEBHOOK_ERROR_RETENTION_DAYS`.
 
 Run `orders serve` under a process supervisor with automatic restart, and keep it bound to
 loopback behind an HTTPS reverse proxy or tunnel. Monitor `orders status` for error rows.
@@ -566,7 +561,7 @@ Optionally, the same delivery creates a real order in your source database, so t
 does not become a second set of books:
 
 ```bash
-bin/coreyard orders serve --write-orders --print-cmd 'lp -d yardprinter'
+bin/coreyard orders serve --write-orders
 .venv/bin/python -m coreyard.yms.orders out/test_order.json  # print SQL, write nothing
 bin/coreyard orders status                           # deliveries and their order numbers
 ```
@@ -589,11 +584,10 @@ retrying after a failure is safe.
 
 A redelivery is refused by the database, not just by the queue: the storefront order reference
 is stored on the order and a second attempt returns the existing number instead of booking the
-sale twice. The pull ticket prints first and unconditionally — if the booking fails, the ticket
-is still on the printer and the failure is recorded against the delivery in
+sale twice. Booking and delisting fail independently: if the booking does not land, the part is
+still taken off sale and the failure is recorded against the delivery in
 `bin/coreyard orders status`. Retry it within the retention window with
-`bin/coreyard orders retry --id <webhook-id>`; add `--reprint` only when another paper copy is
-actually wanted.
+`bin/coreyard orders retry --id <webhook-id>`, which reruns only the stage that failed.
 
 **Tax is a decision you have to make explicitly.** If your storefront already collects and
 remits sales tax, leave `line_items_taxable` false, or the same sale is taxed twice. Do not

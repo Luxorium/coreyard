@@ -1,6 +1,6 @@
 """Storefront orders: the pipeline, its transports, and lifecycle synchronization.
 
-    pipeline.py    what happens to a paid order — ticket, work order, delisting, queue
+    pipeline.py    what happens to a paid order — work order, delisting, queue
     poll.py        pull transport, for installations that cannot accept inbound webhooks
     lifecycle.py   push the source system's order status back onto the Shopify order
     policy.py      the site's order-handling policy, supplied as configuration
@@ -15,7 +15,6 @@ from coreyard.orders.pipeline import (
     QueuedEvent,
     drain,
     order_is_paid,
-    purge_tickets,
 )
 
 __all__ = [
@@ -25,5 +24,4 @@ __all__ = [
     "QueuedEvent",
     "drain",
     "order_is_paid",
-    "purge_tickets",
 ]

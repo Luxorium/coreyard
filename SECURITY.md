@@ -29,9 +29,9 @@ SQL Server over SMB, an SMB file share, and the Shopify Admin API. Reports that 
   would be visible in the process list.
 - **No vendor schema is committed.** Table and column names come from a local `schema.json`,
   also gitignored.
-- **Webhook PII is bounded.** Queue and ticket files are owner-only. Successful payloads are
-  securely erased immediately; failed payloads and rendered tickets have short, configurable
-  retention windows.
+- **Webhook PII is bounded.** The queue is owner-only and is the only place an order body is
+  written. Successful payloads are securely erased immediately; failed payloads have a short,
+  configurable retention window.
 - **Shopify scopes** should be the minimum the sinks need: `read_products, write_products,
   read_inventory, write_inventory, read_locations, read_files, write_files`.
 

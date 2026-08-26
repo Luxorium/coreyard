@@ -1,26 +1,24 @@
-"""Receive Shopify order webhooks: print a pull ticket, take the part off sale.
+"""Receive Shopify order webhooks: book the sale in the yard system, take the part off sale.
 
     python -m coreyard.webhook register --url https://yard.example.com/webhook
     python -m coreyard.webhook serve
     python -m coreyard.webhook poll                         # no inbound port needed
-    python -m coreyard.webhook replay <order-file.json>     # re-print without a live order
+    python -m coreyard.webhook replay <order-file.json>     # re-run without a live order
     python -m coreyard.webhook list | unregister
 
 This module is the *webhook transport*: signature verification, the HTTP receiver, and
-subscription management. What actually happens to an order — the ticket, the optional work
-order, the delisting, the durable de-duplicating queue — lives in
-:mod:`coreyard.orders.pipeline`, which polling and replay drive too, so an order is handled
-identically however it arrived.
+subscription management. What actually happens to an order — the optional work order, the
+delisting, the durable de-duplicating queue — lives in :mod:`coreyard.orders.pipeline`,
+which polling and replay drive too, so an order is handled identically however it arrived.
 
-The paperwork a worker needs is produced as a printable ticket — see
-``transform/pull_ticket.py`` for why that join can only happen here.
+CoreYard produces no paperwork of its own. The work order it books is the artefact the
+counter works from, and the source system already renders that in a printable form; adding
+a second document would only invite the two to disagree about what was sold.
 
-With ``--write-orders`` (or ``YMS_WRITE_ORDERS=1``) the sale is also booked into the yard
-system as a work order, via ``yms/orders.py``. That is the only write CoreYard makes to the
-source database and it is off unless an installation asks for it; everything else here reads
-Shopify, reads the yard database, and writes back only to Shopify. The ticket prints whether
-or not the booking succeeds, because it is the artefact a person can act on when a system is
-down.
+With ``--write-orders`` (or ``YMS_WRITE_ORDERS=1``) the sale is booked into the yard system
+as a work order, via ``yms/orders.py``. That is the only write CoreYard makes to the source
+database and it is off unless an installation asks for it; everything else here reads
+Shopify, reads the yard database, and writes back only to Shopify.
 """
 
 from __future__ import annotations
@@ -41,8 +39,6 @@ from coreyard.config import _get, load_env
 # replay transports, and callers (including tests) have always reached these through here.
 from coreyard.orders.pipeline import (
     DEFAULT_ERROR_RETENTION_DAYS,
-    DEFAULT_TICKET_RETENTION_DAYS,
-    TICKET_DIR,
     EventQueue,
     Handled,
     OrderWorker,
@@ -51,7 +47,6 @@ from coreyard.orders.pipeline import (
     _retention_days,
     drain,
     order_is_paid,
-    purge_tickets,
 )
 
 MAX_BODY = 2 * 1024 * 1024      # a fat order is ~100 KB; past 2 MB something is wrong
@@ -67,7 +62,6 @@ __all__ = [
     "drain",
     "main",
     "order_is_paid",
-    "purge_tickets",
     "verify",
     "webhook_secret",
 ]
@@ -175,20 +169,12 @@ def serve(args) -> int:
         else _retention_days("COREYARD_WEBHOOK_ERROR_RETENTION_DAYS",
                              DEFAULT_ERROR_RETENTION_DAYS)
     )
-    ticket_retention_days = (
-        args.ticket_retention_days
-        if args.ticket_retention_days is not None
-        else _retention_days("COREYARD_TICKET_RETENTION_DAYS",
-                             DEFAULT_TICKET_RETENTION_DAYS)
-    )
-    if error_retention_days < 1 or ticket_retention_days < 1:
-        raise RuntimeError("webhook retention windows must be at least 1 day")
+    if error_retention_days < 1:
+        raise RuntimeError("the webhook retention window must be at least 1 day")
     secret = webhook_secret()
     spool = EventQueue()
     purged_payloads = spool.purge_error_payloads(error_retention_days)
-    purged_tickets = purge_tickets(TICKET_DIR, ticket_retention_days)
-    worker = OrderWorker(retire=not args.no_retire, print_cmd=args.print_cmd,
-                         write_orders=args.write_orders)
+    worker = OrderWorker(retire=not args.no_retire, write_orders=args.write_orders)
     wake: queue.Queue = queue.Queue()
 
     def loop():
@@ -201,10 +187,8 @@ def serve(args) -> int:
                 pass
             try:
                 old_payloads = spool.purge_error_payloads(error_retention_days)
-                old_tickets = purge_tickets(TICKET_DIR, ticket_retention_days)
-                if old_payloads or old_tickets:
-                    print(f"  retention sweep: purged {old_payloads} payload(s), "
-                          f"{old_tickets} ticket(s)")
+                if old_payloads:
+                    print(f"  retention sweep: purged {old_payloads} payload(s)")
                 drain(spool, worker)
             except Exception as exc:                      # keep the thread alive
                 print(f"  worker error: {exc}", file=sys.stderr)
@@ -214,12 +198,9 @@ def serve(args) -> int:
     handler = make_handler(spool, secret, args.path, wake)
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(f"CoreYard webhook listening on http://{args.host}:{args.port}{args.path}")
-    print(f"  tickets -> {TICKET_DIR}")
-    print(f"  printing: {args.print_cmd or 'disabled (--print-cmd to enable)'}")
     print(f"  retire sold parts: {'no' if args.no_retire else 'yes'}")
-    print(f"  PII retention: failed payloads {error_retention_days}d, "
-          f"tickets {ticket_retention_days}d"
-          f" (purged {purged_payloads} payload(s), {purged_tickets} ticket(s))")
+    print(f"  PII retention: failed payloads {error_retention_days}d"
+          f" (purged {purged_payloads} payload(s))")
     if worker.write_orders:
         # Say the tax stance out loud at startup. It is the one setting whose being wrong
         # costs money quietly, and the only moment anybody reads this line is now.
@@ -311,13 +292,12 @@ def unregister(args) -> int:
 
 
 def replay(args) -> int:
-    """Render a ticket from a saved order payload — no store, no signature, no network."""
+    """Re-run a saved order payload through the pipeline — no signature, no receiver."""
     payload = json.loads(Path(args.file).read_text(encoding="utf-8"))
-    worker = OrderWorker(retire=args.retire, print_cmd=args.print_cmd,
-                         write_orders=args.write_order)
+    worker = OrderWorker(retire=args.retire, write_orders=args.write_order)
     done = worker.handle(payload)
-    wo = f" -> work order {done.work_order}" if done.work_order else ""
-    print(f"{done.order_name}: {len(done.r_numbers)} line(s) -> {done.ticket}{wo}")
+    wo = f" -> work order {done.work_order}" if done.work_order else " -> not booked"
+    print(f"{done.order_name}: {len(done.r_numbers)} line(s){wo}")
     if done.error:
         print(done.error, file=sys.stderr)
         return 1
@@ -334,9 +314,7 @@ def retry(args) -> int:
                       else f"retryable delivery {webhook_id}")
             print(f"No {target} found. Its payload may have passed the retention window.")
             return 1
-        print_cmd = (_get("COREYARD_PRINT_CMD", "") or "") if args.reprint else None
-        worker = OrderWorker(retire=not args.no_retire, print_cmd=print_cmd or None,
-                             write_orders=args.write_orders)
+        worker = OrderWorker(retire=not args.no_retire, write_orders=args.write_orders)
         drain(spool, worker)
         remaining = spool.error_count(webhook_id)
         if remaining:
@@ -352,11 +330,11 @@ def show(args) -> int:
     if not rows:
         print("No webhook deliveries recorded yet.")
         return 0
-    for webhook_id, received, topic, state, order, r_numbers, ticket, error, work_order in rows:
+    for webhook_id, received, topic, state, order, r_numbers, error, work_order in rows:
         # The work order number is the point of reconciliation: it is what somebody
         # compares against the yard system when checking that no sale was missed.
         print(f"  {received[:19]}  {state:<7} {topic:<16} {order or '-':<8} "
-              f"WO {work_order or '-':<6} {(error or ticket or '')[:48]}\n"
+              f"WO {work_order or '-':<6} {(error or '')[:48]}\n"
               f"      webhook id: {webhook_id}")
     return 0
 
@@ -375,8 +353,7 @@ def _sync_status(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     # Before the parser is built, not after: argparse evaluates its defaults at construction
-    # time, so a COREYARD_PRINT_CMD living in .env would otherwise never be seen and tickets
-    # would silently not print.
+    # time, so a value living in .env would otherwise never be seen as a flag default.
     load_env()
     ap = argparse.ArgumentParser(prog="coreyard.webhook",
                                  description=__doc__.splitlines()[0])
@@ -387,11 +364,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="bind address (default 127.0.0.1 — put a TLS proxy in front)")
     s.add_argument("--port", type=int, default=8787)
     s.add_argument("--path", default="/webhook")
-    s.add_argument("--print-cmd", default=_get("COREYARD_PRINT_CMD", "") or None,
-                   help="shell command to print a ticket, e.g. 'lp -d yardprinter' "
-                        "or 'lp -d yardprinter {file}'")
     s.add_argument("--no-retire", action="store_true",
-                   help="print tickets but leave sold products on sale")
+                   help="leave sold products on sale")
     group = s.add_mutually_exclusive_group()
     group.add_argument("--write-orders", dest="write_orders", action="store_true",
                        default=None,
@@ -403,11 +377,6 @@ def main(argv: list[str] | None = None) -> int:
         "--error-retention-days", type=int,
         default=None,
         help=f"retain failed payloads for retry (default {DEFAULT_ERROR_RETENTION_DAYS} days)",
-    )
-    s.add_argument(
-        "--ticket-retention-days", type=int,
-        default=None,
-        help=f"retain rendered tickets (default {DEFAULT_TICKET_RETENTION_DAYS} days)",
     )
     s.set_defaults(func=serve)
 
@@ -423,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("--url", default="", help="only those pointing here (default: all)")
     u.set_defaults(func=unregister)
 
-    p = sub.add_parser("replay", help="render a ticket from a saved order JSON file")
+    p = sub.add_parser("replay", help="re-run a saved order JSON file")
     p.add_argument("file")
     p.add_argument("--print-cmd", default=None)
     p.add_argument("--retire", action="store_true", help="also archive the products")
@@ -435,8 +404,6 @@ def main(argv: list[str] | None = None) -> int:
     selection = x.add_mutually_exclusive_group(required=True)
     selection.add_argument("--id", dest="webhook_id", help="one webhook id from status")
     selection.add_argument("--all", action="store_true", help="all retryable errors")
-    x.add_argument("--reprint", action="store_true",
-                   help="retry printing when that stage failed (can produce paper)")
     x.add_argument("--no-retire", action="store_true",
                    help="do not retry Shopify retirement")
     writes = x.add_mutually_exclusive_group()
@@ -461,9 +428,8 @@ def main(argv: list[str] | None = None) -> int:
     o.add_argument("--limit", type=int, default=0, help="handle at most this many orders")
     o.add_argument("--include-unpaid", action="store_true",
                    help="queue unpaid orders too (the worker still refuses them)")
-    o.add_argument("--print-cmd", default=_get("COREYARD_PRINT_CMD", "") or None)
     o.add_argument("--no-retire", action="store_true",
-                   help="print tickets but leave sold products on sale")
+                   help="leave sold products on sale")
     writes_poll = o.add_mutually_exclusive_group()
     writes_poll.add_argument("--write-orders", dest="write_orders", action="store_true",
                              default=None,
