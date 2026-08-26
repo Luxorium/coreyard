@@ -345,3 +345,67 @@ class SnapshotDiscipline(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Summary(unittest.TestCase):
+    """What a run reports, and what `status` remembers about it afterwards."""
+
+    def _run(self, diff, published_ok=(), revived=(), retired=(), todo=(), argv=()):
+        import contextlib
+        import io
+
+        from coreyard import ops
+
+        args = sync_args(list(argv))
+        args.dry_run = False
+        out = io.StringIO()
+        ops._counts.clear()
+        with contextlib.redirect_stdout(out):
+            run_sync._summarise(diff, set(published_ok), set(revived), set(retired),
+                                list(todo), args)
+        return out.getvalue(), dict(ops._counts)
+
+    def test_an_idle_run_says_so_in_one_line(self):
+        """A quiet catch-up tick every five minutes is 288 a day; eight lines of zeroes
+        each time buries the ticks that matter."""
+        text, _ = self._run(DiffResult(unchanged=["1", "2", "3"]))
+        self.assertEqual(text.strip(), "Nothing to publish (3 unchanged).")
+
+    def test_a_run_that_did_something_prints_the_block(self):
+        text, _ = self._run(DiffResult(added=["1"], unchanged=["2"]),
+                            published_ok={"1"}, todo=["1"])
+        self.assertIn("Sync complete.", text)
+        self.assertIn("Created", text)
+
+    def test_counts_are_recorded_even_when_nothing_happened(self):
+        """`status` must be able to say what a run did, including "nothing"."""
+        _, counts = self._run(DiffResult(unchanged=["1", "2"]))
+        self.assertEqual(counts["unchanged"], 2)
+        self.assertEqual(counts["created"], 0)
+
+    def test_a_delta_run_records_its_scope(self):
+        _, counts = self._run(DiffResult(added=["1"]), published_ok={"1"}, todo=["1"],
+                              argv=["delta"])
+        self.assertEqual(counts["scope"], "delta")
+        self.assertEqual(counts["created"], 1)
+
+    def test_a_failed_publish_is_counted_and_explained(self):
+        text, counts = self._run(DiffResult(added=["1", "2"]), published_ok={"1"},
+                                 todo=["1", "2"])
+        self.assertEqual(counts["failed"], 1)
+        self.assertIn("failed to publish", text)
+
+    def test_a_dry_run_records_counts_but_prints_no_summary(self):
+        import contextlib
+        import io
+
+        from coreyard import ops
+
+        args = sync_args([])
+        args.dry_run = True
+        out = io.StringIO()
+        ops._counts.clear()
+        with contextlib.redirect_stdout(out):
+            run_sync._summarise(DiffResult(added=["1"]), {"1"}, set(), set(), ["1"], args)
+        self.assertEqual(out.getvalue(), "")
+        self.assertTrue(ops._counts["dry_run"])

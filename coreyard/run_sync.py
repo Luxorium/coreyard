@@ -354,6 +354,8 @@ def cmd_delta(args) -> int:
         if changes.cursor:
             state.set_cursor(CURSOR_NAME, changes.cursor.isoformat())
             print(f"Cursor advanced to {changes.cursor.isoformat()}.")
+
+        _summarise(diff, published_ok, revived, retired, todo, args)
     return 0
 
 
@@ -607,7 +609,14 @@ def cmd_sync(args) -> int:
 
 
 def _summarise(diff, published_ok, revived, retired, todo, args) -> None:
-    """One block an operator can read at a glance, and the counts `status` remembers."""
+    """One block an operator can read at a glance, and the counts ``status`` remembers.
+
+    Every path records its counts, including the catch-up run: without them ``status`` could
+    say a delta run finished but not what it did, which is most of the question.
+
+    The block is only *printed* when something happened. A quiet delta tick every five
+    minutes is 288 a day, and eight lines of zeroes each time buries the ticks that matter.
+    """
     created = len(set(diff.added) & published_ok)
     counts = {
         "created": created,
@@ -620,6 +629,10 @@ def _summarise(diff, published_ok, revived, retired, todo, args) -> None:
     ops.count(scope=getattr(args, "scope", None) or "full", dry_run=bool(args.dry_run),
               **counts)
     if args.dry_run:
+        return
+    acted = {k: v for k, v in counts.items() if k != "unchanged" and v}
+    if not acted:
+        print(f"Nothing to publish ({counts['unchanged']:,} unchanged).")
         return
     print("\nSync complete.\n")
     for label, value in counts.items():
