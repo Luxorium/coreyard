@@ -199,7 +199,17 @@ cat > "$REPO_DIR/bin/coreyard" <<'LAUNCHER'
 #
 #   coreyard --help          every command
 set -euo pipefail
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve through symlinks before locating the repo. The installer tells you to put this on
+# your PATH with `ln -s`, and BASH_SOURCE is then the *link* (~/.local/bin/coreyard), so
+# taking its dirname looked for the virtualenv in ~/.local and reported it missing. The loop
+# rather than `readlink -f` because it also handles a chain of links, and relative ones.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    LINKDIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    case "$SOURCE" in /*) ;; *) SOURCE="$LINKDIR/$SOURCE" ;; esac
+done
+HERE="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 PY="$HERE/.venv/bin/python"
 [ -x "$PY" ] || { echo "coreyard: virtualenv missing — run ./install.sh" >&2; exit 1; }
 cd "$HERE"

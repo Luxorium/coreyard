@@ -10,8 +10,10 @@ import contextlib
 import importlib
 import io
 import os
+import re
 import sys
 import unittest
+from pathlib import Path
 
 from coreyard.config import REPO_ROOT
 
@@ -196,12 +198,41 @@ class Launcher(unittest.TestCase):
         return text
 
     def test_the_installer_launcher_holds_no_command_list(self):
-        """Routing belongs in cli.py. A `case` statement here is a second command list that
-        `--help` cannot show and no test can walk."""
+        """Routing belongs in cli.py. A dispatch table here is a second command list that
+        `--help` cannot show and no test can walk.
+
+        The property is "one entry point, no per-command routing" — not "no `case`
+        keyword": the launcher legitimately uses one to resolve its own symlink.
+        """
         body = self._launcher_body(
             (REPO_ROOT / "install.sh").read_text(encoding="utf-8"))
-        self.assertIn("-m coreyard", body)
-        self.assertNotIn("case ", body)
+        execs = re.findall(r'^\s*exec "\$PY".*$', body, re.M)
+        self.assertEqual(len(execs), 1, f"expected exactly one exec, got {execs}")
+        self.assertIn("-m coreyard", execs[0])
+        # A dotted module path is per-command routing: `-m coreyard.reconcile.cli` and so on.
+        self.assertEqual(re.findall(r"-m coreyard\.[\w.]+", body), [])
+
+    def test_the_launcher_works_through_a_symlink_on_PATH(self):
+        """The installer's own closing tip is `ln -s .../bin/coreyard ~/.local/bin/coreyard`.
+
+        BASH_SOURCE is then the link, so a launcher that takes its dirname looks for the
+        virtualenv beside the link — in ~/.local — and reports it missing. The tip had never
+        worked.
+        """
+        import subprocess
+        import tempfile
+
+        launcher = REPO_ROOT / "bin" / "coreyard"
+        if not launcher.exists() or not (REPO_ROOT / ".venv").exists():
+            self.skipTest("needs an installed launcher and virtualenv")
+        with tempfile.TemporaryDirectory() as tmp:
+            link = Path(tmp) / "coreyard"
+            link.symlink_to(launcher)
+            result = subprocess.run([str(link), "--version"], capture_output=True,
+                                    text=True, cwd=tmp, timeout=60)
+        self.assertEqual(result.returncode, 0,
+                         f"{result.stdout}{result.stderr}")
+        self.assertIn("coreyard", result.stdout)
 
     def test_an_installed_launcher_matches_the_installer(self):
         launcher = REPO_ROOT / "bin" / "coreyard"
