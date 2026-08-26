@@ -25,7 +25,9 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 
+from coreyard import ops
 from coreyard.config import REPO_ROOT
+from coreyard.ops import RUN_HEADER
 from coreyard.state import DEFAULT_STATE_DB
 
 STATE_DB = DEFAULT_STATE_DB
@@ -217,8 +219,19 @@ def check_freshness() -> list[Result]:
             out.append((WARN, "delta", "no delta cursor yet (run a full sync)"))
         else:
             age = _age(datetime.fromisoformat(row[0]))
-            level = FAIL if age > CURSOR_STALE else OK
-            out.append((level, "delta", f"cursor {int(age.total_seconds()//60)} min old"))
+            minutes = int(age.total_seconds() // 60)
+            if age <= CURSOR_STALE:
+                out.append((OK, "delta", f"cursor {minutes} min old"))
+            elif ops.running("sync", ""):
+                # The catch-up job shares the full sync's lock on purpose: a full run
+                # supersedes it, so the tick is skipped rather than raced. During a long
+                # full sync the cursor is *expected* to age, and calling that a failure
+                # every hour is how a check earns itself a permanent place in the ignored
+                # pile.
+                out.append((OK, "delta", f"cursor {minutes} min old — catch-up is "
+                                         f"skipped while a full sync holds the lock"))
+            else:
+                out.append((FAIL, "delta", f"cursor {minutes} min old"))
 
         try:
             newest = conn.execute("SELECT MAX(last_seen) FROM parts").fetchone()[0]
@@ -273,13 +286,22 @@ def check_logs(within=timedelta(hours=2)) -> list[Result]:
         try:
             if log.stat().st_mtime < cutoff:
                 continue
-            # Keep the line window roughly consistent with the file-age window above. The
-            # catch-up job writes ~50 lines an hour, so a deeper tail would keep re-reporting
-            # a single failure long after it stopped happening — and an alert that stays lit
-            # for a fixed problem is how people learn to ignore alerts.
-            tail = log.read_text(errors="replace").splitlines()[-150:]
+            lines = log.read_text(errors="replace").splitlines()[-400:]
         except OSError:
             continue
+        # Only the most recent run's output. Without this an error is re-reported until
+        # enough traffic pushes it out of the window: this installation was still being
+        # warned about an ImportError fixed a day earlier and about script paths retired
+        # in a migration before that, because the jobs that log them print a handful of
+        # lines per tick. An alert that stays lit for a fixed problem is how people learn
+        # to ignore alerts.
+        starts = [i for i, ln in enumerate(lines) if ln.startswith(RUN_HEADER)]
+        if starts:
+            tail = lines[starts[-1]:]
+        else:
+            # A log nothing here writes (a storefront script, a backup). No boundary to
+            # find, so fall back to a shallow window.
+            tail = lines[-150:]
         bad = [ln for ln in tail
                if any(sig in ln for sig in FATAL) or ln.lstrip().startswith("!!")
                or "FAILED" in ln or "REFUSING" in ln]

@@ -200,7 +200,12 @@ def main(argv: list[str] | None = None) -> int:
         with _deadline(args.timeout) if args.timeout else _nullcontext():
             if args.command in READ_ONLY:
                 return args.func(args)
-            with ops.record(args.command, getattr(args, "scope", None) or ""):
+            scope = getattr(args, "scope", None) or ""
+            # Only when redirected. At a terminal the operator can see where their own run
+            # started; in a log file nothing else marks the boundary.
+            if not sys.stdout.isatty():
+                print(ops.run_header(args.command, scope), flush=True)
+            with ops.record(args.command, scope):
                 return args.func(args)
 
 

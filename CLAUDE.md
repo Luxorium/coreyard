@@ -307,6 +307,27 @@ Changing the manifest shape means bumping `state.IMAGE_MANIFEST_VERSION`. A run 
 version is behind **rebaselines**: it records the new manifest and reports no photo changes.
 Only `commit` may declare the new version, because only `commit` rewrites every row.
 
+### Saying nothing when nothing is wrong
+
+Three checks reported non-problems, and a check that stays lit for something already fixed
+— or for something working exactly as designed — is how people learn to stop reading the
+output. The fixes are worth keeping intact:
+
+- **Run headers.** A scheduled job appends to one log forever, so without a boundary there
+  is no way to tell a failure that is happening from one fixed days ago. `cli.main` writes
+  `ops.run_header(...)` when stdout is not a TTY, and `doctor.check_logs` scans only from
+  the last one. A log nothing here writes (a storefront script, a backup) has no boundary,
+  so it still falls back to a shallow tail and can re-report a stale error — the one
+  remaining gap.
+- **Runs are recorded when they start,** not only when they end, so `ops.running()` can
+  say what is in flight. `doctor` uses it to stop calling the delta cursor stale while a
+  full sync holds the shared lock and the catch-up is being skipped *by design*. An
+  unfinished row older than `ops.STALE_RUN` is treated as gone, because a SIGKILLed run
+  never closes its own row. `ops.last()` skips unfinished rows: a run still going must not
+  mask the outcome of the one before it.
+- **Exit 124 is a deadline, not a fault.** A run stopped by `--timeout` kept everything it
+  banked; reporting it as FAILED buries the runs that actually broke.
+
 `run_sync.CHECKPOINT_EVERY` banks published fingerprints during a long run. Scheduled jobs
 are wrapped in a timeout, so without this a backlog larger than one window can never be
 worked off — this installation spent twelve consecutive hourly runs republishing the same

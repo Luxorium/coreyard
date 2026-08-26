@@ -183,3 +183,111 @@ class Doctor(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CryWolf(unittest.TestCase):
+    """Three ways the diagnostics reported a non-problem, each fixed.
+
+    They matter together: a check that stays lit for something already fixed, or for
+    something working as designed, is how people learn to stop reading the output.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name) / "state.sqlite3"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_run_in_flight_is_visible_and_does_not_count_as_an_outcome(self):
+        with ops.record("sync", "", db=self.db):
+            self.assertTrue(ops.running("sync", "", db=self.db))
+            self.assertIsNone(ops.last("sync", "", db=self.db),
+                              "a run still going must not mask the one before it")
+        self.assertFalse(ops.running("sync", "", db=self.db))
+        self.assertTrue(ops.last("sync", "", db=self.db)["ok"])
+
+    def test_a_killed_run_stops_counting_as_running(self):
+        """SIGKILL never lets a run close its row. Believing it forever would go quiet
+        exactly when something had died hard."""
+        import sqlite3
+        from datetime import datetime, timedelta, timezone
+
+        with ops.record("sync", "", db=self.db):
+            pass
+        long_ago = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+        conn = sqlite3.connect(self.db)
+        with conn:
+            conn.execute("INSERT INTO runs(command, scope, started, finished, ok, counts)"
+                         " VALUES ('sync','',?,NULL,NULL,'{}')", (long_ago,))
+        conn.close()
+        self.assertFalse(ops.running("sync", "", db=self.db))
+
+    def test_a_deadline_stop_is_not_reported_as_a_failure(self):
+        with self.assertRaises(SystemExit):
+            with ops.record("sync", "", db=self.db):
+                raise SystemExit(124)
+        run = ops.last("sync", "", db=self.db)
+        self.assertTrue(run["counts"].get("timed_out"))
+
+        report = {"reachability": [], "counts": {}, "pending": {},
+                  "runs": {"Last full sync": {"when": "0m ago", "ok": False,
+                                              "counts": {"timed_out": True,
+                                                         "created": 40}}}}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            status._render(report)
+        self.assertIn("timed out", out.getvalue())
+        self.assertNotIn("FAILED", out.getvalue())
+
+    def test_a_real_failure_is_still_reported_as_one(self):
+        with self.assertRaises(RuntimeError):
+            with ops.record("sync", "", db=self.db):
+                raise RuntimeError("the database went away")
+        run = ops.last("sync", "", db=self.db)
+        self.assertFalse(run["ok"])
+        self.assertFalse(run["counts"].get("timed_out"))
+
+    def test_doctor_reads_only_the_most_recent_run_from_a_log(self):
+        """An error fixed days ago sat in the tail window and was re-reported until enough
+        traffic pushed it out — a week, for a job that prints four lines a tick."""
+        import shutil
+        from datetime import timedelta
+
+        log_dir = Path(self.tmp.name) / "out"
+        log_dir.mkdir()
+        (log_dir / "orders.log").write_text(
+            f"{ops.run_header('orders')}\n"
+            "ImportError: cannot import name 'GONE' from 'coreyard.orders.pipeline'\n"
+            f"{ops.run_header('orders')}\n"
+            "1 order(s) in the window, 0 newly queued and handled.\n",
+            encoding="utf-8")
+        original = doctor.LOG_DIR
+        try:
+            doctor.LOG_DIR = log_dir
+            self.assertEqual(doctor.check_logs(timedelta(hours=2)), [])
+        finally:
+            doctor.LOG_DIR = original
+            shutil.rmtree(log_dir, ignore_errors=True)
+
+    def test_doctor_still_reports_an_error_in_the_current_run(self):
+        import shutil
+        from datetime import timedelta
+
+        log_dir = Path(self.tmp.name) / "out2"
+        log_dir.mkdir()
+        (log_dir / "orders.log").write_text(
+            f"{ops.run_header('orders')}\n"
+            "1 order(s) in the window.\n"
+            f"{ops.run_header('orders')}\n"
+            "Traceback (most recent call last):\n",
+            encoding="utf-8")
+        original = doctor.LOG_DIR
+        try:
+            doctor.LOG_DIR = log_dir
+            findings = doctor.check_logs(timedelta(hours=2))
+            self.assertEqual(len(findings), 1)
+            self.assertIn("Traceback", findings[0][2])
+        finally:
+            doctor.LOG_DIR = original
+            shutil.rmtree(log_dir, ignore_errors=True)

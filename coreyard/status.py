@@ -108,6 +108,10 @@ def gather(deep: bool = False) -> dict:
         report["pending"]["Not in the snapshot"] = len(listable - set(snapshot))
         report["pending"]["In the snapshot, not listable"] = len(set(snapshot) - listable)
 
+    in_flight = [f"{r['command']} {r['scope']}".strip()
+                 for r in ops.history(limit=20, include_running=True) if r["running"]]
+    report["running"] = in_flight
+
     for label, scope in (("Last full sync", ""), ("Last delta sync", "delta"),
                          ("Last inventory sync", "inventory")):
         run = ops.last("sync", scope)
@@ -151,14 +155,18 @@ def _render(report: dict) -> None:
         # could act on wrongly: "last full sync 13m ago, ok" is exactly what you want to
         # see when deciding the pipeline is healthy, and a dry run did not publish anything.
         dry = counts.pop("dry_run", False)
+        timed_out = counts.pop("timed_out", False)
         counts.pop("scope", None)
-        verdict = "dry run" if dry else ("ok" if run["ok"] else "FAILED")
+        verdict = ("dry run" if dry else "timed out" if timed_out
+                   else "ok" if run["ok"] else "FAILED")
         detail = "  ".join(f"{k}={v}" for k, v in sorted(counts.items()) if v)
-        line = f"  {label:<32}{run['when']:>12}  {verdict:<8}"
+        line = f"  {label:<32}{run['when']:>12}  {verdict:<9}"
         print((line + f"  {detail}" if detail and not dry else line).rstrip())
 
+    if report.get("running"):
+        print(f"\n  running now   {', '.join(report['running'])}")
     if report.get("cursor"):
-        print(f"\n  delta cursor  {report['cursor']}")
+        print(f"  delta cursor  {report['cursor']}")
 
 
 def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
