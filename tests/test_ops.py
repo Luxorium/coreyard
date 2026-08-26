@@ -116,6 +116,27 @@ class Status(unittest.TestCase):
         self.assertIn("FAILED", out.getvalue())
         self.assertIn("never", out.getvalue())
 
+    def test_a_dry_run_never_reads_as_a_completed_sync(self):
+        """The one line here somebody could act on wrongly: "last full sync, ok" is what
+        you check before deciding the pipeline is healthy."""
+        report = {"reachability": [], "counts": {}, "pending": {},
+                  "runs": {"Last full sync": {"when": "13m ago", "ok": True,
+                                              "counts": {"dry_run": True, "created": 0}}}}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            status._render(report)
+        self.assertIn("dry run", out.getvalue())
+
+    def test_a_real_run_shows_its_counts(self):
+        report = {"reachability": [], "counts": {}, "pending": {},
+                  "runs": {"Last full sync": {"when": "5m ago", "ok": True,
+                                              "counts": {"created": 12, "retired": 3}}}}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            status._render(report)
+        self.assertIn("created=12", out.getvalue())
+        self.assertIn("ok", out.getvalue())
+
     def test_ages_are_readable_and_never_raise(self):
         self.assertEqual(status._ago(None), "never")
         self.assertEqual(status._ago("not a timestamp"), status.UNKNOWN)

@@ -146,10 +146,16 @@ def _render(report: dict) -> None:
         if run is None:
             print(f"  {label:<32}{'never':>12}")
             continue
-        verdict = "ok" if run["ok"] else "FAILED"
-        counts = "  ".join(f"{k}={v}" for k, v in sorted(run["counts"].items()))
-        print(f"  {label:<32}{run['when']:>12}  {verdict}"
-              + (f"  ({counts})" if counts else ""))
+        counts = dict(run["counts"])
+        # A dry run must never read as a completed sync. It is the one line here somebody
+        # could act on wrongly: "last full sync 13m ago, ok" is exactly what you want to
+        # see when deciding the pipeline is healthy, and a dry run did not publish anything.
+        dry = counts.pop("dry_run", False)
+        counts.pop("scope", None)
+        verdict = "dry run" if dry else ("ok" if run["ok"] else "FAILED")
+        detail = "  ".join(f"{k}={v}" for k, v in sorted(counts.items()) if v)
+        line = f"  {label:<32}{run['when']:>12}  {verdict:<8}"
+        print((line + f"  {detail}" if detail and not dry else line).rstrip())
 
     if report.get("cursor"):
         print(f"\n  delta cursor  {report['cursor']}")
