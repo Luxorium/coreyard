@@ -16,7 +16,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -35,36 +34,18 @@ ALERT_STATE = REPO / "out" / ".healthcheck_state.json"
 REALERT = timedelta(hours=1)
 
 
-def desktop_env() -> dict:
-    """The environment a GUI notifier needs, discovered rather than assumed.
-
-    cron inherits no desktop session, so whatever the crontab passes is a guess — and it was
-    wrong here: the line exported ``DISPLAY=:0`` at a Wayland desktop, so every popup for
-    months died with "could not connect to display :0" and only the journal was actually
-    being written to. Working it out from the running session keeps the fix in the
-    repository instead of in a crontab nothing can see.
-
-    Returns {} when there is no session to talk to, which is the normal case on a server.
-    """
-    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-    if not os.path.isdir(runtime):
-        return {}
-    wayland = sorted(Path(runtime).glob("wayland-[0-9]*"))
-    wayland = [w for w in wayland if not w.name.endswith(".lock")]
-    if wayland:
-        return {"XDG_RUNTIME_DIR": runtime, "WAYLAND_DISPLAY": wayland[0].name,
-                "QT_QPA_PLATFORM": "wayland"}
-    if os.environ.get("DISPLAY"):
-        return {"XDG_RUNTIME_DIR": runtime, "DISPLAY": os.environ["DISPLAY"],
-                "QT_QPA_PLATFORM": "xcb"}
-    return {}
-
-
 def notify(subject: str, body: str) -> None:
-    """Say it everywhere this machine can actually be heard.
+    """Say it where this machine is actually read.
 
-    There is no MTA, so cron's MAILTO goes nowhere. The journal always works and is what a
-    later investigation will read; the desktop popup is what gets noticed today.
+    There is no MTA, so cron's MAILTO goes nowhere. The journal always works, needs no
+    session, and is what a later investigation reads: `journalctl -t coreyard-health`.
+
+    There is deliberately no built-in desktop popup. It is not this tool's business to
+    decide how an operator wants to be interrupted, and ``COREYARD_ALERT_CMD`` already
+    covers it more flexibly than a hardcoded dialog ever did — set it to a notify-send, a
+    curl to a webhook, an SMS gateway, anything:
+
+        COREYARD_ALERT_CMD='notify-send "$COREYARD_ALERT_SUBJECT" "$COREYARD_ALERT_BODY"'
     """
     subprocess.run(["logger", "-t", "coreyard-health", f"{subject} :: {body}"],
                    check=False)
@@ -73,20 +54,6 @@ def notify(subject: str, body: str) -> None:
         subprocess.run(cmd, shell=True, check=False,
                        env={**os.environ, "COREYARD_ALERT_SUBJECT": subject,
                             "COREYARD_ALERT_BODY": body})
-    session = desktop_env()
-    if not session:
-        return
-    for argv in (["notify-send", "--app-name=CoreYard", subject, body],
-                 ["kdialog", "--title", subject, "--passivepopup", body, "20"],
-                 ["zenity", "--notification", f"--text={subject}: {body}"]):
-        if not shutil.which(argv[0]):
-            continue
-        try:
-            if subprocess.run(argv, env={**os.environ, **session},
-                              capture_output=True, timeout=20).returncode == 0:
-                return
-        except (OSError, subprocess.SubprocessError):
-            continue
 
 
 def load_alert_state() -> dict:
