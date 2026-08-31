@@ -431,6 +431,14 @@ def delist(args) -> int:
             print("REFUSED: the whole filtered set is not visible; raise --rows.",
                   file=sys.stderr)
             return 1
+        # Confirm the filter actually filtered. Ending live listings cannot be undone, so
+        # this does not take the portal's word for it: one part type was asked for, and
+        # anything else in the answer means the target set is not what was reviewed.
+        leaked = {str(row.get("part_type")) for row in data["rows"]} - {str(args.part_type)}
+        if leaked:
+            print(f"REFUSED: the part-type filter leaked {sorted(leaked)}; the result is "
+                  f"not the set you asked for.", file=sys.stderr)
+            return 1
         records = [{"listing_id": str(row["listing_id"])} for row in data["rows"]]
     else:
         records = _listing_records(args.listings)
