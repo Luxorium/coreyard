@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter
 from decimal import Decimal
@@ -272,6 +273,91 @@ def engine_comps(args) -> int:
     )
     with_comps = sum(1 for item in records.values() if item.get("comp_count"))
     print(f"{len(records)} groups, {with_comps} with comparables -> {args.out}")
+    return 0
+
+
+def part_comps(args) -> int:
+    """Research comparables for one part type, whatever that part type is.
+
+    Every stage here is per-part-type on purpose: the portal's grid will not serve a whole
+    tab (see PortalClient.iter_listings), and a filtered read returns its whole result set.
+    So the unit of work is a part type, and the scheduled job walks them.
+    """
+    from coreyard.config import load_store
+    from coreyard.ebay import comps as research
+    from coreyard.ebay.engine_comps import fetch
+    from coreyard.yms.db import connect
+    from coreyard.yms.inventory import fetch_parts_by_r_number
+    from coreyard.yms.interchange import InterchangeResolver
+    import requests
+
+    load_env()
+    portal = load_portal(args.portal)
+    client = PortalClient(portal)
+    listings = list(client.iter_listings(tab=args.tab, rows=args.rows,
+                                         part_type=args.part_type))
+    if not listings:
+        print(f"No {args.tab} listings for part type {args.part_type}.")
+        return 0
+    detail_path = Path(args.details)
+    cached = _read_json(detail_path) if detail_path.is_file() else {}
+    todo = [str(r["listing_id"]) for r in listings
+            if str(r["listing_id"]) not in cached]
+    print(f"{len(listings)} listings; {len(todo)} edit forms to read for their R#")
+    for number, listing_id in enumerate(todo, 1):
+        cached[listing_id] = client.listing_detail(listing_id, tab=args.tab)
+        if number % 10 == 0:
+            _write_json(detail_path, cached)
+            print(f"  {number}/{len(todo)}", flush=True)
+    if todo:
+        _write_json(detail_path, cached)
+
+    wanted = sorted({str((cached.get(str(r["listing_id"])) or {}).get("r_number") or "").strip()
+                     for r in listings} - {""})
+    parts = fetch_parts_by_r_number(wanted)
+    if parts:
+        with connect() as conn:
+            InterchangeResolver(conn).attach(list(parts.values()))
+    print(f"{len(wanted)} distinct R#, {len(parts)} matched in the yard")
+
+    store = load_store()
+    pages = Path(args.pages)
+    pages.mkdir(parents=True, exist_ok=True)
+    out = Path(args.out)
+    done = _read_json(out) if out.is_file() and not args.no_resume else {}
+    session = requests.Session()
+    todo_parts = [r for r in wanted if r in parts and r not in done]
+    print(f"{len(todo_parts)} parts to research")
+    for number, r_number in enumerate(todo_parts, 1):
+        item = parts[r_number]
+        query = research.query_for(item, store)
+        page = pages / f"{re.sub(r'[^A-Za-z0-9._-]', '_', r_number)}.html"
+        try:
+            ok = fetch(query, page, session, delay=args.delay)
+        except Exception as exc:
+            print(f"  {r_number}: {type(exc).__name__}", file=sys.stderr)
+            ok = False
+        if ok:
+            record = research.research_part(item, store, page)
+        else:
+            record = research.Research(r_number=r_number, query=query)
+        if not record.comps and not args.no_retry_thin:
+            broad = research.query_for(item, store, broad=True)
+            if broad and broad != query:
+                second = pages / f"{re.sub(r'[^A-Za-z0-9._-]', '_', r_number)}_2.html"
+                try:
+                    if fetch(broad, second, session, delay=args.delay):
+                        record = research.research_part(item, store, [page, second])
+                        record.query = query
+                except Exception:
+                    pass
+        done[r_number] = record.as_record()
+        if number % 20 == 0 or number == len(todo_parts):
+            _write_json(out, done)
+            print(f"  researched {number}/{len(todo_parts)}", flush=True)
+    _write_json(out, done)
+    with_comps = sum(1 for v in done.values() if v.get("comp_count"))
+    print(f"{len(done)} parts researched, {with_comps} with comparables -> {out}")
     return 0
 
 
@@ -660,6 +746,22 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
         command.add_argument("--out",
                              default=str(REPO_ROOT / "out" / "ebay-engine-titles.json"))
         command.set_defaults(func=marketplace_titles)
+
+    command = sub.add_parser("comps",
+                             help="research comparables for one part type (any type)")
+    command.add_argument("--part-type", required=True,
+                         help="the yard's part-type code, e.g. 166")
+    command.add_argument("--tab", choices=TABS, default="unlisted")
+    command.add_argument("--rows", type=int, default=2000)
+    command.add_argument("--portal")
+    command.add_argument("--details",
+                         default=str(REPO_ROOT / "out" / "ebay-details.json"))
+    command.add_argument("--pages", default=str(REPO_ROOT / "out" / "ebay-comp-pages"))
+    command.add_argument("--delay", type=float, default=1.4)
+    command.add_argument("--no-retry-thin", action="store_true")
+    command.add_argument("--no-resume", action="store_true")
+    command.add_argument("--out", default=str(REPO_ROOT / "out" / "ebay-comps.json"))
+    command.set_defaults(func=part_comps)
 
     command = sub.add_parser("engine-comps", help="collect public engine comparables")
     command.add_argument("listings", nargs="?",
