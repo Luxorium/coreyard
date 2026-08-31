@@ -26,3 +26,14 @@ out/*.csv
 
 # Site-specific source-schema mapping — never commit
 schema.json
+
+# Site-specific listing-portal map (endpoints, field and action ids) — never commit.
+# Same rule as schema.json: those identifiers belong to the portal's vendor, not here.
+portal.json
+
+# Portal session cookies
+*.cookies
+
+# Reverse-engineered portal protocol notes and the vendor's own reference data.
+# Same rule as portal.json: useful next to the code, never in the tree.
+notes/

@@ -1,6 +1,7 @@
 """Validate the external configuration files CoreYard consumes.
 
-CoreYard reads four site-supplied files, and each is a contract: get one wrong and the
+CoreYard reads site-supplied policy and protocol files, and each is a contract: get one
+wrong and the
 failure shows up as a wrong claim on a listing, a freight part quoting free ground, or an
 order fulfilled out from under the shipping app. Those are expensive places to find a typo.
 
@@ -35,6 +36,10 @@ from coreyard.transform.shipping import ShippingPolicy, ShippingPolicyError
 from coreyard.transform.shipping import load as load_shipping
 from coreyard.transform.weights import WeightRules, WeightRulesError
 from coreyard.transform.weights import load as load_weights
+from coreyard.overrides import OverrideError
+from coreyard.overrides import load as load_overrides
+from coreyard.ebay.portal import PortalConfigError
+from coreyard.ebay.portal import load as load_portal
 
 
 @dataclass
@@ -159,18 +164,48 @@ def check_orders(path, result: Result,
     return policy
 
 
-def validate(profile=None, weights=None, orders=None, shipping=None) -> Result:
+def check_overrides(path, result: Result):
+    try:
+        overrides = load_overrides(path)
+    except OverrideError as exc:
+        result.fail("catalog overrides", str(exc))
+        return None
+    if path:
+        titled = sum(bool(item.title) for item in overrides.parts.values())
+        priced = sum(item.price is not None for item in overrides.parts.values())
+        result.note(f"catalog overrides: {len(overrides.parts)} R#s, "
+                    f"{titled} title(s), {priced} price(s)")
+    return overrides
+
+
+def check_portal(path, result: Result):
+    if not path:
+        return None
+    try:
+        portal = load_portal(path)
+    except PortalConfigError as exc:
+        result.fail("listing portal", str(exc))
+        return None
+    result.note(f"listing portal: {len(portal.row_fields)} neutral grid field(s), "
+                f"{len(portal.detail_fields)} detail field(s)")
+    return portal
+
+
+def validate(profile=None, weights=None, orders=None, shipping=None,
+             overrides=None, portal=None) -> Result:
     """Validate the given config paths. Any left as None is simply not checked."""
     result = Result()
     check_profile(profile, result)
     check_weights(weights, result)
     policy = check_shipping(shipping, result)
     check_orders(orders, result, policy)
+    check_overrides(overrides, result)
+    check_portal(portal, result)
     return result
 
 
 def _configured() -> dict:
-    from coreyard.config import _get, load_env
+    from coreyard.config import REPO_ROOT, _get, load_env
 
     load_env()
     return {
@@ -178,6 +213,10 @@ def _configured() -> dict:
         "weights": _get("STORE_WEIGHT_RULES_FILE", "") or None,
         "orders": _get("STORE_ORDER_POLICY_FILE", "") or None,
         "shipping": _get("STORE_SHIPPING_POLICY_FILE", "") or None,
+        "overrides": _get("STORE_CATALOG_OVERRIDES_FILE", "") or None,
+        "portal": (_get("EBAY_PORTAL_FILE", "") or
+                   (str(REPO_ROOT / "portal.json")
+                    if (REPO_ROOT / "portal.json").is_file() else None)),
     }
 
 
@@ -187,13 +226,16 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     ap.add_argument("--weights", default=None, help="weight rules JSON")
     ap.add_argument("--orders", default=None, help="order policy JSON")
     ap.add_argument("--shipping", default=None, help="shipping policy JSON")
+    ap.add_argument("--overrides", default=None, help="per-R# catalogue override JSON")
+    ap.add_argument("--portal", default=None, help="listing-portal protocol map JSON")
     ap.set_defaults(func=run)
     return ap
 
 
 def run(args) -> int:
     paths = {"profile": args.profile, "weights": args.weights,
-             "orders": args.orders, "shipping": args.shipping}
+             "orders": args.orders, "shipping": args.shipping,
+             "overrides": args.overrides, "portal": args.portal}
     if not any(paths.values()):
         # No paths given: check whatever this installation has configured. Reading .env is
         # deliberate here and only here — it is the one command whose job is to answer
@@ -201,8 +243,7 @@ def run(args) -> int:
         paths = _configured()
         if not any(paths.values()):
             print("No configuration files are set and none were given. Nothing to check.\n"
-                  "Pass --profile/--weights/--orders/--shipping, or set the STORE_*_FILE "
-                  "variables.")
+                  "Pass a config path flag, or set its *_FILE variable.")
             return 0
         print("Validating this installation's configured files:")
     else:

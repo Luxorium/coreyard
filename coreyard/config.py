@@ -12,6 +12,9 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from coreyard.overrides import EMPTY as NO_OVERRIDES
+from coreyard.overrides import CatalogOverrides
+from coreyard.overrides import load as load_catalog_overrides
 from coreyard.profile import CatalogProfile, DEFAULT_PROFILE
 from coreyard.profile import load as load_profile
 from coreyard.transform.shipping import EMPTY as NO_SHIPPING
@@ -153,6 +156,10 @@ class StoreProfile:
     # (STORE_SHIPPING_POLICY_FILE). Empty means CoreYard classifies nothing.
     shipping: ShippingPolicy = field(default_factory=lambda: NO_SHIPPING)
 
+    # Per-R# decisions made by a catalogue channel (for example a researched engine
+    # price). They feed the canonical renderer; they are not a second publishing path.
+    overrides: CatalogOverrides = field(default_factory=lambda: NO_OVERRIDES)
+
     def origin(self) -> str:
         """"Vendor, City" with missing pieces dropped."""
         return ", ".join(part for part in (self.vendor, self.city) if part)
@@ -227,6 +234,9 @@ def load_store() -> StoreProfile:
         catalog=load_profile(_get("STORE_PROFILE_FILE", "") or None),
         weights=load_weight_rules(_get("STORE_WEIGHT_RULES_FILE", "") or None),
         shipping=load_shipping_policy(_get("STORE_SHIPPING_POLICY_FILE", "") or None),
+        overrides=load_catalog_overrides(
+            _get("STORE_CATALOG_OVERRIDES_FILE", "") or None
+        ),
     )
 
 

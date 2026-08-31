@@ -461,6 +461,11 @@ def meta_title(part: Part, store: "StoreProfile | CatalogProfile | None" = None)
     return _cap(" ".join(x for x in bits if x), META_TITLE_MAX)
 
 
+def reviewed_meta_title(title: str) -> str:
+    """Fit a reviewed listing title into Shopify's shorter SEO-title field."""
+    return _cap(title, META_TITLE_MAX)
+
+
 def meta_description(part: Part, store: Optional[StoreProfile] = None) -> str:
     store = store or StoreProfile()
     policy = _policy(store)

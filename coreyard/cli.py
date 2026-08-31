@@ -37,6 +37,8 @@ COMMANDS: list[tuple[str, str, str]] = [
      "check the installation, and whether the scheduled jobs are still running"),
     ("sync", "coreyard.run_sync",
      "publish the yard to the store (the main loop)"),
+    ("ebay", "coreyard.ebay.cli",
+     "pull and manage the eBay catalogue through the listing portal"),
     ("reconcile", "coreyard.reconcile.cli",
      "compare the yard with the live store and close the safe differences"),
     ("repair", "coreyard.repair.cli",

@@ -17,6 +17,13 @@ handle prefix. Site configuration belongs in `.env` and in the files it names
 `STORE_ORDER_POLICY_FILE`); source table and column names belong in the local, gitignored
 `schema.json`. Keep `schema.example.json` generic.
 
+The listing portal behind `coreyard ebay` follows the same rule one level further out.
+CoreYard speaks no portal's protocol natively: routes, parameter names, tab statuses, form
+field ids and bulk-action ids all come from the gitignored `portal.json`, exactly as source
+column names come from `schema.json`. Keep `portal.example.json` generic, and keep the
+vendor's own reference material (captured request shapes, category metadata, filter-field
+tables) in the ignored `notes/` directory rather than in the tree.
+
 Those four files are a contract with whatever storefront sits on the other side, so their
 schemas are validated offline by `coreyard/validate.py`. Adding a key means extending the
 validator, or the other side cannot check it in CI.
@@ -107,6 +114,11 @@ bin/coreyard orders poll --check
 bin/coreyard orders retry --id <webhook-id>
 bin/coreyard orders sync-status            # plan only
 bin/coreyard schedule status
+bin/coreyard ebay pull --tab unlisted      # read-only portal download
+bin/coreyard ebay engine-plan --titles ... --prices ...   # plan only
+bin/coreyard ebay engine-apply --titles ... --apply       # WRITES the portal
+bin/coreyard ebay push --apply             # LISTS on eBay
+bin/coreyard ebay delist --apply           # ENDS live eBay listings (irreversible)
 ```
 
 Commands without `--dry-run` can write Shopify or sync state. `bin/coreyard orders
@@ -164,6 +176,9 @@ coreyard/orders/     order pipeline + queue, poll transport, lifecycle sync, pol
 coreyard/reconcile/  yard-vs-store comparison, planning, and guarded application
 coreyard/repair/     rewrite catalog output an older renderer produced
 coreyard/audit/      read-only listing-quality checks with configurable thresholds
+coreyard/ebay/       the listing-portal channel: portal map, client, research, guarded writes
+coreyard/ai.py       opt-in local-CLI inference transport (no API key, no provider SDK)
+coreyard/overrides.py reviewed per-R# title/price decisions, read by the canonical renderer
 coreyard/profile.py  site merchandising policy (claims, wording, metafield namespace)
 coreyard/validate.py offline schema checks for the four external config files
 coreyard/state.py    SQLite content/image fingerprints and incremental diff
@@ -378,6 +393,78 @@ Tax behavior is deliberate. When Shopify collects and remits the sale tax,
 cannot tax the same sale again. The configured customer account is for bookkeeping
 consistency, not the tax exemption mechanism. Do not change order/tax behavior without
 reviewing `schema.example.json`, `coreyard/yms/orders.py`, and `tests/test_orders.py`.
+
+## The Listing-Portal Channel
+
+`coreyard ebay` is a *second* sales channel, not a second publishing pipeline. It reads and
+writes a configured listing portal, which in turn lists on eBay; Shopify is not involved
+except through one file. Everything portal-specific is in `portal.json` (see Project
+Boundaries) — if you find yourself writing a route, a form field id or a tab name into a
+`.py` file, it belongs in the map instead.
+
+The channel is optional and inert: an installation that sets no `EBAY_PORTAL_FILE` and no
+`COREYARD_AI_ENABLED` never reaches any of it, and nothing in the Shopify pipeline imports
+it.
+
+### Three separate write surfaces, in increasing order of consequence
+
+1. **Saving in the portal** (`ebay apply`, `ebay engine-apply`, `ebay aspects --apply`)
+   changes stored values only. Nothing a shopper sees moves. This is the review window.
+2. **Pushing** (`ebay push --apply`) sends those values to eBay. Now they are live.
+3. **Delisting** (`ebay delist --apply`) ends live listings. This is **irreversible**:
+   relisting mints a new item id and loses the watchers and the ranking the old one had.
+
+Keep those three as three commands. Collapsing the first two removes the only point at
+which a person sees what a batch of AI-researched prices actually says before buyers do.
+
+### Guards that are part of the feature
+
+- Every write is a dry run unless `--apply` is passed.
+- `check_cap` counts **listings**, not plan entries, and raises *before* the first write, so
+  a refused batch writes nothing rather than half of itself. `--yes-i-mean-it` lifts it.
+- A per-group portal error is recorded in that group's result, not raised — one rejected
+  group must not abandon the groups after it.
+- `delist` resolves its target set live rather than trusting a saved file, and refuses when
+  the grid returns fewer rows than it reports records: a listing that left the tab since the
+  last pull must not be ended.
+- Titles are validated against the *facts parsed from the source title*. A rewrite that
+  drops the VIN code, the fitment years or the word "Engine" is rejected, and two
+  interchange groups may never publish under one title — they are different parts.
+- Title length is measured **escaped** (`ebay/util.title_length`): the portal escapes `&`
+  and `"` before eBay counts them, so a title that fits locally can overflow there.
+- Item specifics are validated against eBay's own category vocabulary
+  (`EBAY_ASPECTS_FILE`). A value that is not derivable with confidence is left unset, and
+  `--apply` refuses outright without the metadata: eBay ranks on aspect *match* and buyers
+  filter on it, so a wrong aspect is worse than a missing one.
+- Prices are guarded outside the model (`ebay/research.apply_guards`): a floor, a ceiling
+  at `MAX_OVER_MEDIAN` times the comparable median, and a hard hold on any listing whose
+  condition note mentions a defect. The unguarded answer is kept as `raw_suggested` so a
+  reviewer can see what was overridden.
+
+### Where this channel meets Shopify
+
+At exactly one place: `engine-plan` writes a per-R# overrides file, and configuring it as
+`STORE_CATALOG_OVERRIDES_FILE` makes the canonical renderer read those reviewed titles and
+prices. That is deliberate — it is the same rule `transform/render.py` exists to enforce.
+A researched price must reach Shopify *through the renderer*, so it lands in the
+fingerprint and both sinks serialize it, rather than as an out-of-band product patch that
+the next sync would silently revert. Overrides are keyed by **R#**, never by portal listing
+id; `build_overrides` refuses rather than guessing when a listing has no R#.
+
+### Inference
+
+`coreyard/ai.py` is a transport, like `yms/db.py` and `sink/shopify_api.py`. Two of its
+properties shape every caller: one invocation carries roughly 13k tokens of overhead, so
+callers batch; and a rate-limited call returns a *successful-looking* envelope with no
+error text, recognisable only by having spent no time, no turns and no tokens. Do not
+"simplify" `_looks_rate_limited` — nothing else distinguishes that shape from a real
+failure, and misreading it turns a fifteen-minute wait into an abandoned run.
+
+The retry budget is bounded by an absolute deadline, not by an attempt count alone: five
+retries at a doubling sixty-second base is about half an hour, and a run that dies inside
+`time.sleep` banks nothing. Every AI-backed command checkpoints, and `--deterministic`
+gives `engine-research` an explainable comp-median fallback for rows inference never
+reached.
 
 ## Transport Constraints
 
