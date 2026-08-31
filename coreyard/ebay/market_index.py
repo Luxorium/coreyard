@@ -14,10 +14,12 @@ import statistics
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import quote_plus
 
 from coreyard.config import REPO_ROOT, _get
+from coreyard.transform.pricing import charm
 from coreyard.ebay.market_research import FLOORS, material_from_title
 from coreyard.ebay.util import groups_by_interchange
 
@@ -287,7 +289,13 @@ def selling_price(values: list[float], floor: float) -> float:
     core = [value for value in ordered if median * 0.5 <= value <= median * 1.75]
     target = (percentile(core, 0.30) * 0.97 if len(core) >= 4
               else statistics.median(core or ordered) * 0.95)
-    return floor if target <= floor else max(floor, math.floor(target / 5) * 5 - 0.01)
+    if target <= floor:
+        return floor
+    # One charm rule for every storefront; see transform/pricing.charm. Comparable-derived
+    # prices round *down* onto a five-dollar grid: the market cleared at the observed
+    # number, so rounding past it would assert more than the evidence supports.
+    landed = charm(Decimal(str(target)), step=Decimal("5"), round_down=True)
+    return max(floor, float(landed))
 
 
 def confidence(count: int) -> str:

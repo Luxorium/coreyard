@@ -27,20 +27,38 @@ def charm_enabled() -> bool:
     return (_get("STORE_CHARM_PRICES", "") or "").strip().lower() in _TRUE
 
 
-def charm(value: Decimal) -> Decimal:
-    """Round to the nearest x.99; ties go up.
+ONE_DOLLAR = Decimal("1")
+
+
+def charm(value: Decimal, *, step: Decimal = ONE_DOLLAR,
+          round_down: bool = False) -> Decimal:
+    """Land a price a penny under a round number.
+
+    Every storefront CoreYard publishes to wants this, and each used to compute it for
+    itself — the catalogue rounded to the nearest dollar, marketplace research rounded down
+    to a five-dollar grid, and its offline fallback rounded down to the dollar. Three
+    spellings of one idea meant the same decision could reach two storefronts as two
+    different numbers, so the idea lives here once and the differences are arguments.
+
+    ``step`` is the grid to sit under: $1 gives $49.99, $5 gives $134.99. ``round_down``
+    never rounds a price up, which is what a price derived from *comparables* wants — the
+    market cleared at that number, and rounding past it invents evidence. Presenting a
+    retail price the yard already set has no such constraint, so it rounds to the nearest.
 
     $50.00 -> $49.99 (a penny down), $50.50 -> $50.99 (49c up), $8.00 -> $7.99.
-    A value already ending in .99 is returned unchanged. Never returns less
+    A value already ending in .99 on the grid is returned unchanged. Never returns less
     than $0.99, so a cheap part cannot be rounded down to nothing.
     """
     if value <= MIN_PRICE:
         return MIN_PRICE
-    base = value.to_integral_value(rounding=ROUND_FLOOR)
+    grid = step if step > 0 else ONE_DOLLAR
+    base = (value / grid).to_integral_value(rounding=ROUND_FLOOR) * grid
     low = base - CENT
-    high = base + Decimal("0.99")
+    high = base + grid - CENT
     if low < MIN_PRICE:
-        return MIN_PRICE
+        return MIN_PRICE if round_down else min(high, max(MIN_PRICE, high))
+    if round_down:
+        return low
     return low if (value - low) < (high - value) else high
 
 

@@ -419,20 +419,49 @@ def title_qualifiers(part: Part, max_phrases: int = 5, max_chars: int = 55) -> l
     return chosen
 
 
-def build_title(part: Part, store: "StoreProfile | CatalogProfile | None" = None,
-                max_models: Optional[int] = None) -> str:
-    """e.g. "2008 Ford F150 Left Driver Side View Door Mirror".
+# What a title is made of, and what may go when it will not fit.
+#
+# Rank 1 is load-bearing: the years, the vehicle and the part type are what the listing
+# *is*, and a title missing any of them describes nothing. Everything above 1 is a
+# refinement, dropped worst-first when a marketplace's character budget binds. The order
+# is the drop order, so raising a rank makes a segment more expendable, never less.
+#
+# This exists because eBay allows 80 characters where Shopify allows 255. That is a
+# difference in budget, not a difference in what the part is, so it is a parameter here
+# rather than a second title builder somewhere else.
+_TITLE_RANKS = {
+    "years": 1, "models": 1, "part_type": 1,
+    "side": 2, "spec": 3, "qualifiers": 4, "oem": 5, "more_models": 6,
+}
 
-    No dashes, slashes or symbols. Whether the word "OEM" appears is the site's call
-    (``title_include_oem``): it is a high-intent search term, but it also eats characters
-    that could carry another model, and it stays in the tags and description regardless.
+
+def title_segments(
+    part: Part,
+    store: "StoreProfile | CatalogProfile | None" = None,
+    max_models: Optional[int] = None,
+    compact: bool = False,
+) -> list[tuple[str, str, int]]:
+    """The ordered ``(name, text, rank)`` pieces every storefront's title is built from.
+
+    One place decides *what a part is called*. Callers differ in how many characters they
+    can spend saying it (see :func:`compose_title`) and in ``compact``, which is a
+    difference between search engines rather than a difference of opinion:
+
+      * Web search reads "2010 2011 2012" more reliably than "2010-2012" — a hyphenated
+        span tokenizes unpredictably, and shoppers type years out in full.
+      * A marketplace listing is read by a person scanning a results page, where the span
+        is what they recognise and the characters it saves buy the engine size instead.
+
+    ``compact`` also moves the specification next to the vehicle, so the title reads
+    "Chevrolet Malibu 2.4L VIN 0 Engine" rather than "Chevrolet Malibu Engine 2.4L VIN 0".
     """
     policy = _policy(store)
     if max_models is None:
         max_models = policy.title_max_models
     pt = _title_part_type(part, store)
     side = title_side(part, store)
-    years = _year_tokens(*_year_span(part))
+    span = _year_span(part)
+    years = _year_label(*span) if compact else _year_tokens(*span)
     labels = [c for c in (seo_clean(l) for l in _model_labels(part)) if c]
     spec = part_spec(part)
     seen = {w.lower() for w in pt.split()}
@@ -445,13 +474,105 @@ def build_title(part: Part, store: "StoreProfile | CatalogProfile | None" = None
         extra.append(" ".join(kept))
         seen |= {w.lower() for w in kept}
     lead = "OEM" if policy.title_include_oem and "oem" not in seen else ""
-    tail = " ".join(x for x in (side, lead, pt, " ".join(spec + extra)) if x)
-    if not labels:
-        return _cap(" ".join(x for x in (years, tail) if x), TITLE_MAX)
-    shown = labels[:max_models]
-    more = len(labels) - len(shown)
-    models = ", ".join(shown) + (f" and {more} more" if more > 0 else "")
-    return _cap(" ".join(x for x in (years, models, tail) if x), TITLE_MAX)
+    models, more_models = "", ""
+    if labels:
+        shown = labels[:max_models]
+        more = len(labels) - len(shown)
+        models = ", ".join(shown)
+        # Counted separately from the names themselves because it is worth much less than
+        # them: on a tight budget "and 7 more" is characters that name no vehicle and carry
+        # no search term, and a buyer looking for an engine would rather have its size.
+        more_models = f"and {more} more" if more > 0 else ""
+    # The written order, which is not the drop order.
+    if compact:
+        ordered = [
+            ("years", years), ("models", models), ("spec", " ".join(spec)),
+            ("more_models", more_models), ("side", side), ("part_type", pt),
+            ("qualifiers", " ".join(extra)), ("oem", lead),
+        ]
+    else:
+        ordered = [
+            ("years", years), ("models", models), ("more_models", more_models),
+            ("side", side), ("oem", lead),
+            ("part_type", pt), ("spec", " ".join(spec)), ("qualifiers", " ".join(extra)),
+        ]
+    return [(name, text, _TITLE_RANKS[name]) for name, text in ordered if text]
+
+
+def compose_title(segments: list[tuple[str, str, int]], limit: int = TITLE_MAX,
+                  measure=len) -> tuple[str, list[str]]:
+    """Join ``segments`` in written order, dropping the most expendable until it fits.
+
+    ``measure`` is how the destination counts characters: eBay's portal escapes a title
+    before eBay sees it, so ``&`` costs five characters there and one here. Returns the
+    title and the names of whatever had to go, so a caller can report the loss instead of
+    discovering it in a published listing.
+    """
+    kept = list(segments)
+    dropped: list[str] = []
+    while True:
+        title = " ".join(text for _, text, _ in kept)
+        if measure(title) <= limit:
+            return title, dropped
+        expendable = [item for item in kept if item[2] > 1]
+        if not expendable:
+            # Nothing left but the load-bearing pieces. Truncating is the honest failure:
+            # a title that says what the part is, cut short, beats one that does not.
+            # Trimmed against the caller's own measure, not against len(): a destination
+            # that counts an escaped "&" as five characters would otherwise be handed a
+            # title this function had just declared short enough.
+            while title and measure(title) > limit:
+                title = title[:-1].rstrip()
+            # Truncation is a loss, and it has to be reported as one: a caller trying
+            # variants (see fit_title) would otherwise read a title cut off mid-word as
+            # having fit perfectly, and stop looking for the one that actually does.
+            return title, dropped + ["truncated"]
+        worst = max(expendable, key=lambda item: item[2])
+        kept.remove(worst)
+        dropped.append(worst[0])
+
+
+def fit_title(part: Part, store: "StoreProfile | CatalogProfile | None" = None,
+              max_models: Optional[int] = None, limit: int = TITLE_MAX,
+              measure=len, compact: bool = False) -> tuple[str, list[str]]:
+    """Compose the title, spending the budget on facts before extra vehicle names.
+
+    When the budget binds, the first thing to give is the *number of vehicles listed*, not
+    the engine size. "2009-2010 Ford Explorer 4.0L V6 VIN E Engine" sells a part;
+    "2009-2010 Ford Explorer, Mercury Mountaineer and 2 more Engine" is the same characters
+    spent listing cars the buyer did not search for. So fewer models are tried before any
+    segment is dropped, and only then does rank take over.
+
+    At Shopify's 255 characters the first attempt already fits, so nothing here changes what
+    the catalogue publishes.
+    """
+    policy = _policy(store)
+    start = policy.title_max_models if max_models is None else max_models
+    fallback: tuple[str, list[str]] | None = None
+    for count in range(max(start, 1), 0, -1):
+        title, dropped = compose_title(
+            title_segments(part, store, count, compact), limit, measure
+        )
+        if not dropped:
+            return title, dropped
+        if fallback is None or len(dropped) < len(fallback[1]):
+            fallback = (title, dropped)
+    return fallback if fallback else ("", [])
+
+
+def build_title(part: Part, store: "StoreProfile | CatalogProfile | None" = None,
+                max_models: Optional[int] = None, limit: int = TITLE_MAX,
+                measure=len, compact: bool = False) -> str:
+    """e.g. "2008 Ford F150 Left Driver Side View Door Mirror".
+
+    No dashes, slashes or symbols. Whether the word "OEM" appears is the site's call
+    (``title_include_oem``): it is a high-intent search term, but it also eats characters
+    that could carry another model, and it stays in the tags and description regardless.
+
+    ``limit`` and ``measure`` let a tighter marketplace reuse this exact title rather than
+    grow its own builder; at Shopify's 255 characters nothing is ever dropped.
+    """
+    return fit_title(part, store, max_models, limit, measure, compact)[0]
 
 
 def meta_title(part: Part, store: "StoreProfile | CatalogProfile | None" = None) -> str:

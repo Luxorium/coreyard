@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import math
 import re
 from decimal import Decimal
 from pathlib import Path
 
 from coreyard.ai import AIError, RateLimited, ask_json, batches, deadline_now
-from coreyard.transform.pricing import parse_money
+from coreyard.transform.pricing import charm, parse_money
 
 FLOOR = Decimal("199.99")
 MAX_OVER_MEDIAN = Decimal("1.6")
@@ -272,8 +271,9 @@ def deterministic_record(listing: dict, group: dict) -> dict:
         reasons.append("over one year old -5%")
 
     raw = Decimal(str(anchor)) * max(factor, Decimal("0.40"))
-    # Familiar .99 ending, rounded down so the fallback never becomes less competitive.
-    suggested = Decimal(math.floor(float(raw))) - Decimal("0.01")
+    # The same charm rule the catalogue and the comparable search use, rounded down so the
+    # fallback never becomes less competitive than the evidence behind it.
+    suggested = charm(raw, round_down=True)
     nearest = sorted(comps, key=lambda item: abs(float(item["price"]) - float(anchor)))[:2]
     evidence = "\n".join(
         f"${float(item['price']):.2f} - {str(item['title'])[:100]}" for item in nearest

@@ -13,6 +13,7 @@ from coreyard.config import REPO_ROOT, _get, load_env
 from coreyard.ebay.client import PortalClient
 from coreyard.ebay.portal import load as load_portal
 from coreyard.ebay import engines
+from coreyard.ebay.util import TITLE_MAX as EBAY_TITLE_MAX
 from coreyard.ebay.util import groups_by_interchange, truthy
 from coreyard.transform.pricing import money_str, parse_money
 
@@ -197,24 +198,65 @@ def apply_plans(args) -> int:
     return 1 if errors else 0
 
 
-def engine_titles(args) -> int:
-    """Build deterministic engine titles from normalized portal checkpoints."""
-    from coreyard.ebay import engine_titles as titlegen
+def marketplace_titles(args) -> int:
+    """Title portal listings with the same renderer that titles the Shopify catalogue.
 
+    The listings are joined to their parts by R#, so this reads the yard database. That is
+    the point: the alternative is guessing at facts the database already holds.
+    """
+    from coreyard.config import load_store
+    from coreyard.ebay import titles as titler
+
+    load_env()
     listings = _read_json(args.listings)
     details_by_id = _read_json(args.details) if Path(args.details).is_file() else {}
-    accepted, rejected = titlegen.build(
-        groups_by_interchange(listings), details_by_id
+    wanted = sorted({
+        str((details_by_id.get(str(row["listing_id"])) or {}).get("r_number")
+            or row.get("r_number") or "").strip()
+        for row in listings
+    } - {""})
+    if not wanted:
+        raise SystemExit(
+            "no listing carries an R#; run `coreyard ebay details` first so the portal's "
+            "own edit forms can supply it"
+        )
+    if args.parts:
+        from coreyard.yms.inventory import row_to_part
+        parts = {str(item["r_number"]): row_to_part(item)
+                 for item in _read_json(args.parts)}
+    else:
+        from coreyard.yms.db import connect
+        from coreyard.yms.inventory import fetch_parts_by_r_number
+        from coreyard.yms.interchange import InterchangeResolver
+
+        parts = fetch_parts_by_r_number(wanted)
+        # Fitment is what turns a donor vehicle into the list of vehicles a part fits, and
+        # the renderer titles from it. Resolving it here is not an embellishment: without
+        # it this path would render a *different* title from the one the sync publishes,
+        # which is the entire thing this command exists to avoid.
+        if parts:
+            with connect() as conn:
+                InterchangeResolver(conn).attach(list(parts.values()))
+    print(f"{len(listings)} listings, {len(wanted)} distinct R#, "
+          f"{len(parts)} matched in the yard")
+    accepted, held = titler.decisions(
+        listings, details_by_id, parts, load_store(), limit=args.limit,
     )
-    _write_json(Path(args.out), accepted)
+    grouped = titler.group_for_portal(accepted)
+    _write_json(Path(args.out), grouped)
     held_path = Path(args.out).with_name(Path(args.out).stem + "-held.json")
-    _write_json(held_path, rejected)
-    count = sum(len(item["listing_ids"]) for item in accepted)
-    print(f"{len(accepted)} groups / {count} listings titled; {len(rejected)} held.")
+    _write_json(held_path, held)
+    decisions_path = Path(args.out).with_name(Path(args.out).stem + "-decisions.json")
+    _write_json(decisions_path, accepted)
+    print(f"{len(accepted)} listings retitled in {len(grouped)} portal writes; "
+          f"{len(held)} held.")
     for reason, number in Counter(item["reason"].split(" (")[0]
-                                  for item in rejected).most_common():
+                                  for item in held).most_common():
         print(f"  held: {number:>3} {reason}")
-    print(f"  -> {args.out}\n  -> {held_path}")
+    dropped = Counter(name for item in accepted for name in item.get("dropped") or ())
+    for name, number in dropped.most_common():
+        print(f"  budget dropped {name} on {number} listing(s)")
+    print(f"  -> {args.out}\n  -> {decisions_path}\n  -> {held_path}")
     return 0
 
 
@@ -308,9 +350,16 @@ def aspects(args) -> int:
     return 1 if errors else 0
 
 
-def _preflight(client, records: list[dict], *, tab: str, rows: int) -> list[str]:
+def _preflight(client, records: list[dict], *, tab: str, rows: int,
+               part_type: str | None = None) -> list[str]:
+    """Re-read the tab and confirm every target is still what the plan reviewed.
+
+    ``part_type`` narrows the re-read. It is not an optimisation: a whole tab can be larger
+    than the portal will serve, and a preflight that cannot see a listing reports it as
+    gone. Narrowing to the scope the plan came from is what makes the check complete.
+    """
     live = {str(item["listing_id"]): item
-            for item in client.iter_listings(tab=tab, rows=rows)}
+            for item in client.iter_listings(tab=tab, rows=rows, part_type=part_type)}
     errors = []
     for record in records:
         listing_id = str(record["listing_id"])
@@ -343,7 +392,8 @@ def push(args) -> int:
         return 0
     load_env()
     client = PortalClient(load_portal(args.portal))
-    failures = _preflight(client, records, tab=args.tab, rows=args.rows)
+    failures = _preflight(client, records, tab=args.tab, rows=args.rows,
+                          part_type=args.part_type)
     if failures:
         print(f"REFUSED: {len(failures)} preflight failure(s):", file=sys.stderr)
         for failure in failures[:20]:
@@ -552,13 +602,6 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     command.add_argument("--out", default=str(REPO_ROOT / "out" / "ebay-details.json"))
     command.set_defaults(func=details)
 
-    command = sub.add_parser("titles", help="generate guarded SEO title proposals")
-    command.add_argument("listings", help="normalized listing checkpoint")
-    command.add_argument("--batch", type=int, default=40)
-    command.add_argument("--model")
-    command.add_argument("--no-resume", action="store_true")
-    command.add_argument("--out", default=str(REPO_ROOT / "out" / "ebay-titles.json"))
-    command.set_defaults(func=catalog_titles)
 
     command = sub.add_parser("research", help="research general part prices with AI")
     command.add_argument("listings", help="normalized listing checkpoint")
@@ -589,14 +632,26 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     command.add_argument("--yes-i-mean-it", action="store_true")
     command.set_defaults(func=apply_plans)
 
-    command = sub.add_parser("engine-titles", help="build deterministic engine titles")
-    command.add_argument("listings", nargs="?",
-                         default=str(REPO_ROOT / "out" / "ebay-engines.json"))
-    command.add_argument("--details",
-                         default=str(REPO_ROOT / "out" / "ebay-engine-details.json"))
-    command.add_argument("--out",
-                         default=str(REPO_ROOT / "out" / "ebay-engine-titles.json"))
-    command.set_defaults(func=engine_titles)
+    # One title command for every part type. "engine-titles" is the same command under the
+    # name the engine work used before there was only one renderer behind both storefronts.
+    for name, help_text in (
+        ("titles", "title portal listings with the Shopify renderer"),
+        ("engine-titles", "alias of `titles`, kept for existing engine scripts"),
+    ):
+        command = sub.add_parser(name, help=help_text)
+        command.add_argument("listings", nargs="?",
+                             default=str(REPO_ROOT / "out" / "ebay-engines.json"),
+                             help="normalized listing checkpoint from `ebay pull`")
+        command.add_argument("--details",
+                             default=str(REPO_ROOT / "out" / "ebay-engine-details.json"),
+                             help="edit-form cache; supplies the R# each title is keyed to")
+        command.add_argument("--parts",
+                             help="JSON of yard rows instead of reading the database")
+        command.add_argument("--limit", type=int, default=EBAY_TITLE_MAX,
+                             help="marketplace title budget, measured after escaping")
+        command.add_argument("--out",
+                             default=str(REPO_ROOT / "out" / "ebay-engine-titles.json"))
+        command.set_defaults(func=marketplace_titles)
 
     command = sub.add_parser("engine-comps", help="collect public engine comparables")
     command.add_argument("listings", nargs="?",
@@ -647,6 +702,9 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     command = sub.add_parser("push", help="preflight and submit explicit listings to eBay")
     command.add_argument("listings", help="ready-plan JSON or comma-separated IDs")
     command.add_argument("--tab", choices=TABS, default="unlisted")
+    command.add_argument("--part-type",
+                         help="narrow the preflight re-read to one part type; needed "
+                              "whenever the tab is larger than the portal will serve")
     command.add_argument("--rows", type=int, default=1000)
     command.add_argument("--portal")
     command.add_argument("--list-as-new", action="store_true")

@@ -194,18 +194,35 @@ class PortalClient:
         if part_type is not None:
             kind, value = self.portal.part_type_filter(part_type)
             filter_args[kind] = value
-        page, pages, yielded = 1, None, 0
+        page, pages, yielded, records = 1, None, 0, None
         while pages is None or page <= pages:
             data = self.grid(tab=tab, page=page, rows=rows, **filter_args, **kwargs)
             pages = data["pages"]
+            if records is None:
+                records = data["records"]
             if not data["rows"]:
-                return
+                break
             for item in data["rows"]:
                 yield item
                 yielded += 1
                 if limit is not None and yielded >= limit:
                     return
             page += 1
+        # The portal reports a page count it will not actually serve: asking for page 2
+        # returns an empty result set however the sort is specified, and a row count large
+        # enough to cover the tab in one request fails outright. So a wide read silently
+        # stops partway, and every caller — a pull that looks complete, a preflight that
+        # concludes a listing is gone, a retirement that infers a part left the yard —
+        # would be reasoning about a slice while believing it had the whole tab.
+        #
+        # Narrowing the query is what actually works: a filtered read returns its whole
+        # result set in one page. So this refuses rather than returning short.
+        if limit is None and records is not None and yielded < records:
+            raise PortalError(
+                f"portal returned {yielded} of {records} {tab} listings and will not "
+                f"serve the rest: narrow the query (for example by part type) or raise "
+                f"rows above {rows}"
+            )
 
     def listing_form(self, listing_id: str, *, tab: str = "unlisted") -> list[tuple[str, str]]:
         p = self.portal.parameter
