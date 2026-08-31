@@ -226,7 +226,7 @@ def engine_comps(args) -> int:
     details_by_id = _read_json(args.details) if Path(args.details).is_file() else {}
     records = collector.collect(
         groups_by_interchange(listings), details_by_id, Path(args.pages),
-        Path(args.out), delay=args.delay,
+        Path(args.out), delay=args.delay, retry_thin=not args.no_retry_thin,
     )
     with_comps = sum(1 for item in records.values() if item.get("comp_count"))
     print(f"{len(records)} groups, {with_comps} with comparables -> {args.out}")
@@ -606,6 +606,9 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     command.add_argument("--pages",
                          default=str(REPO_ROOT / "out" / "ebay-engine-comp-pages"))
     command.add_argument("--delay", type=float, default=1.4)
+    command.add_argument("--no-retry-thin", action="store_true",
+                         help="skip the shorter-query second pass over groups that "
+                              "came back with no comparables")
     command.add_argument("--out",
                          default=str(REPO_ROOT / "out" / "ebay-engine-comps.json"))
     command.set_defaults(func=engine_comps)

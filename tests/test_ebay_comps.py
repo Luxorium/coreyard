@@ -163,6 +163,69 @@ class DeterministicFallback(unittest.TestCase):
         self.assertGreaterEqual(record["suggested_price"], 0.40 * 2000 - 1)
 
 
+PAGE = """
+<html><body>%s</body></html>
+""" + "<!-- pad -->" * 1200
+
+
+class ThinGroupRetry(unittest.TestCase):
+    """A too-specific query returns nothing; that group must be asked again, not floored."""
+
+    ROWS = {"300-A": [{"listing_id": "1",
+                       "title": "2011-2014 FORD F150 5.0L V8 VIN F Engine"}]}
+
+    def collect(self, fetches, **kwargs):
+        """Run collect() with a fetch that records queries and writes canned pages."""
+        calls = []
+
+        def fake_fetch(query, destination, session, delay=1.5):
+            calls.append(query)
+            body = fetches.get(len(calls))
+            if body is None:
+                destination.write_text(PAGE % "", encoding="utf-8")
+                return True
+            destination.write_text(body, encoding="utf-8")
+            return True
+
+        original = engine_comps.fetch
+        engine_comps.fetch = fake_fetch
+        try:
+            with TemporaryDirectory() as tmp:
+                done = engine_comps.collect(
+                    self.ROWS, {}, Path(tmp) / "pages", Path(tmp) / "comps.json",
+                    delay=0, log=lambda *a: None, **kwargs,
+                )
+            return done, calls
+        finally:
+            engine_comps.fetch = original
+
+    def test_a_group_with_no_comparables_is_asked_a_second_shorter_question(self):
+        done, calls = self.collect({})
+        self.assertEqual(len(calls), 2, "one specific query, then one broader one")
+        self.assertIn("5.0L", calls[0])
+        self.assertNotEqual(calls[0], calls[1])
+        self.assertLess(len(calls[1]), len(calls[0]))
+        self.assertEqual(done["300-A"]["query_short"], calls[1])
+
+    def test_a_group_that_already_found_comparables_is_not_refetched(self):
+        found = PAGE % (
+            '<div class="item"><a class="title">2011 Ford F150 5.0L V8 Engine 90k'
+            '</a><span class="price">$1,500.00</span></div>'
+        )
+        done, calls = self.collect({1: found})
+        if done["300-A"].get("comp_count"):
+            self.assertEqual(len(calls), 1, "a group with evidence is left alone")
+
+    def test_the_retry_can_be_switched_off(self):
+        _, calls = self.collect({}, retry_thin=False)
+        self.assertEqual(len(calls), 1)
+
+    def test_the_original_query_is_kept_beside_the_retry(self):
+        done, calls = self.collect({})
+        self.assertEqual(done["300-A"]["query"], calls[0],
+                         "the specific query stays on the record for review")
+
+
 class TargetResolution(unittest.TestCase):
     """Which listings a write touches. A wrong ID here ends the wrong live listing."""
 

@@ -208,8 +208,44 @@ def comps_for(row: dict, detail: dict | None, page,
     return {"query_displacement": size, "family_code": family, "comps": top, **stats}
 
 
+def _page(pages: Path, key: str, suffix: str = "") -> Path:
+    return pages / f"{re.sub(r'[^A-Za-z0-9._-]', '_', key)}{suffix}.html"
+
+
+def _checkpoint(out: Path, done: dict) -> None:
+    temporary = out.with_suffix(out.suffix + ".tmp")
+    temporary.write_text(json.dumps(done, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(out)
+
+
+def _rescore(key: str, row: dict, detail: dict, pages: Path, record: dict) -> dict:
+    """Re-run the filter over every page already on disk for this group.
+
+    Scoring is cheap and the pages are local, so a group is re-read rather than re-fetched
+    whenever it is revisited. That is what lets a change to :func:`score` take effect on the
+    whole catalogue without another pass over the public index.
+    """
+    on_disk = [page for page in (_page(pages, key), _page(pages, key, "_2"))
+               if page.is_file()]
+    if not on_disk:
+        return record
+    return {**record, **comps_for(row, detail, on_disk), "id": key,
+            "query": record.get("query")}
+
+
 def collect(groups: dict[str, list[dict]], details: dict[str, dict], pages: Path,
-            out: Path, *, delay: float = 1.5, log=print) -> dict[str, dict]:
+            out: Path, *, delay: float = 1.5, log=print,
+            retry_thin: bool = True) -> dict[str, dict]:
+    """Fetch, score and checkpoint comparables for every interchange group.
+
+    Two passes. The first asks the index the specific question — year, vehicle,
+    displacement, engine family — which is what makes a match trustworthy enough to price
+    against. The second exists because that question is sometimes too specific to return
+    anything at all: a group that came back with nothing is asked again in
+    :func:`short_query_for`'s broader terms, and both pages are then scored together, so the
+    wider net costs no precision. Without it those groups reach research with no evidence
+    and are priced by the floor alone.
+    """
     pages.mkdir(parents=True, exist_ok=True)
     done = json.loads(out.read_text(encoding="utf-8")) if out.is_file() else {}
     session = requests.Session()
@@ -218,7 +254,7 @@ def collect(groups: dict[str, list[dict]], details: dict[str, dict], pages: Path
         row = groups[key][0]
         detail = details.get(str(row["listing_id"])) or {}
         query = query_for(row, detail)
-        page = pages / f"{re.sub(r'[^A-Za-z0-9._-]', '_', key)}.html"
+        page = _page(pages, key)
         try:
             ok = fetch(query, page, session, delay=delay)
         except Exception as exc:
@@ -230,8 +266,41 @@ def collect(groups: dict[str, list[dict]], details: dict[str, dict], pages: Path
             record.update({"id": key, "query": query})
         done[key] = record
         if number % 20 == 0 or number == len(keys):
-            temporary = out.with_suffix(out.suffix + ".tmp")
-            temporary.write_text(json.dumps(done, indent=2) + "\n", encoding="utf-8")
-            temporary.replace(out)
+            _checkpoint(out, done)
             log(f"{number}/{len(keys)} fetched")
+
+    if not retry_thin:
+        return done
+
+    # Every group that still has nothing, including ones an earlier run recorded: a thin
+    # group is thin until it is re-asked, and skipping the ones already in `done` would
+    # leave them thin forever.
+    thin = [key for key in sorted(done)
+            if key in groups and not done[key].get("comp_count")]
+    if not thin:
+        return done
+    log(f"retrying {len(thin)} groups with no comparables, using a shorter query")
+    recovered = 0
+    for number, key in enumerate(thin, 1):
+        row = groups[key][0]
+        detail = details.get(str(row["listing_id"])) or {}
+        short = short_query_for(row, detail)
+        if not short or short == done[key].get("query"):
+            continue
+        destination = _page(pages, key, "_2")
+        try:
+            ok = fetch(short, destination, session, delay=delay)
+        except Exception as exc:
+            log(f"{key}: retry failed: {type(exc).__name__}: {str(exc)[:90]}")
+            continue
+        if not ok:
+            continue
+        done[key] = {**_rescore(key, row, detail, pages, done[key]),
+                     "query_short": short}
+        recovered += bool(done[key].get("comp_count"))
+        if number % 10 == 0 or number == len(thin):
+            _checkpoint(out, done)
+            log(f"  {number}/{len(thin)} retried")
+    _checkpoint(out, done)
+    log(f"recovered comparables for {recovered} of {len(thin)} thin groups")
     return done
