@@ -11,9 +11,10 @@ CSV framing; `sink/` contains the one Shopify client and the CSV and API
 publishers. `orders/` owns the order pipeline and its transports, `reconcile/` compares the
 store with the yard, `repair/` rewrites output an older renderer produced, and `audit/`
 reports listing quality. `ebay/` is the optional
-listing-portal channel: a portal map, its client, comparable research, and guarded writes.
-`ai.py` is the opt-in local-CLI inference transport it uses, and `overrides.py` carries the
-reviewed decisions it hands back to the renderer. `run_sync.py` orchestrates syncs,
+listing-portal channel: a portal map, its client, comparable research, guarded writes, and
+`daily.py`, the unattended pass that composes them. `yms/part_types.py` reports every part
+type the yard can inventory and where the renderer's wording runs out.
+`overrides.py` carries the reviewed decisions that channel hands back to the renderer. `run_sync.py` orchestrates syncs,
 `state.py` tracks fingerprints, `webhook.py` is the webhook transport, and `schedule.py`
 installs timers. Tests are in `tests/`; operational checks belong in `scripts/`. Photos are
 external; `out/`, `*.sqlite3`, `.env`, `schema.json`, `portal.json`, `notes/`, and generated
@@ -84,10 +85,11 @@ Anything that talks to Shopify takes a client so a fake can be passed in, and ev
 decision that could empty a catalogue — retirement fractions, reconciliation buckets, repair
 diffs — lives in a pure function that a test can call directly. The same rule covers the
 listing portal: its client is injectable, its planning (`ebay/engines.py`) is pure, and no
-test may reach a portal, a public index, or an inference binary.
+test may reach a portal or a public index.
 
-Inference is never a test dependency. `coreyard/ai.py` stays off unless
-`COREYARD_AI_ENABLED` is set, so a suite that reaches it is misconfigured, not slow.
+CoreYard runs no model and calls no LLM. Titles come from the renderer, comparables from a
+parsed public index, and prices from arithmetic over those comparables — so every command
+is reproducible, and a test that wanted to stub inference would have nothing to stub.
 
 ## Commit & Pull Request Guidelines
 
@@ -172,7 +174,7 @@ failed payloads may remain only in the owner-only queue for the bounded retry wi
 - The listing-portal channel has three write surfaces, and they stay three commands:
   saving in the portal changes nothing a shopper sees, pushing makes it live, and delisting
   is irreversible on eBay — a relist mints a new item id and loses the watchers and ranking.
-  The gap between the first two is the review window for AI-researched prices.
+  The gap between the first two is the review window for researched prices.
 - Every portal write is a dry run without `--apply`, and its cap counts listings rather than
   plan entries and refuses *before* the first write, so a refused batch writes nothing.
 - Researched titles and prices reach Shopify only as `STORE_CATALOG_OVERRIDES_FILE`, read by

@@ -114,6 +114,9 @@ bin/coreyard orders poll --check
 bin/coreyard orders retry --id <webhook-id>
 bin/coreyard orders sync-status            # plan only
 bin/coreyard schedule status
+bin/coreyard part-types                    # part-type catalogue + wording gaps, read-only
+bin/coreyard ebay daily                    # unattended pass, dry run
+bin/coreyard ebay daily --apply            # ...and SAVE it in the portal (never pushes)
 bin/coreyard ebay pull --tab unlisted      # read-only portal download
 bin/coreyard ebay engine-plan --titles ... --prices ...   # plan only
 bin/coreyard ebay engine-apply --titles ... --apply       # WRITES the portal
@@ -169,6 +172,7 @@ coreyard/cli.py      the one command tree; every command is mounted here
 coreyard/status.py   read-only overview of what the pipeline believes
 coreyard/doctor.py   installation and liveness diagnostics (shared with scripts/healthcheck.py)
 coreyard/ops.py      run history in the state database
+coreyard/source/     where inventory comes from: the Source seam, the database, a CSV/SQLite file
 coreyard/yms/        schema mapping, SMB/TDS reads, images, fitment, opt-in orders
 coreyard/transform/  the canonical renderer, SEO, tags, shipping, weights, CSV
 coreyard/sink/       the Shopify client, CSV output, publisher, bulk, OAuth, alt text
@@ -177,7 +181,8 @@ coreyard/reconcile/  yard-vs-store comparison, planning, and guarded application
 coreyard/repair/     rewrite catalog output an older renderer produced
 coreyard/audit/      read-only listing-quality checks with configurable thresholds
 coreyard/ebay/       the listing-portal channel: portal map, client, research, guarded writes
-coreyard/ai.py       opt-in local-CLI inference transport (no API key, no provider SDK)
+coreyard/ebay/index.py      the one place pricing evidence is fetched from, and so replaceable
+coreyard/yms/part_types.py  every part type the yard can inventory, and wording coverage
 coreyard/overrides.py reviewed per-R# title/price decisions, read by the canonical renderer
 coreyard/profile.py  site merchandising policy (claims, wording, metafield namespace)
 coreyard/validate.py offline schema checks for the four external config files
@@ -402,9 +407,37 @@ except through one file. Everything portal-specific is in `portal.json` (see Pro
 Boundaries) — if you find yourself writing a route, a form field id or a tab name into a
 `.py` file, it belongs in the map instead.
 
-The channel is optional and inert: an installation that sets no `EBAY_PORTAL_FILE` and no
-`COREYARD_AI_ENABLED` never reaches any of it, and nothing in the Shopify pipeline imports
-it.
+The channel is optional and inert: an installation that sets no `EBAY_PORTAL_FILE` never
+reaches any of it, and nothing in the Shopify pipeline imports it.
+
+### Keeping up, unattended
+
+`ebay daily` is the whole chain as one command, and it is a *driver*: every decision is made
+by the module that already owned it, so nothing in it can be tested only through it. It
+walks part types rather than the tab as a whole, because the grid will not serve a whole tab
+but answers a filtered read completely — and the types it walks come from the yard extract,
+so a type a worker files a part under tomorrow is walked tomorrow without anyone editing a
+list. The unlisted tab is the queue, so there is no cursor to keep or corrupt.
+
+**It stops at the portal.** It never calls submit. An unattended job is exactly the thing
+that must not close the review window, so pushing stays a separate command a person runs.
+
+### Which part a listing is
+
+`ebay/link.py` answers this from grid data alone, because reading each listing's edit form
+costs about forty seconds — roughly sixty-six hours for the unlisted tab. Two independent
+rules, covering different halves of the catalogue:
+
+1. **The R# the portal put at the end of its own title**, accepted only when the part it
+   names agrees with the donor stock number *and* part type the grid reported separately.
+   This is what resolves the parts a car carries two of; the donor key alone is genuinely
+   ambiguous for every tail lamp, mirror and headlamp.
+2. **(donor stock number, part-type code)**, when that pair names exactly one yard part.
+   This is what resolves engines, whose titles carry no R#.
+
+Neither is trusted alone, and a listing that resolves to no single part is **left alone**
+rather than retitled as a candidate. Keep that refusal: a listing repriced as the wrong part
+is worse than one nothing touched.
 
 ### Three separate write surfaces, in increasing order of consequence
 
@@ -415,7 +448,7 @@ it.
    relisting mints a new item id and loses the watchers and the ranking the old one had.
 
 Keep those three as three commands. Collapsing the first two removes the only point at
-which a person sees what a batch of AI-researched prices actually says before buyers do.
+which a person sees what a batch of researched prices actually says before buyers do.
 
 ### Guards that are part of the feature
 
@@ -436,10 +469,10 @@ which a person sees what a batch of AI-researched prices actually says before bu
   (`EBAY_ASPECTS_FILE`). A value that is not derivable with confidence is left unset, and
   `--apply` refuses outright without the metadata: eBay ranks on aspect *match* and buyers
   filter on it, so a wrong aspect is worse than a missing one.
-- Prices are guarded outside the model (`ebay/research.apply_guards`): a floor, a ceiling
-  at `MAX_OVER_MEDIAN` times the comparable median, and a hard hold on any listing whose
-  condition note mentions a defect. The unguarded answer is kept as `raw_suggested` so a
-  reviewer can see what was overridden.
+- Prices are guarded outside the calculation that proposes them
+  (`ebay/research.apply_guards`): a floor, a ceiling at `MAX_OVER_MEDIAN` times the
+  comparable median, and a hard hold on any listing whose condition note mentions a defect.
+  The unguarded answer is kept as `raw_suggested` so a reviewer can see what was overridden.
 
 ### Where this channel meets Shopify
 
@@ -451,20 +484,31 @@ fingerprint and both sinks serialize it, rather than as an out-of-band product p
 the next sync would silently revert. Overrides are keyed by **R#**, never by portal listing
 id; `build_overrides` refuses rather than guessing when a listing has no R#.
 
-### Inference
+### No inference, anywhere
 
-`coreyard/ai.py` is a transport, like `yms/db.py` and `sink/shopify_api.py`. Two of its
-properties shape every caller: one invocation carries roughly 13k tokens of overhead, so
-callers batch; and a rate-limited call returns a *successful-looking* envelope with no
-error text, recognisable only by having spent no time, no turns and no tokens. Do not
-"simplify" `_looks_rate_limited` — nothing else distinguishes that shape from a real
-failure, and misreading it turns a fifteen-minute wait into an abandoned run.
+**CoreYard runs no model and calls no LLM.** Titles come from the canonical renderer,
+comparables from a parsed public index, and prices from arithmetic over those comparables.
+This is a hard constraint, not a preference, and it is the reason the channel can run
+unattended: a program that prices 20,000 listings the same way twice can be reviewed once
+and trusted, while an answer that varies between runs has to be read every time — and
+nobody reads 20,000 of anything.
 
-The retry budget is bounded by an absolute deadline, not by an attempt count alone: five
-retries at a doubling sixty-second base is about half an hour, and a run that dies inside
-`time.sleep` banks nothing. Every AI-backed command checkpoints, and `--deterministic`
-gives `engine-research` an explainable comp-median fallback for rows inference never
-reached.
+Three properties follow, and are worth keeping:
+
+- **Every price explains itself.** `research.price_listing` returns the named adjustments
+  that produced it ("96% of the supplied domestic median; under 100k miles +7%; tested
+  +8%"), so a reviewer checks the reasoning rather than trusting the number.
+- **Nothing is invented.** With no comparable median a listing gets *no price* and is held,
+  because a listing left at the yard's own price merely fails to improve, while a guessed
+  one is wrong in a direction nobody can predict.
+- **A run has no external budget to exhaust.** There is no rate limit, no backoff, no
+  wall-clock deadline, and no reason for a scheduled job to bank partial work against a
+  quota. Checkpointing survives because a portal read is still slow, not because a
+  provider might refuse.
+
+If a future task seems to want a model — better titles, a judgement call on a defect note —
+the answer is a rule in the renderer or a held listing for a person to decide, not a
+dependency that makes the nightly run non-reproducible.
 
 ## Transport Constraints
 
