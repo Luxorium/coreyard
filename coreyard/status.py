@@ -70,6 +70,14 @@ def gather(deep: bool = False) -> dict:
             report["counts"]["CoreYard state"] = len(snapshot)
             report["counts"]["Archived, remembered"] = len(state.retired_statuses())
             report["cursor"] = state.get_cursor("delta_modified_at")
+            # Only once a second channel exists. With one, the canonical snapshot already
+            # says everything this would, and a line that repeats it is a line people stop
+            # reading.
+            channels = state.channels()
+            if len(channels) > 1:
+                for channel in channels:
+                    report["counts"][f"  via {channel}"] = state.channel_summary(
+                        channel, snapshot)
     except Exception as exc:
         report["counts"]["CoreYard state"] = f"FAILED — {str(exc)[:60]}"
         snapshot = {}

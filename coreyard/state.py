@@ -152,6 +152,29 @@ class SyncState:
             " status TEXT NOT NULL,"
             " retired_at TEXT NOT NULL)"
         )
+        # What each sales channel actually holds, as opposed to what the yard says.
+        #
+        # `parts` is the canonical yard-side snapshot and is deliberately *not* keyed by
+        # channel: its fingerprint hashes the rendered product, which is the same product
+        # whichever channel publishes it. What differs per channel is whether that channel
+        # received it — and with two channels, one succeeding while the other fails is the
+        # normal case, not the exception. Recording only the canonical snapshot would mark
+        # a part synchronised because Shopify took it, while the listing channel never did.
+        #
+        # A row is written only after a publish returns cleanly, so a fingerprint here means
+        # "this channel holds this version". `last_error` records a failure *without*
+        # advancing the fingerprint, which is what keeps a failed part pending.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS channel_state ("
+            " channel TEXT NOT NULL,"
+            " r_number TEXT NOT NULL,"
+            " fingerprint TEXT NOT NULL DEFAULT '',"
+            " remote_id TEXT NOT NULL DEFAULT '',"
+            " status TEXT NOT NULL DEFAULT '',"
+            " last_synced TEXT NOT NULL DEFAULT '',"
+            " last_error TEXT NOT NULL DEFAULT '',"
+            " PRIMARY KEY (channel, r_number))"
+        )
         # Where a delta run left off. Kept beside the fingerprints on purpose: a cursor that
         # outlived the snapshot it was taken against would make the next delta run skip every
         # change between them, and the two are only meaningful together.
@@ -332,6 +355,118 @@ class SyncState:
             return
         with self.conn:
             self.conn.executemany("DELETE FROM retired WHERE r_number = ?", keys)
+
+    # -- per-channel state -----------------------------------------------------
+
+    def record_channel(self, channel: str, fingerprints, *,
+                       remote_ids: dict[str, str] | None = None,
+                       status: str = "", images: dict[str, str] | None = None) -> None:
+        """Record that ``channel`` now holds these parts at these fingerprints.
+
+        Call this *after* the publish returned cleanly, for the same reason
+        :data:`CHECKPOINT_EVERY` banks progress only after a successful write: a
+        fingerprint recorded before the fact would make a failed part read as done and it
+        would never be retried.
+        """
+        current = (fingerprints.content if isinstance(fingerprints, Fingerprints)
+                   else fingerprints)
+        if not current:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        remote_ids = remote_ids or {}
+        rows = [(str(channel), str(r), fp, str(remote_ids.get(r, "")), status, now)
+                for r, fp in current.items()]
+        with self.conn:
+            # last_error is cleared by a success: the part is no longer failing.
+            self.conn.executemany(
+                "INSERT INTO channel_state"
+                " (channel, r_number, fingerprint, remote_id, status, last_synced,"
+                "  last_error)"
+                " VALUES (?, ?, ?, ?, ?, ?, '')"
+                " ON CONFLICT(channel, r_number) DO UPDATE SET"
+                "  fingerprint=excluded.fingerprint,"
+                "  remote_id=CASE WHEN excluded.remote_id != '' THEN excluded.remote_id"
+                "                 ELSE channel_state.remote_id END,"
+                "  status=CASE WHEN excluded.status != '' THEN excluded.status"
+                "              ELSE channel_state.status END,"
+                "  last_synced=excluded.last_synced,"
+                "  last_error=''",
+                rows,
+            )
+
+    def record_channel_failure(self, channel: str, r_number: str, error: str) -> None:
+        """Record that ``channel`` could not take this part.
+
+        Deliberately does not touch ``fingerprint``. The part keeps whatever version this
+        channel last actually held — which is what leaves it pending, and is the whole
+        point of tracking channels separately.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO channel_state (channel, r_number, last_synced, last_error)"
+                " VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(channel, r_number) DO UPDATE SET"
+                "  last_synced=excluded.last_synced, last_error=excluded.last_error",
+                (str(channel), str(r_number), now, str(error)[:500]),
+            )
+
+    def channel_fingerprints(self, channel: str) -> dict[str, str]:
+        """What ``channel`` holds, keyed by R#. Absent means it holds nothing."""
+        rows = self.conn.execute(
+            "SELECT r_number, fingerprint FROM channel_state"
+            " WHERE channel = ? AND fingerprint != ''", (str(channel),))
+        return {row[0]: row[1] for row in rows}
+
+    def channel_pending(self, channel: str, current) -> list[str]:
+        """Parts ``channel`` does not hold at the current fingerprint.
+
+        The question a second channel exists to answer. A part Shopify published and the
+        listing channel refused is pending *here* and settled there, which the canonical
+        snapshot alone cannot express.
+        """
+        wanted = (current.content if isinstance(current, Fingerprints) else current) or {}
+        held = self.channel_fingerprints(channel)
+        return sorted(r for r, fp in wanted.items() if held.get(r) != fp)
+
+    def channel_failures(self, channel: str) -> dict[str, str]:
+        """R# -> the error this channel last reported, for parts still failing."""
+        rows = self.conn.execute(
+            "SELECT r_number, last_error FROM channel_state"
+            " WHERE channel = ? AND last_error != ''", (str(channel),))
+        return {row[0]: row[1] for row in rows}
+
+    def channel_remote_ids(self, channel: str) -> dict[str, str]:
+        """R# -> this channel's own id for it (product gid, offer id, listing id)."""
+        rows = self.conn.execute(
+            "SELECT r_number, remote_id FROM channel_state"
+            " WHERE channel = ? AND remote_id != ''", (str(channel),))
+        return {row[0]: row[1] for row in rows}
+
+    def channels(self) -> list[str]:
+        """Every channel this snapshot has heard from."""
+        return sorted(row[0] for row in
+                      self.conn.execute("SELECT DISTINCT channel FROM channel_state"))
+
+    def forget_channel(self, channel: str, r_numbers: Iterable[str]) -> None:
+        """Drop parts from one channel's record, as retirement does for the snapshot."""
+        keys = [(str(channel), str(r)) for r in r_numbers]
+        if not keys:
+            return
+        with self.conn:
+            self.conn.executemany(
+                "DELETE FROM channel_state WHERE channel = ? AND r_number = ?", keys)
+
+    def channel_summary(self, channel: str, current=None) -> str:
+        """One line for ``status``: what this channel holds, owes and is failing on."""
+        held = len(self.channel_fingerprints(channel))
+        failing = len(self.channel_failures(channel))
+        parts = [f"{held:,} held"]
+        if current is not None:
+            parts.append(f"{len(self.channel_pending(channel, current)):,} pending")
+        if failing:
+            parts.append(f"{failing:,} failing")
+        return ", ".join(parts)
 
     @staticmethod
     def _rows(current, images):
