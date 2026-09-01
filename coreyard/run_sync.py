@@ -25,6 +25,10 @@ from typing import NamedTuple
 from coreyard import ops
 from coreyard.config import REPO_ROOT, load_settings
 from coreyard.state import DEFAULT_STATE_DB, SyncState, fingerprints_all
+
+# The channel this pipeline publishes to. Recorded alongside the canonical
+# snapshot so a second channel's successes and failures stay its own.
+CHANNEL = "shopify"
 from coreyard.state import subset as fp_subset
 from coreyard.transform.shopify_csv import ImageResolver
 
@@ -328,7 +332,9 @@ def cmd_delta(args) -> int:
             # is what happens after a long full sync has held the shared lock for an hour.
             # The cursor still only advances at the end, so nothing is skipped.
             if len(published_ok) - len(checkpointed) >= CHECKPOINT_EVERY:
-                state.update(fp_subset(fingerprints, published_ok - checkpointed))
+                banked = fp_subset(fingerprints, published_ok - checkpointed)
+                state.update(banked)
+                state.record_channel(CHANNEL, banked)
                 checkpointed |= published_ok
         state.clear_retired(revived)
 
@@ -349,8 +355,11 @@ def cmd_delta(args) -> int:
 
         # Record only what actually landed, then advance the cursor. A part that failed to
         # publish keeps its old fingerprint (or none), so the next run picks it up again.
-        state.update(fp_subset(fingerprints, published_ok))
+        banked = fp_subset(fingerprints, published_ok)
+        state.update(banked)
+        state.record_channel(CHANNEL, banked)
         state.forget(retired)
+        state.forget_channel(CHANNEL, retired)
         if changes.cursor:
             state.set_cursor(CURSOR_NAME, changes.cursor.isoformat())
             print(f"Cursor advanced to {changes.cursor.isoformat()}.")
@@ -393,6 +402,35 @@ def _photo_refreshes(diff, args, selected: set[str]) -> set[str]:
     if getattr(args, "scope", None) in {"inventory", "catalog"}:
         return set()
     return set(diff.image_changed) & selected
+
+
+def _committable(current, images, previous, previous_images, diff, published_ok):
+    """The snapshot a full run may commit, and the photo manifests to go with it.
+
+    A full run commits everything it extracted, which is right for the parts it published
+    and wrong for the parts it did not. A part the diff called added-or-changed that never
+    landed would otherwise be recorded at its *new* fingerprint, so the next run would find
+    it unchanged and never retry it — the change would be lost silently and permanently,
+    which is the one failure a sync must not have.
+
+    The scoped and delta paths already got this right by recording only what landed
+    (`state.update(subset(...))`). This is the same rule for the path that commits
+    wholesale: an outstanding part keeps the version the storefront actually has, and a
+    part that has never published stays absent so it keeps reading as new.
+    """
+    snapshot, manifests = dict(current), dict(images or {})
+    outstanding = (set(diff.added) | set(diff.changed)) - set(published_ok)
+    for key in outstanding:
+        if key in previous:
+            snapshot[key] = previous[key]
+            if key in (previous_images or {}):
+                manifests[key] = previous_images[key]
+            else:
+                manifests.pop(key, None)
+        else:
+            snapshot.pop(key, None)
+            manifests.pop(key, None)
+    return snapshot, manifests, outstanding
 
 
 def _published_fingerprints(fingerprints, keys, state, args, diff):
@@ -569,14 +607,18 @@ def cmd_sync(args) -> int:
                 # Bank the work so far. A run stopped by its timeout keeps everything it
                 # published instead of starting the same backlog again next hour.
                 if not args.dry_run and len(published_ok) - len(checkpointed) >= CHECKPOINT_EVERY:
-                    state.update(_published_fingerprints(
+                    banked = _published_fingerprints(
                         fingerprints, published_ok - checkpointed, state, args, diff
-                    ))
+                    )
+                    state.update(banked)
+                    state.record_channel(CHANNEL, banked)
                     checkpointed |= published_ok
             if published_ok - checkpointed and not args.dry_run:
-                state.update(_published_fingerprints(
+                banked = _published_fingerprints(
                     fingerprints, published_ok - checkpointed, state, args, diff
-                ))
+                )
+                state.update(banked)
+                state.record_channel(CHANNEL, banked)
             # Only after the upsert landed: a part whose revival failed must still be
             # remembered, or the retry would republish it as ARCHIVED.
             state.clear_retired(revived)
@@ -616,24 +658,34 @@ def cmd_sync(args) -> int:
             # what moved. Committing would record every part it *declined* to publish as
             # up to date, and the change it skipped would never be published by anything.
             # So record exactly what landed and leave the rest of the snapshot alone.
-            state.update(_published_fingerprints(
+            banked = _published_fingerprints(
                 fingerprints, published_ok, state, args, diff
-            ))
+            )
+            state.update(banked)
+            state.record_channel(CHANNEL, banked)
             state.forget(retired)
+            state.forget_channel(CHANNEL, retired)
             print(f"State updated for {len(published_ok)} published part(s); "
                   f"the rest of the snapshot is untouched.")
         else:
             # Anything we believed was published but did not retire is carried forward at
             # its old fingerprint. Dropping it here would silently forget a part that is
             # still live on the storefront with stock it no longer has.
-            snapshot = dict(current)
-            carried = {r: fp for r, fp in state.load().items()
+            previous = state.load()
+            snapshot, manifests, outstanding = _committable(
+                current, image_fps, previous, state.load_images(), diff, published_ok
+            )
+            carried = {r: fp for r, fp in previous.items()
                        if r in set(diff.removed) - retired}
             snapshot.update(carried)
-            state.commit(snapshot, image_fps)
+            state.commit(snapshot, manifests)
             # The scope columns follow the same rule the canonical map just did: only the
-            # parts this run actually rendered get fresh values.
-            state.update(fp_subset(fingerprints, set(current)))
+            # parts this run actually rendered *and published* get fresh values.
+            state.update(fp_subset(fingerprints, set(current) - outstanding))
+            state.record_channel(CHANNEL, fp_subset(fingerprints, published_ok))
+            state.forget_channel(CHANNEL, retired)
+            if outstanding:
+                print(f"{len(outstanding)} part(s) did not publish and stay pending.")
             print(f"State committed{f' ({len(carried)} unretired carried forward)' if carried else ''}.")
             if baseline is not None:
                 # Only a full run may set this: it is the only one that has just reconciled

@@ -15,7 +15,9 @@ from pathlib import Path
 from coreyard.overrides import EMPTY as NO_OVERRIDES
 from coreyard.overrides import CatalogOverrides
 from coreyard.overrides import load as load_catalog_overrides
+from coreyard import store
 from coreyard.profile import CatalogProfile, DEFAULT_PROFILE
+from coreyard.profile import from_dict as profile_from_dict
 from coreyard.profile import load as load_profile
 from coreyard.transform.shipping import EMPTY as NO_SHIPPING
 from coreyard.transform.shipping import ShippingPolicy
@@ -224,6 +226,9 @@ def load_store() -> StoreProfile:
     as well, but a path that is set and does not resolve is an error rather than a fallback:
     publishing CoreYard's neutral wording under a site that wrote its own, or a catalogue of
     weightless parts under a site that supplied a table, is invisible in the result.
+
+    Each file-backed policy may instead be a section of one ``store.json``; a setting that
+    names its own file still wins. See :mod:`coreyard.store`.
     """
     load_env()
     return StoreProfile(
@@ -231,9 +236,12 @@ def load_store() -> StoreProfile:
         city=_get("STORE_CITY", "") or "",
         warranty=_get("STORE_WARRANTY", "") or "",
         handle_prefix=_get("SHOPIFY_HANDLE_PREFIX", "coreyard") or "coreyard",
-        catalog=load_profile(_get("STORE_PROFILE_FILE", "") or None),
-        weights=load_weight_rules(_get("STORE_WEIGHT_RULES_FILE", "") or None),
-        shipping=load_shipping_policy(_get("STORE_SHIPPING_POLICY_FILE", "") or None),
+        catalog=store.resolve("profile", "STORE_PROFILE_FILE",
+                              load_profile, profile_from_dict),
+        weights=store.resolve("weights", "STORE_WEIGHT_RULES_FILE",
+                              load_weight_rules, WeightRules.from_dict),
+        shipping=store.resolve("shipping", "STORE_SHIPPING_POLICY_FILE",
+                               load_shipping_policy, ShippingPolicy.from_dict),
         overrides=load_catalog_overrides(
             _get("STORE_CATALOG_OVERRIDES_FILE", "") or None
         ),

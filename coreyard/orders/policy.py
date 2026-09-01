@@ -177,8 +177,10 @@ def load(path: "str | Path | None") -> OrderPolicy:
 def load_configured() -> OrderPolicy:
     from coreyard.config import _get, load_env, load_store
 
+    from coreyard import store
+
     load_env()
-    policy = load(_get("STORE_ORDER_POLICY_FILE", "") or None)
+    policy = store.resolve("orders", "STORE_ORDER_POLICY_FILE", load, from_dict)
     return policy.with_shipping(load_store().shipping)
 
 

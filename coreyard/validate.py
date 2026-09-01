@@ -191,10 +191,50 @@ def check_portal(path, result: Result):
     return portal
 
 
+def check_store(path, result: Result) -> None:
+    """Validate the combined store file's sections, if this site has one.
+
+    Each section is handed to the same ``from_dict`` the loader uses, so a section is wrong
+    here for exactly the reasons its own file would be wrong — no second schema to drift.
+    """
+    from coreyard import store as store_file
+    from coreyard.orders.policy import from_dict as order_from_dict
+    from coreyard.profile import from_dict as profile_from_dict
+    from coreyard.transform.shipping import ShippingPolicy
+    from coreyard.transform.weights import WeightRules
+
+    try:
+        data = store_file.load(path, cache=False)
+    except store_file.StoreFileError as exc:
+        result.fail("store file", str(exc))
+        return
+    if not data:
+        return
+    builders = {"profile": profile_from_dict, "weights": WeightRules.from_dict,
+                "shipping": ShippingPolicy.from_dict, "orders": order_from_dict}
+    present = []
+    for name, builder in builders.items():
+        if name not in data:
+            continue
+        configured = store_file.body(data.get(name))
+        if configured is None:
+            present.append(f"{name} (default)")
+            continue
+        try:
+            builder(configured)
+        except Exception as exc:  # each loader raises its own error type
+            result.fail(f"store file [{name}]", str(exc))
+            continue
+        present.append(f"{name} ({len(configured)} key(s))")
+    if present:
+        result.note("store file: " + ", ".join(present))
+
+
 def validate(profile=None, weights=None, orders=None, shipping=None,
-             overrides=None, portal=None) -> Result:
+             overrides=None, portal=None, store=None) -> Result:
     """Validate the given config paths. Any left as None is simply not checked."""
     result = Result()
+    check_store(store, result)
     check_profile(profile, result)
     check_weights(weights, result)
     policy = check_shipping(shipping, result)
@@ -217,6 +257,9 @@ def _configured() -> dict:
         "portal": (_get("EBAY_PORTAL_FILE", "") or
                    (str(REPO_ROOT / "portal.json")
                     if (REPO_ROOT / "portal.json").is_file() else None)),
+        "store": (_get("STORE_FILE", "") or
+                  (str(REPO_ROOT / "store.json")
+                   if (REPO_ROOT / "store.json").is_file() else None)),
     }
 
 
@@ -228,6 +271,8 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     ap.add_argument("--shipping", default=None, help="shipping policy JSON")
     ap.add_argument("--overrides", default=None, help="per-R# catalogue override JSON")
     ap.add_argument("--portal", default=None, help="listing-portal protocol map JSON")
+    ap.add_argument("--store", default=None,
+                    help="combined store file (profile/weights/shipping/orders)")
     ap.set_defaults(func=run)
     return ap
 
@@ -235,7 +280,8 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
 def run(args) -> int:
     paths = {"profile": args.profile, "weights": args.weights,
              "orders": args.orders, "shipping": args.shipping,
-             "overrides": args.overrides, "portal": args.portal}
+             "overrides": args.overrides, "portal": args.portal,
+             "store": args.store}
     if not any(paths.values()):
         # No paths given: check whatever this installation has configured. Reading .env is
         # deliberate here and only here — it is the one command whose job is to answer

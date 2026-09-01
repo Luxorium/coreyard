@@ -1,0 +1,48 @@
+{
+  "_comment": [
+    "One file for this storefront's policy. Copy to store.json and point STORE_FILE at it,",
+    "or leave it at the repository root where CoreYard finds it by default.",
+    "",
+    "Every section is optional, and an absent section means CoreYard's neutral default.",
+    "Keys beginning with an underscore are comments; JSON has none.",
+    "",
+    "The individual STORE_*_FILE settings still work and still win, so a site that already",
+    "has four separate files does not have to change anything."
+  ],
+  "version": 1,
+
+  "profile": {
+    "_comment": [
+      "What this yard is willing to claim about a part. The defaults state only what the",
+      "yard data supports: used, OEM, off an inventoried donor vehicle. They deliberately",
+      "do not say every part was tested or inspected, because that is not true at every",
+      "yard and a tool must not put a claim in a seller's mouth.",
+      "See coreyard/profile.py for every key and its default."
+    ],
+    "title_include_oem": false,
+    "metafield_namespace": "coreyard"
+  },
+
+  "weights": {
+    "_comment": [
+      "Estimated packed shipping weights by part type, used when the source system has no",
+      "weight. Absent means CoreYard estimates nothing and Shopify sees no weight."
+    ]
+  },
+
+  "shipping": {
+    "_comment": [
+      "How each part ships, and the tag that tells the storefront so.",
+      "Absent means CoreYard classifies nothing."
+    ]
+  },
+
+  "orders": {
+    "_comment": [
+      "What closes a storefront order. The default is tag-and-note only, because whether",
+      "creating a fulfillment is correct depends on the site's shipping arrangements:",
+      "fulfilling under a shipping app that has not bought the label yet costs the buyer",
+      "their tracking number, and never fulfilling leaves the order open forever."
+    ]
+  }
+}

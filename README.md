@@ -32,6 +32,25 @@ lives in local configuration, never in this repository.
 
 Source of truth is the yard system's own database — no middleware, no export files.
 
+## Try it in a minute
+
+CoreYard can run with no database, no photo share and no credentials, on a bundled
+seven-part example yard:
+
+```bash
+./install.sh --no-deps --yes          # or: pip install -e .
+bin/coreyard init --demo              # writes .env and store.json
+bin/coreyard sync --sink csv --dry-run
+```
+
+That renders real products — titles, descriptions, tags, weights, fitment — and writes
+`out/products.csv`. Nothing is published anywhere.
+
+To point it at a real yard, `bin/coreyard init` asks the same questions interactively. A
+yard whose inventory does not live in a SQL Server database can export a CSV or SQLite file
+whose columns are named after `Part` fields and set `COREYARD_SOURCE=tabular:<path>`; see
+`examples/parts.csv`.
+
 ## Status
 
 | Layer | State |
@@ -203,6 +222,20 @@ cp .env.example .env && chmod 600 .env
 You will also need `smbclient` from your distro's Samba client package.
 
 ## One-time setup
+
+`bin/coreyard init` writes both files a site owns: `.env` for connection and identity
+settings, and `store.json` for storefront policy. Run it first; the rest of this section is
+the reference for what it wrote and what else can be set.
+
+`store.json` holds this storefront's policy as four optional sections — `profile` (what the
+yard is willing to claim), `weights`, `shipping` and `orders`. Copy `store.example.json` and
+edit, or point `STORE_FILE` elsewhere. Every section is optional and an absent one means
+CoreYard's neutral default. The older `STORE_PROFILE_FILE`, `STORE_WEIGHT_RULES_FILE`,
+`STORE_SHIPPING_POLICY_FILE` and `STORE_ORDER_POLICY_FILE` settings still work and still
+take precedence, so an installation with four separate files need not change anything.
+
+`bin/coreyard validate` checks all of it offline.
+
 
 ### 1. Database access — no server changes required
 Many installs expose SQL Server **only** through the `\sql\query` named pipe over SMB (SMB1

@@ -31,6 +31,8 @@ READ_ONLY = frozenset({"status", "doctor", "audit", "validate", "images", "schem
 # name -> (module path, help text). The module supplies its own flags via add_arguments().
 # Order is the order `--help` prints them: the daily verbs first, then the occasional ones.
 COMMANDS: list[tuple[str, str, str]] = [
+    ("init", "coreyard.setup_wizard",
+     "write a working .env and store.json (start here)"),
     ("status", "coreyard.status",
      "what the pipeline believes right now (read-only)"),
     ("doctor", "coreyard.doctor",
