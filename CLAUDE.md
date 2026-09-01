@@ -321,6 +321,36 @@ new part. Dropping those made `sync inventory` print "0 to publish" against 1,26
 changes, which reads as "the catalogue is in step". It self-heals as runs rewrite rows. **`parts.fingerprint` is never rewritten by a
 migration.**
 
+### One snapshot, several channels
+
+`parts` is the canonical **yard-side** snapshot and is deliberately not keyed by channel:
+its fingerprint hashes the rendered product, which is the same product whichever channel
+publishes it. What differs per channel is whether that channel *received* it, and with two
+channels one succeeding while the other fails is the normal case, not the exception.
+
+`channel_state(channel, r_number, fingerprint, remote_id, status, last_synced, last_error)`
+records what each channel holds. Three rules make it worth having:
+
+- A row is written only **after** a publish returns cleanly, for the same reason
+  `CHECKPOINT_EVERY` banks only completed work.
+- `record_channel_failure` records an error **without** advancing the fingerprint, so a
+  failed part stays in `channel_pending` and is retried. Advancing it would settle the part
+  on the strength of the attempt rather than the outcome.
+- `remote_id` and `status` survive a write that does not carry them, so a price-only update
+  cannot lose the listing id it was applied to.
+
+`status` prints a per-channel line only once a second channel exists — with one, the
+canonical snapshot already says everything it would, and a line that repeats another line
+is a line people stop reading.
+
+**A run may only record what it published.** The scoped and delta paths were built this way
+(`state.update(subset(...))`); the full path was not, and committed everything it extracted.
+A part the diff called added-or-changed that never landed was therefore written at its *new*
+fingerprint, so the next run found it unchanged and never retried it — the change lost
+silently and permanently. `run_sync._committable` is the one place that decides this now:
+an outstanding part keeps the version the storefront actually has, a never-published part
+stays absent so it still reads as new, and the photo manifest moves with the fingerprint.
+
 ### The photo manifest, and banking progress
 
 `image_fingerprint` hashes the share's manifest — name, size and modification time — not
