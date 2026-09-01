@@ -12,9 +12,8 @@ sale as a work order in the source system.
 
 This is a generic project, not a site-specific script. Never hardcode an installation's
 host, credentials, business identity, storefront copy, claims, shipping policy, schema, or
-handle prefix. Site configuration belongs in `.env` and in the files it names
-(`STORE_PROFILE_FILE`, `STORE_WEIGHT_RULES_FILE`, `STORE_SHIPPING_POLICY_FILE`,
-`STORE_ORDER_POLICY_FILE`); source table and column names belong in the local, gitignored
+handle prefix. Site configuration belongs in `.env` and in `store.json` (sections `profile`, `weights`,
+`shipping`, `orders`; the older per-file settings still work and still win); source table and column names belong in the local, gitignored
 `schema.json`. Keep `schema.example.json` generic.
 
 The listing portal behind `coreyard ebay` follows the same rule one level further out.
@@ -91,6 +90,8 @@ supported; there is no build, formatter, or linter.
 Configured/live operations:
 
 ```bash
+bin/coreyard init                          # write .env + store.json (start here)
+bin/coreyard init --demo                   # ...against the bundled example yard
 bin/coreyard doctor                        # installation + liveness, read-only
 bin/coreyard status                        # what the pipeline believes, read-only
 bin/coreyard sync --dry-run
@@ -169,6 +170,8 @@ rendering and fingerprinting so customer-facing strings are not hardcoded.
 
 ```text
 coreyard/cli.py      the one command tree; every command is mounted here
+coreyard/setup_wizard.py  `coreyard init`: writes a working .env and store.json
+coreyard/store.py    one store file (profile/weights/shipping/orders), explicit files win
 coreyard/status.py   read-only overview of what the pipeline believes
 coreyard/doctor.py   installation and liveness diagnostics (shared with scripts/healthcheck.py)
 coreyard/ops.py      run history in the state database
