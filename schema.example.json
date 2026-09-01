@@ -99,6 +99,13 @@
     "storefront policy, and lives in STORE_ORDER_POLICY_FILE."
   ],
   "order_status": "SELECT DISTINCT o.STOREFRONT_REFERENCE_COLUMN AS order_reference, o.ORDER_NUMBER_COLUMN AS external_reference, 'invoiced' AS status FROM dbo.INVOICE_LINE_TABLE il JOIN dbo.INVOICE_TABLE inv ON inv.INVOICE_ID_COLUMN = il.INVOICE_ID_COLUMN JOIN dbo.WORKORDER_TABLE o ON o.ORDER_ID_COLUMN = il.ORDER_ID_COLUMN AND o.IS_CURRENT_REVISION_FLAG = 1 WHERE o.STOREFRONT_REFERENCE_COLUMN LIKE N'#%'",
+  "_part_types": [
+    "OPTIONAL. Every part type your system can file a part under, not only the ones you",
+    "stock today. `coreyard part-types` reports which of them the renderer has shopper",
+    "wording for, so the gaps are visible before a worker files a part under one of them.",
+    "Return columns named part_type_code and part_type."
+  ],
+  "part_types": "SELECT t.PART_TYPE_CODE_COLUMN AS part_type_code, RTRIM(CAST(t.DESCRIPTION_COLUMN AS varchar(40))) AS part_type FROM dbo.PART_TYPE_TABLE t",
   "_enrichment": [
     "OPTIONAL, and OFF unless COREYARD_ENRICH is set in .env. Both of these feed the",
     "rendered product, so switching them on changes every fingerprint and makes the next",

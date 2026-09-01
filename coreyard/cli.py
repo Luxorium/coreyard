@@ -49,6 +49,8 @@ COMMANDS: list[tuple[str, str, str]] = [
      "orders: serve / poll / register / retry / replay / status / sync-status"),
     ("images", "coreyard.yms.images",
      "list or fetch one part's photos from the share"),
+    ("part-types", "coreyard.yms.part_types",
+     "every part type the yard can inventory, and where its wording runs out"),
     ("schema", "coreyard.yms.discover_schema",
      "introspect the source database and rank likely tables"),
     ("validate", "coreyard.validate",

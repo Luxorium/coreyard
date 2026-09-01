@@ -195,6 +195,13 @@ class SourceSchema:
     # `status`. Absent => this installation cannot sync order status back to the storefront.
     order_status: str = ""
 
+    # --- optional part-type catalogue ---------------------------------------------------
+    # (part_type_code, part_type) for every type this yard can inventory, including the ones
+    # it holds none of today. The extract already names the types actually in stock; this
+    # answers the different question of what may turn up tomorrow, which is what an
+    # unattended channel has to be ready for. Absent => only types seen in an extract.
+    part_types: str = ""
+
     # --- optional catalogue enrichment (off unless the renderer is asked for it) --------
     # (part_type_code, alias) pairs: alternate shopper vocabulary for a part type.
     part_type_aliases: str = ""
@@ -204,6 +211,10 @@ class SourceSchema:
     @property
     def supports_delta(self) -> bool:
         return bool(self.modified_at)
+
+    @property
+    def supports_part_types(self) -> bool:
+        return bool(self.part_types)
 
     @property
     def supports_order_status(self) -> bool:
@@ -261,6 +272,7 @@ class SourceSchema:
             modified_at=(data.get("modified_at") or "").strip(),
             order_status=(data.get("order_status") or "").strip(),
             image_changes=(data.get("image_changes") or "").strip(),
+            part_types=(data.get("part_types") or "").strip(),
             part_type_aliases=(data.get("part_type_aliases") or "").strip(),
             vehicle_details=(data.get("vehicle_details") or "").strip(),
             order_write=OrderWrite.from_dict(write) if write else None,

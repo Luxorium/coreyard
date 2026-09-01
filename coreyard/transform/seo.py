@@ -81,7 +81,37 @@ _NOT_ACRONYM = {
     "VAN", "CAB", "BUS", "WGN", "TRK", "PUP",
     "CAP", "SUN", "BOX", "PAN", "ARM", "FAN", "BAR", "KIT", "SET", "LID",
     "ROD", "PIN", "NUT", "OIL", "GAS", "AIR", "HUB", "TOP", "JAR", "MOD",
+    "BAG", "KEY", "CAM", "TIE", "RIM", "JACK",
     "PUMP", "DOOR",
+}
+
+# Abbreviations the source part-type table uses, expanded to the word a shopper types.
+# This is vocabulary, not merchandising: "CYL" means cylinder at every yard that files a
+# brake master cylinder, so expanding it is a fact. *Which* wording sells the part —
+# "Brake Master Cylinder" against "Master Cylinder Brake Booster" — is a decision, and
+# stays in the profile's `part_types`.
+#
+# Some of these are the yard's own abbreviations and some are the column truncating:
+# "BACK GLASS REGULATO" is a 20-character varchar cutting "REGULATOR" short, which no
+# amount of title-casing repairs.
+_ABBREV = {
+    "assy": "Assembly", "assm": "Assembly", "asy": "Assembly", "pts": "Parts",
+    "reg": "Regulator", "regulato": "Regulator", "cyl": "Cylinder",
+    "cntrl": "Control", "contr": "Control", "mod": "Module",
+    "wdsh": "Windshield", "dsh": "Dash", "rad": "Radiator", "cond": "Condenser",
+    "supp": "Support", "rein": "Reinforcement", "res": "Reservoir",
+    "ext": "Extension", "mtd": "Mounted", "int": "Interior", "dr": "Door",
+    "susp": "Suspension", "crossm": "Crossmember", "trans": "Transmission",
+    "eng": "Engine", "misc": "Miscellaneous", "elec": "Electrical",
+    "fr": "Front", "rr": "Rear", "temp": "Temperature", "spkr": "Speaker",
+}
+
+# Short all-caps tokens that really are acronyms a shopper types, so a residue check must
+# not report them as an abbreviation nobody expanded.
+_REAL_ACRONYMS = {
+    "AC", "ABS", "PS", "GPS", "TV", "EGR", "VIN", "LED", "HID", "AWD", "4WD",
+    "RH", "LH", "OEM", "ECU", "ECM", "PCM", "SRS", "MAF", "AT", "MT", "DVD",
+    "CD", "USB", "TPMS", "EVAP", "FOB", "SUV", "ABC",
 }
 
 
@@ -153,10 +183,42 @@ def expand_part_type(pt: str, store: "StoreProfile | CatalogProfile | None" = No
         return overrides[key]
     if key in _PART_TYPE:
         return _PART_TYPE[key]
-    # generic cleanup: title-case, drop trailing " Pts"/" Assy"
-    base = re.sub(r"\bAssy\b", "Assembly", pt.strip(), flags=re.I)
-    base = re.sub(r"\bPts\b", "Parts", base, flags=re.I)
+    # Generic cleanup: expand the yard's abbreviations, then title-case what is left.
+    # Expansion runs first because it turns three-letter tokens the caser would shout
+    # ("CYL", "REG") into ordinary words before it ever sees them.
+    # The trailing period is consumed with the token so "Misc. Parts" expands to
+    # "Miscellaneous Parts" rather than "Miscellaneous. Parts".
+    base = re.sub(r"[A-Za-z]+\.?",
+                  lambda m: _ABBREV.get(m.group(0).lower().rstrip("."), m.group(0)),
+                  pt.strip())
     return _smart_title(base)
+
+
+def residual_abbreviations(text: str) -> list[str]:
+    """Short shouted tokens left in an expanded part-type name.
+
+    What the coverage report actually wants to count. "Caliper" needs no curated wording —
+    it is already the word a shopper types — whereas "Wiper Motor, WDSH" is a title nobody
+    searches for, and only the second is worth anyone's attention.
+    """
+    # Tokenised with digits included so "4WD" stays one token rather than yielding a
+    # bare "WD" that looks like an abbreviation nobody expanded. A token carrying a digit
+    # is a spec ("4WD", "V6"), never a truncated word, so it is never reported.
+    return [token for token in re.findall(r"[A-Za-z0-9]{2,6}", text or "")
+            if token.isupper() and not any(c.isdigit() for c in token)
+            and token not in _REAL_ACRONYMS]
+
+
+def has_expansion(pt: str, store: "StoreProfile | CatalogProfile | None" = None) -> bool:
+    """Whether a table names this part type, rather than the generic cleanup guessing.
+
+    The difference is invisible in a rendered title and expensive in search: a named type
+    lists as "Wheel Cylinder", an unnamed one as whatever abbreviation the yard typed,
+    title-cased. Counting them is how :mod:`coreyard.yms.part_types` reports where the
+    catalogue's vocabulary actually runs out.
+    """
+    key = re.sub(r"\s+", " ", pt.strip().lower())
+    return key in _policy(store).part_types or key in _PART_TYPE
 
 
 def _cap(s: str, n: int) -> str:
