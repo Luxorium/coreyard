@@ -137,6 +137,24 @@ def row_to_part(row: dict[str, Any]) -> Part:
     return part
 
 
+def _elsewhere():
+    """The configured source, when this site's inventory does not come from the database.
+
+    The three entry points below are what the rest of CoreYard has always called, so
+    honouring ``COREYARD_SOURCE`` here makes every caller work with a CSV or SQLite export
+    without twenty modules learning about sources. Unset — or ``database`` — returns None
+    and the original path runs untouched, which is what keeps this change invisible to
+    every existing installation.
+    """
+    from coreyard.config import _get
+
+    spec = str(_get("COREYARD_SOURCE", "") or "").strip()
+    if not spec or spec.lower().split(":")[0] == "database":
+        return None
+    from coreyard import source
+    return source.load(spec)
+
+
 def fetch_parts(limit: Optional[int] = None, images_only: Optional[bool] = None) -> list[Part]:
     """Connect (read-only, over the SMB named pipe) and return listable parts.
 
@@ -148,6 +166,9 @@ def fetch_parts(limit: Optional[int] = None, images_only: Optional[bool] = None)
     even though the resulting ``Part`` list is small. Read bounded pages on one connection
     so a large catalogue cannot exhaust the host.
     """
+    other = _elsewhere()
+    if other is not None:
+        return other.parts(limit=limit, images_only=images_only)
     mapping = schema.load()
     if images_only is None:
         images_only = photos_required(mapping)
@@ -189,6 +210,9 @@ def fetch_parts_by_r_number(r_numbers: list[str]) -> dict[str, Part]:
     """
     if not r_numbers:
         return {}
+    other = _elsewhere()
+    if other is not None:
+        return other.parts_by_r_number(list(r_numbers))
     sql = schema.load().build_lookup_query(sorted(set(r_numbers)))
     with connect() as conn:
         rows = query(conn, sql)
@@ -205,6 +229,9 @@ def listable_r_numbers(images_only: Optional[bool] = None) -> set[str]:
     as :func:`fetch_parts`, because a reconciliation that used a different definition would
     retire the parts sync had just published.
     """
+    other = _elsewhere()
+    if other is not None:
+        return other.listable_r_numbers(images_only=images_only)
     mapping = schema.load()
     if images_only is None:
         images_only = photos_required(mapping)
