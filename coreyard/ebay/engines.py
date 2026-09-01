@@ -112,6 +112,20 @@ def plan_prices(
     return ([item for item in decisions if item["old_price"] != item["new_price"]], held)
 
 
+def merge_overrides(existing: dict, fresh: dict) -> dict:
+    """Layer fresh per-R# decisions over the file the renderer already reads.
+
+    The override file is a replacement, not a patch: the renderer publishes what it
+    contains and nothing else. Any writer that emitted only its own decisions would
+    silently revert every product decided by a different pass, so every writer merges.
+    """
+    parts = dict((existing or {}).get("parts") or {})
+    for r_number, override in ((fresh or {}).get("parts") or {}).items():
+        parts[str(r_number)] = {**parts.get(str(r_number), {}), **override}
+    return {"version": (fresh or {}).get("version", 1),
+            "parts": dict(sorted(parts.items()))}
+
+
 def build_overrides(
     details: dict[str, dict],
     title_plan: list[dict],

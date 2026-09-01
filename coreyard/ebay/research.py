@@ -1,9 +1,17 @@
-"""Condition-aware engine pricing over pre-collected eBay comparables.
+"""Condition-aware pricing of one physical unit, over pre-collected comparables.
 
-Research runs per listing, because mileage, grade, test status, defects, and time in
-inventory can make two engines in one interchange group worth very different amounts.
-Comparables are supplied to the model rather than searched on every call; results are
-checkpointed after every batch and all hard price/disclosure guards are enforced in code.
+:mod:`coreyard.ebay.comps` answers what a *part like this* sells for: it scores public
+listings against the facts the renderer knows and takes a median.  That is the market, and
+it is the same market for every unit in an interchange group.  This module answers the
+second question — what is *this* unit worth — because mileage, grade, whether anyone could
+test it, a stated defect, and how long it has sat can make two units of one interchange
+worth very different amounts, and the comparable median says nothing about any of them.
+
+It is arithmetic, not judgement: a market anchor, a list of named percentage adjustments,
+and hard guards over the result.  Every price carries the adjustments that produced it in
+``reasoning``, so a reviewer reads why rather than trusting a number.  That is the whole
+reason this is a program — an answer nobody can check is not reviewable at 20,000
+listings, and the yard cannot afford to have one person read them all either way.
 """
 
 from __future__ import annotations
@@ -14,57 +22,14 @@ import re
 from decimal import Decimal
 from pathlib import Path
 
-from coreyard.ai import AIError, RateLimited, ask_json, batches, deadline_now
 from coreyard.transform.pricing import charm, parse_money
 
+# The last-resort floor, for a caller that supplies no better one. A part type's own
+# floor is anchored to the yard's retail price (``comps.floor_for``) and reaches this
+# module on the group, because a table of 143 hand-maintained floors would still say
+# nothing about the individual part in front of it.
 FLOOR = Decimal("199.99")
 MAX_OVER_MEDIAN = Decimal("1.6")
-
-SYSTEM = """You price used OEM engine assemblies for a US auto-recycling yard's eBay
-catalogue. You receive real eBay comparables that were already collected and filtered.
-Never invent a comparable and never cite one absent from the supplied list."""
-
-RULES = """Price every listing individually, even when listings share an interchange.
-
-1. Anchor on the supplied comparables, not the current yard price. Prefer domestic_median.
-   Imported low-mileage units marked jdm are ceiling context, not the domestic anchor.
-2. Target a sale within 30-45 days: at or slightly below the domestic median for an
-   average engine.
-3. Adjust for THIS engine's mileage, tested/not-tested note, days in inventory, and grade.
-   miles 0 means unknown, not zero. Older stock must never be adjusted upward for age.
-4. needs_disclosure is true only for an explicit defect/missing component or an explicit
-   inability to test. The mere absence of a TESTED note is normal, not a disclosure.
-5. With no usable comparable, return confidence none and suggested_price 0. Never guess.
-6. USD excluding shipping, one engine, never below $199.99.
-7. reasoning is one sentence. evidence is the two supplied comparables that drove the
-   result, one per line, copied rather than invented.
-
-Return exactly one entry for every supplied listing_id."""
-
-SCHEMA = {
-    "type": "object",
-    "properties": {"prices": {"type": "array", "items": {
-        "type": "object",
-        "properties": {
-            "listing_id": {"type": "string"},
-            "suggested_price": {"type": "number"},
-            "market_anchor": {"type": "number"},
-            "confidence": {"type": "string", "enum": ["high", "medium", "low", "none"]},
-            "basis": {"type": "string", "enum": ["domestic", "jdm", "mixed", "none"]},
-            "needs_disclosure": {"type": "boolean"},
-            "condition_summary": {"type": "string"},
-            "reasoning": {"type": "string"},
-            "evidence": {"type": "string"},
-        },
-        "required": [
-            "listing_id", "suggested_price", "market_anchor", "confidence", "basis",
-            "needs_disclosure", "condition_summary", "reasoning", "evidence",
-        ],
-        "additionalProperties": False,
-    }}},
-    "required": ["prices"],
-    "additionalProperties": False,
-}
 
 _DEFECT = re.compile(
     r"\bneeds?\b|bad\s+crank|\bbroken\b|\bcrack|pull and check|check if core|"
@@ -95,7 +60,15 @@ def _age_days(detail: dict, today: dt.date) -> int | None:
 
 def build_items(groups: dict[str, list[dict]], details: dict, comps: dict,
                 keys: list[str], today: dt.date | None = None,
-                max_comps: int = 10) -> list[dict]:
+                max_comps: int = 10, mileage_matters: bool = True) -> list[dict]:
+    """Assemble one priceable item per interchange group.
+
+    ``mileage_matters`` says whether an absent mileage is a fact about the part or just a
+    field this part type never fills in. On an engine it is a fact — an engine sold without
+    a reading is worth less than one with a low one — so an unknown reading is discounted.
+    On a tail lamp the donor's odometer is barely a signal and is usually absent anyway, and
+    discounting every one of them for it would mark down a whole part type for nothing.
+    """
     today = today or dt.date.today()
     items = []
     for key in keys:
@@ -124,6 +97,8 @@ def build_items(groups: dict[str, list[dict]], details: dict, comps: dict,
             "comp_median": comp.get("comp_median"),
             "comp_low": comp.get("comp_low"),
             "comp_high": comp.get("comp_high"),
+            "floor": comp.get("floor"),
+            "mileage_matters": mileage_matters,
             "comps": [{
                 "price": item["price"], "miles": item.get("miles", 0),
                 "jdm": bool(item.get("jdm")), "title": str(item["title"])[:78],
@@ -134,10 +109,19 @@ def build_items(groups: dict[str, list[dict]], details: dict, comps: dict,
 
 
 def apply_guards(record: dict, listing: dict, group: dict) -> dict:
-    """Make price floors, comp ceilings, and defect holds independent of the model."""
+    """Enforce the floor, the comp ceiling and the disclosure hold over a proposed price.
+
+    Deliberately separate from the calculation that proposed it. A guard that lives inside
+    the thing it guards is not a guard, and these three are the ones whose failure is
+    expensive: a price under the floor gives the part away, one far over the comparables
+    never sells, and an undisclosed defect is a return and a defect case.
+
+    ``group["floor"]`` carries this part type's own floor when the caller knows it.
+    """
     out = dict(record)
     suggested = parse_money(record.get("suggested_price")) or Decimal("0")
-    out.update(raw_suggested=str(suggested), floor=str(FLOOR))
+    floor = parse_money(group.get("floor")) or FLOOR
+    out.update(raw_suggested=str(suggested), floor=str(floor))
     flags: list[str] = []
     if suggested <= 0:
         out.update(floored=False, capped=False, suggested_price=0.0,
@@ -149,10 +133,10 @@ def apply_guards(record: dict, listing: dict, group: dict) -> dict:
         if suggested > ceiling:
             flags.append(f"capped from ${suggested} to {MAX_OVER_MEDIAN}x comp median")
             suggested = ceiling
-    out["floored"] = suggested < FLOOR
+    out["floored"] = suggested < floor
     if out["floored"]:
         flags.append("market cleared below the price floor")
-        suggested = FLOOR
+        suggested = floor
     if record.get("needs_disclosure") or _DEFECT.search(listing.get("conditions") or ""):
         out["needs_disclosure"] = True
         flags.append("condition caveat must be disclosed before publishing")
@@ -164,46 +148,13 @@ def apply_guards(record: dict, listing: dict, group: dict) -> dict:
     return out
 
 
-def research_batch(items: list[dict], *, model_name: str | None = None,
-                   deadline: float | None = None):
-    prompt = (
-        f"{RULES}\n\nPrice {sum(len(x['listings']) for x in items)} engine listings "
-        f"across {len(items)} interchange groups:\n\n"
-        f"{json.dumps(items, separators=(',', ': '), indent=1)}"
-    )
-    answer, usage = ask_json(
-        prompt, SCHEMA, model_name=model_name, system=SYSTEM, allow_web=False,
-        deadline=deadline
-    )
-    sources = {listing["listing_id"]: (listing, group)
-               for group in items for listing in group["listings"]}
-    priced = []
-    for result in answer.get("prices", []):
-        source = sources.get(str(result.get("listing_id")))
-        if not source:
-            continue
-        listing, group = source
-        record = apply_guards(result, listing, group)
-        record.update({
-            "interchange": group["interchange"], "title": listing["title"],
-            "miles": listing["miles"], "grade": listing["grade"],
-            "conditions": listing["conditions"],
-            "days_in_inventory": listing["days_in_inventory"],
-            "current_price": listing["current_price"],
-            "comp_count": group.get("comp_count") or 0,
-            "comp_domestic_median": group.get("domestic_median"),
-            "comp_median": group.get("comp_median"),
-        })
-        priced.append(record)
-    return priced, usage
+def price_listing(listing: dict, group: dict) -> dict:
+    """Price one unit from its comparable median and its own condition.
 
-
-def deterministic_record(listing: dict, group: dict) -> dict:
-    """Price from the real comp median when the subscription model is rate-limited.
-
-    This is intentionally conservative and explainable. It never invents a market anchor:
-    without a supplied median it returns no price, exactly like the model path. Existing AI
-    decisions are preserved by :func:`fill_deterministic`; this fills only missing rows.
+    Conservative and explainable by construction. It never invents a market anchor: with no
+    supplied median it returns no price at all rather than a guess, because a listing left
+    at the yard's own price is a listing that merely does not improve, while an invented one
+    is wrong in a direction nobody can predict.
     """
     anchor = group.get("domestic_median") or group.get("comp_median")
     comps = group.get("comps") or []
@@ -219,7 +170,9 @@ def deterministic_record(listing: dict, group: dict) -> dict:
     factor = Decimal("0.96")
     reasons = ["96% of the supplied domestic median"]
     miles = int(listing.get("miles") or 0)
-    if miles == 0:
+    if not group.get("mileage_matters", True):
+        pass
+    elif miles == 0:
         factor -= Decimal("0.05")
         reasons.append("unknown mileage -5%")
     elif miles < 60000:
@@ -298,10 +251,14 @@ def _checkpoint(path: Path, records: dict[str, dict]) -> None:
     temporary.replace(path)
 
 
-def fill_deterministic(groups: dict[str, list[dict]], details: dict, comps: dict,
+def price_all(groups: dict[str, list[dict]], details: dict, comps: dict,
                        output: Path, *, keys: list[str] | None = None,
                        resume: bool = True) -> list[dict]:
-    """Fill missing researched listings from comps without replacing completed AI work."""
+    """Price every listing in the selected groups, checkpointing as it goes.
+
+    Resumable: a listing already in ``output`` is left alone, so a run stopped by its
+    deadline resumes where it stopped rather than repricing what it had already decided.
+    """
     done: dict[str, dict] = {}
     if resume and output.is_file():
         done = {str(item["listing_id"]): item
@@ -314,7 +271,7 @@ def fill_deterministic(groups: dict[str, list[dict]], details: dict, comps: dict
             listing_id = listing["listing_id"]
             if listing_id in done:
                 continue
-            record = deterministic_record(listing, group)
+            record = price_listing(listing, group)
             record.update({
                 "interchange": group["interchange"], "title": listing["title"],
                 "miles": listing["miles"], "grade": listing["grade"],
@@ -328,40 +285,4 @@ def fill_deterministic(groups: dict[str, list[dict]], details: dict, comps: dict
             })
             done[listing_id] = record
     _checkpoint(output, done)
-    return list(done.values())
-
-
-def run(groups: dict[str, list[dict]], details: dict, comps: dict, output: Path,
-        *, keys: list[str] | None = None, batch_size: int = 20,
-        model_name: str | None = None, resume: bool = True, log=print) -> list[dict]:
-    keys = sorted(keys if keys is not None else groups)
-    done: dict[str, dict] = {}
-    if resume and output.is_file():
-        try:
-            done = {str(item["listing_id"]): item
-                    for item in json.loads(output.read_text(encoding="utf-8"))}
-        except (OSError, ValueError, KeyError, TypeError):
-            done = {}
-    current_ids = {str(row["listing_id"]) for key in keys for row in groups[key]}
-    done = {key: value for key, value in done.items() if key in current_ids}
-    todo = [key for key in keys
-            if any(str(row["listing_id"]) not in done for row in groups[key])]
-    remaining = sum(len(groups[key]) for key in todo)
-    log(f"{len(keys)} groups: {len(done)} listings already priced, "
-        f"{remaining} listings across {len(todo)} groups to go")
-    deadline = deadline_now()
-    for number, chunk in enumerate(batches(todo, batch_size), 1):
-        try:
-            priced, usage = research_batch(
-                build_items(groups, details, comps, chunk), model_name=model_name,
-                deadline=deadline
-            )
-        except (RateLimited, AIError) as exc:
-            log(f"  stopped before batch {number}: {exc}")
-            break
-        for record in priced:
-            done[str(record["listing_id"])] = record
-        _checkpoint(output, done)
-        log(f"  batch {number}: +{len(priced)} ({len(done)} total), "
-            f"{usage.get('output_tokens', 0):,} output tokens")
     return list(done.values())

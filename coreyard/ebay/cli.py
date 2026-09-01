@@ -13,7 +13,7 @@ from pathlib import Path
 from coreyard.config import REPO_ROOT, _get, load_env
 from coreyard.ebay.client import PortalClient
 from coreyard.ebay.portal import load as load_portal
-from coreyard.ebay import engines
+from coreyard.ebay import engines, link
 from coreyard.ebay.util import TITLE_MAX as EBAY_TITLE_MAX
 from coreyard.ebay.util import groups_by_interchange, truthy
 from coreyard.transform.pricing import money_str, parse_money
@@ -106,64 +106,6 @@ def details(args) -> int:
     return 0
 
 
-def catalog_titles(args) -> int:
-    """Generate guarded SEO title proposals for any normalized part-type slice."""
-    from coreyard.ebay import catalog_titles as titlegen
-
-    load_env()
-    accepted, rejected = titlegen.generate(
-        _read_json(args.listings), Path(args.out), batch_size=args.batch,
-        model_name=args.model, resume=not args.no_resume,
-    )
-    rejected_path = Path(args.out).with_name(Path(args.out).stem + "-held.json")
-    _write_json(rejected_path, rejected)
-    print(f"{len(accepted)} accepted groups, {len(rejected)} held.")
-    print(f"  -> {args.out}\n  -> {rejected_path}")
-    return 0
-
-
-def market_research(args) -> int:
-    """Research general auto-part prices using the configured local AI transport."""
-    from coreyard.ebay import market_research as research
-
-    load_env()
-    groups = groups_by_interchange(_read_json(args.listings))
-    keys = sorted(groups)[:args.limit] if args.limit else None
-    records = research.run(
-        groups, Path(args.out), keys=keys, batch_size=args.batch,
-        workers=args.workers, model_name=args.model, resume=not args.no_resume,
-    )
-    print(f"{len(records)} interchange groups researched -> {args.out}")
-    return 0
-
-
-def price_plan(args) -> int:
-    """Turn general market research into a guarded portal price plan."""
-    keep, held = [], []
-    for item in _read_json(args.research):
-        new = parse_money(item.get("suggested_price")) or Decimal("0")
-        reason = ""
-        if item.get("confidence") in {"none", "low"}:
-            reason = f"confidence={item.get('confidence')}"
-        elif int(item.get("comp_count") or 0) < args.min_comps and not item.get("floored"):
-            reason = f"only {item.get('comp_count') or 0} comparables"
-        elif new <= 0:
-            reason = "no suggested price"
-        elif args.max_price and new > Decimal(str(args.max_price)):
-            reason = f"price exceeds {money_str(args.max_price)} ceiling"
-        elif item.get("needs_review") and not args.include_unknown_material:
-            reason = "material unknown"
-        record = {**item, "new_price": money_str(new), "reason": reason}
-        (held if reason else keep).append(record)
-    _write_json(Path(args.out), keep)
-    held_path = Path(args.out).with_name(Path(args.out).stem + "-held.json")
-    _write_json(held_path, held)
-    print(f"{sum(len(x.get('listing_ids') or []) for x in keep)} listings ready; "
-          f"{len(held)} groups held.")
-    print(f"  -> {args.out}\n  -> {held_path}")
-    return 0
-
-
 def apply_plans(args) -> int:
     """Dry-run or save reviewed generic title/price plans in the portal."""
     from coreyard.ebay import workflow
@@ -208,41 +150,40 @@ def marketplace_titles(args) -> int:
     from coreyard.config import load_store
     from coreyard.ebay import titles as titler
 
+    from coreyard.ebay import link
+
     load_env()
     listings = _read_json(args.listings)
     details_by_id = _read_json(args.details) if Path(args.details).is_file() else {}
-    wanted = sorted({
-        str((details_by_id.get(str(row["listing_id"])) or {}).get("r_number")
-            or row.get("r_number") or "").strip()
-        for row in listings
-    } - {""})
-    if not wanted:
-        raise SystemExit(
-            "no listing carries an R#; run `coreyard ebay details` first so the portal's "
-            "own edit forms can supply it"
-        )
     if args.parts:
         from coreyard.yms.inventory import row_to_part
-        parts = {str(item["r_number"]): row_to_part(item)
-                 for item in _read_json(args.parts)}
+        catalogue = [row_to_part(item) for item in _read_json(args.parts)]
     else:
+        from coreyard.yms.inventory import fetch_parts
+        # Every part, not only the listable ones: the portal lists parts without photos,
+        # and a listing whose part this refuses to identify is a listing left alone.
+        catalogue = fetch_parts(images_only=False)
+    resolved, unresolved = link.resolve(listings, catalogue)
+    resolved, unresolved = link.merge_details(
+        resolved, unresolved, details_by_id,
+        {str(part.r_number).strip(): part for part in catalogue},
+    )
+    print(f"{len(listings)} listings; {len(resolved)} resolved to a yard part, "
+          f"{len(unresolved)} not")
+    if resolved and not args.parts:
         from coreyard.yms.db import connect
-        from coreyard.yms.inventory import fetch_parts_by_r_number
         from coreyard.yms.interchange import InterchangeResolver
 
-        parts = fetch_parts_by_r_number(wanted)
         # Fitment is what turns a donor vehicle into the list of vehicles a part fits, and
         # the renderer titles from it. Resolving it here is not an embellishment: without
         # it this path would render a *different* title from the one the sync publishes,
         # which is the entire thing this command exists to avoid.
-        if parts:
-            with connect() as conn:
-                InterchangeResolver(conn).attach(list(parts.values()))
-    print(f"{len(listings)} listings, {len(wanted)} distinct R#, "
-          f"{len(parts)} matched in the yard")
-    accepted, held = titler.decisions(
-        listings, details_by_id, parts, load_store(), limit=args.limit,
+        with connect() as conn:
+            InterchangeResolver(conn).attach(list(resolved.values()))
+    accepted, held = titler.decisions_for(
+        listings, resolved, load_store(), limit=args.limit,
     )
+    held.extend({**item, "reason": item["reason"]} for item in unresolved)
     grouped = titler.group_for_portal(accepted)
     _write_json(Path(args.out), grouped)
     held_path = Path(args.out).with_name(Path(args.out).stem + "-held.json")
@@ -261,21 +202,6 @@ def marketplace_titles(args) -> int:
     return 0
 
 
-def engine_comps(args) -> int:
-    """Collect public comparables for normalized engine groups without AI usage."""
-    from coreyard.ebay import engine_comps as collector
-
-    listings = _read_json(args.listings)
-    details_by_id = _read_json(args.details) if Path(args.details).is_file() else {}
-    records = collector.collect(
-        groups_by_interchange(listings), details_by_id, Path(args.pages),
-        Path(args.out), delay=args.delay, retry_thin=not args.no_retry_thin,
-    )
-    with_comps = sum(1 for item in records.values() if item.get("comp_count"))
-    print(f"{len(records)} groups, {with_comps} with comparables -> {args.out}")
-    return 0
-
-
 def part_comps(args) -> int:
     """Research comparables for one part type, whatever that part type is.
 
@@ -285,7 +211,7 @@ def part_comps(args) -> int:
     """
     from coreyard.config import load_store
     from coreyard.ebay import comps as research
-    from coreyard.ebay.engine_comps import fetch
+    from coreyard.ebay.index import fetch
     from coreyard.yms.db import connect
     from coreyard.yms.inventory import fetch_parts_by_r_number
     from coreyard.yms.interchange import InterchangeResolver
@@ -358,30 +284,6 @@ def part_comps(args) -> int:
     _write_json(out, done)
     with_comps = sum(1 for v in done.values() if v.get("comp_count"))
     print(f"{len(done)} parts researched, {with_comps} with comparables -> {out}")
-    return 0
-
-
-def wheel_comps_prepare(args) -> int:
-    from coreyard.ebay import market_index
-
-    pending = market_index.prepare(
-        _read_json(args.listings), _read_json(args.titles),
-        _read_json(args.research), Path(args.pages), Path(args.config),
-    )
-    print(f"{len(pending)} pages to fetch -> {args.config}")
-    return 0
-
-
-def wheel_comps_build(args) -> int:
-    from coreyard.ebay import market_index
-
-    records = market_index.build(
-        _read_json(args.listings), _read_json(args.titles),
-        _read_json(args.research), Path(args.pages),
-        overrides=market_index.load_overrides(args.overrides),
-    )
-    _write_json(Path(args.out), records)
-    print(f"{len(records)} groups researched -> {args.out}")
     return 0
 
 
@@ -597,8 +499,13 @@ def engine_plan(args) -> int:
     _write_json(price_path, price_plan)
     _write_json(title_path.with_name(title_path.stem + "-held.json"), title_held)
     _write_json(price_path.with_name(price_path.stem + "-held.json"), price_held)
-    _write_json(override_path, engines.build_overrides(
-        details_by_id, all_title_decisions, all_price_decisions
+    # Merged, not replaced: the renderer reads this file whole, so writing only what this
+    # plan decided would drop every decision made before it — including the nightly pass's
+    # — and the next sync would revert those products to their unreviewed copy.
+    _write_json(override_path, engines.merge_overrides(
+        _read_json(override_path) if override_path.is_file() else {},
+        engines.build_overrides(details_by_id, all_title_decisions,
+                                all_price_decisions),
     ))
     post_ready, post_held = engines.post_plan(
         listings, details_by_id, all_title_decisions, all_price_decisions
@@ -663,22 +570,195 @@ def engine_research(args) -> int:
         keys = [key for key in keys if (comps.get(key) or {}).get("comp_count")]
     if args.limit:
         keys = keys[:args.limit]
-    if args.deterministic:
-        result = research.fill_deterministic(
-            groups, details_by_id, comps, Path(args.out), keys=keys,
-            resume=not args.no_resume
-        )
-    else:
-        result = research.run(
-            groups, details_by_id, comps, Path(args.out), keys=keys,
-            batch_size=args.batch, model_name=args.model, resume=not args.no_resume
-        )
+    result = research.price_all(
+        groups, details_by_id, comps, Path(args.out), keys=keys,
+        resume=not args.no_resume,
+    )
     print(f"{len(result)} current listings researched -> {args.out}")
+    return 0
+
+
+def daily(args) -> int:
+    """One unattended pass: read the tab, title it, price it, save it in the portal.
+
+    Walks part types rather than the tab as a whole, because the portal's grid will not
+    serve a whole tab (see ``PortalClient.iter_listings``) but answers a filtered read
+    completely. Which types to walk comes from the yard, not from a hand-kept list, so a
+    type a worker files a part under tomorrow is walked tomorrow.
+    """
+    import requests
+
+    from coreyard.config import load_store
+    from coreyard.ebay import daily as driver
+    from coreyard.ebay import workflow
+    from coreyard.ebay.index import fetch
+    from coreyard.yms.db import connect
+    from coreyard.yms.interchange import InterchangeResolver
+    from coreyard.yms.inventory import fetch_parts
+
+    load_env()
+    store = load_store()
+    portal = load_portal(args.portal)
+    client = PortalClient(portal)
+
+    # Every part, not only the listable ones: the portal lists parts CoreYard would not
+    # publish to Shopify, and a listing whose part cannot be identified is left alone.
+    catalogue = fetch_parts(images_only=False)
+    print(f"{len(catalogue)} yard parts")
+
+    if args.part_type:
+        codes = [args.part_type]
+    else:
+        codes = sorted({str(part.part_type_code) for part in catalogue
+                        if part.part_type_code is not None},
+                       key=lambda code: (len(code), code))
+    print(f"walking {len(codes)} part type(s) of the {args.tab} tab")
+
+    rows: list[dict] = []
+    for number, code in enumerate(codes, 1):
+        try:
+            found = list(client.iter_listings(tab=args.tab, rows=args.rows,
+                                              part_type=code))
+        except Exception as exc:
+            # One part type the portal refuses must not abandon the types after it.
+            print(f"  part type {code}: {type(exc).__name__}: {str(exc)[:120]}",
+                  file=sys.stderr)
+            continue
+        rows.extend(found)
+        if found:
+            print(f"  [{number}/{len(codes)}] part type {code}: {len(found)} listing(s)")
+        if args.limit and len(rows) >= args.limit:
+            rows = rows[:args.limit]
+            print(f"  stopping at --limit {args.limit}")
+            break
+    if not rows:
+        print(f"Nothing in the {args.tab} tab.")
+        return 0
+
+    details_path = Path(args.details)
+    details = _read_json(details_path) if details_path.is_file() else {}
+    resolved, _ = link.resolve(rows, catalogue)
+    resolved, _ = link.merge_details(
+        resolved, [], details, {str(p.r_number).strip(): p for p in catalogue}
+    )
+    if resolved:
+        # Fitment is what the renderer titles from; without it this would write a
+        # different title from the one the Shopify sync publishes for the same part.
+        with connect() as conn:
+            InterchangeResolver(conn).attach(list(resolved.values()))
+
+    research: dict[str, dict] = {}
+    research_path = Path(args.out_prefix + "-research.json")
+    if not args.no_prices:
+        if research_path.is_file() and not args.no_resume:
+            research = _read_json(research_path)
+        session = requests.Session()
+        pages = Path(args.pages)
+        pages.mkdir(parents=True, exist_ok=True)
+
+        def fetcher(query: str, destination: Path) -> bool:
+            try:
+                return fetch(query, destination, session, delay=args.delay)
+            except Exception:
+                return False
+
+        wanted = {str(part.r_number).strip(): part for part in resolved.values()}
+        print(f"researching comparables for {len(wanted)} part(s)")
+        research = driver.research_parts(
+            wanted.values(), store, pages, fetcher, done=research,
+            checkpoint=lambda records: _write_json(research_path, records),
+            log=print,
+        )
+        print(f"  -> {research_path}")
+
+    result = driver.plan(
+        rows, catalogue, store, research or None, details=details,
+        title_limit=args.title_limit, min_comps=args.min_comps,
+        max_swing=None if args.no_swing_limit else Decimal(str(args.max_swing)),
+    )
+    print(result.summary())
+
+    title_path = Path(args.out_prefix + "-titles.json")
+    price_path = Path(args.out_prefix + "-prices.json")
+    held_path = Path(args.out_prefix + "-held.json")
+    _write_json(title_path, result.titles)
+    _write_json(price_path, result.prices)
+    _write_json(held_path, result.held)
+    print(f"  -> {title_path}\n  -> {price_path}\n  -> {held_path}")
+
+    if not (result.titles or result.prices):
+        return 0
+    dry_run = not args.apply
+    try:
+        if result.titles:
+            for item in workflow.apply_titles(
+                client, result.titles, tab=args.tab, dry_run=dry_run, cap=args.cap,
+                force=args.yes_i_mean_it,
+            ):
+                print(f"  titles {item['n']:>4} x {item['status']:<8} {item['new'][:60]}")
+        if result.prices:
+            for item in workflow.apply_prices(
+                client, result.prices, tab=args.tab, dry_run=dry_run, cap=args.cap,
+                force=args.yes_i_mean_it,
+            ):
+                print(f"  price  {item['n']:>4} x {item['status']:<8} {item['price']}")
+    except workflow.ApplyGuard as exc:
+        # The cap refuses before the first write, so nothing is half-applied. In a
+        # scheduled run this is the expected outcome of a batch larger than anyone
+        # reviewed, and it has to read as a refusal rather than a crash: the plan files
+        # above are still on disk, and the run that follows will make the same offer.
+        print(f"Refused: {exc}", file=sys.stderr)
+        print(f"The plan is on disk ({args.out_prefix}-*.json); nothing was written.",
+              file=sys.stderr)
+        return 1
+    if args.apply and resolved:
+        # Written only after the portal actually took the values, and never on a dry run:
+        # this file is read by the canonical Shopify renderer where an installation
+        # configures it, so writing it for decisions the portal never received would
+        # publish to Shopify what eBay was never told — the exact drift between the two
+        # storefronts that routing overrides through the one renderer exists to prevent.
+        overrides_path = Path(args.overrides_out)
+        prior = _read_json(overrides_path) if overrides_path.is_file() else {}
+        _write_json(overrides_path, driver.overrides_for(result, resolved, prior))
+        print(f"  -> {overrides_path}  (set STORE_CATALOG_OVERRIDES_FILE to this)")
+    print("Saved in the portal only." if args.apply else
+          "Dry run: nothing was written. Pass --apply to save these in the portal.")
+    print("Nothing reaches eBay until `coreyard ebay push --apply`.")
     return 0
 
 
 def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="ebay_action", required=True)
+    command = sub.add_parser(
+        "daily", help="unattended pass: title, price and save the tab in the portal")
+    command.add_argument("--tab", choices=TABS, default="unlisted")
+    command.add_argument("--part-type", help="walk only this part type")
+    command.add_argument("--rows", type=int, default=1000, help="portal page size")
+    command.add_argument("--limit", type=int, help="stop after this many listings")
+    command.add_argument("--no-prices", action="store_true",
+                         help="plan titles only; skip the comparable research")
+    command.add_argument("--min-comps", type=int, default=3,
+                         help="comparables a price needs before it may be written")
+    command.add_argument("--max-swing", type=float, default=1.5)
+    command.add_argument("--no-swing-limit", action="store_true")
+    command.add_argument("--title-limit", type=int, default=EBAY_TITLE_MAX)
+    command.add_argument("--delay", type=float, default=1.4,
+                         help="seconds between public index requests")
+    command.add_argument("--pages", default=str(REPO_ROOT / "out" / "ebay-comp-pages"))
+    command.add_argument("--details",
+                         default=str(REPO_ROOT / "out" / "ebay-details.json"),
+                         help="edit-form cache, read if present and never fetched")
+    command.add_argument("--no-resume", action="store_true")
+    command.add_argument("--out-prefix", default=str(REPO_ROOT / "out" / "ebay-daily"))
+    command.add_argument("--overrides-out",
+                         default=str(REPO_ROOT / "out" / "catalog-overrides.json"))
+    command.add_argument("--portal")
+    command.add_argument("--apply", action="store_true",
+                         help="save in the portal; omit for a dry run. Never pushes.")
+    command.add_argument("--cap", type=int, default=DEFAULT_CAP)
+    command.add_argument("--yes-i-mean-it", action="store_true")
+    command.set_defaults(func=daily)
+
     command = sub.add_parser("pull", help="download a portal tab (read-only)")
     command.add_argument("--tab", choices=TABS, default="unlisted")
     command.add_argument("--part-type", help="limit to one configured portal part type")
@@ -696,24 +776,6 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     command.add_argument("--out", default=str(REPO_ROOT / "out" / "ebay-details.json"))
     command.set_defaults(func=details)
 
-
-    command = sub.add_parser("research", help="research general part prices with AI")
-    command.add_argument("listings", help="normalized listing checkpoint")
-    command.add_argument("--batch", type=int, default=6)
-    command.add_argument("--workers", type=int, default=3)
-    command.add_argument("--limit", type=int)
-    command.add_argument("--model")
-    command.add_argument("--no-resume", action="store_true")
-    command.add_argument("--out", default=str(REPO_ROOT / "out" / "ebay-research.json"))
-    command.set_defaults(func=market_research)
-
-    command = sub.add_parser("price-plan", help="guard general researched prices")
-    command.add_argument("research")
-    command.add_argument("--min-comps", type=int, default=3)
-    command.add_argument("--max-price", type=float, default=600)
-    command.add_argument("--include-unknown-material", action="store_true")
-    command.add_argument("--out", default=str(REPO_ROOT / "out" / "ebay-price-plan.json"))
-    command.set_defaults(func=price_plan)
 
     command = sub.add_parser("apply", help="save reviewed title/price plans in the portal")
     command.add_argument("--titles")
@@ -762,37 +824,6 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     command.add_argument("--no-resume", action="store_true")
     command.add_argument("--out", default=str(REPO_ROOT / "out" / "ebay-comps.json"))
     command.set_defaults(func=part_comps)
-
-    command = sub.add_parser("engine-comps", help="collect public engine comparables")
-    command.add_argument("listings", nargs="?",
-                         default=str(REPO_ROOT / "out" / "ebay-engines.json"))
-    command.add_argument("--details",
-                         default=str(REPO_ROOT / "out" / "ebay-engine-details.json"))
-    command.add_argument("--pages",
-                         default=str(REPO_ROOT / "out" / "ebay-engine-comp-pages"))
-    command.add_argument("--delay", type=float, default=1.4)
-    command.add_argument("--no-retry-thin", action="store_true",
-                         help="skip the shorter-query second pass over groups that "
-                              "came back with no comparables")
-    command.add_argument("--out",
-                         default=str(REPO_ROOT / "out" / "ebay-engine-comps.json"))
-    command.set_defaults(func=engine_comps)
-
-    command = sub.add_parser("wheel-comps", help="prepare or build indexed wheel research")
-    wheel_sub = command.add_subparsers(dest="wheel_comps_action", required=True)
-    prepare = wheel_sub.add_parser("prepare", help="write a resumable fetch configuration")
-    build = wheel_sub.add_parser("build", help="parse fetched pages into price research")
-    for child in (prepare, build):
-        child.add_argument("--listings", required=True)
-        child.add_argument("--titles", required=True)
-        child.add_argument("--research", required=True)
-        child.add_argument("--pages", default=str(REPO_ROOT / "out" / "ebay-wheel-pages"))
-    prepare.add_argument("--config",
-                         default=str(REPO_ROOT / "out" / "ebay-wheel-fetch.conf"))
-    prepare.set_defaults(func=wheel_comps_prepare)
-    build.add_argument("--overrides")
-    build.add_argument("--out", default=str(REPO_ROOT / "out" / "ebay-wheel-research.json"))
-    build.set_defaults(func=wheel_comps_build)
 
     command = sub.add_parser("aspects", help="derive and save eBay item specifics")
     command.add_argument("--part-type", required=True)
@@ -875,12 +906,8 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     command.add_argument("--listings", default=str(REPO_ROOT / "out" / "ebay-engines.json"))
     command.add_argument("--details", default=str(REPO_ROOT / "out" / "ebay-engine-details.json"))
     command.add_argument("--comps", required=True, help="collected comparable JSON")
-    command.add_argument("--batch", type=int, default=20)
     command.add_argument("--limit", type=int)
     command.add_argument("--only-with-comps", action="store_true")
-    command.add_argument("--model")
-    command.add_argument("--deterministic", action="store_true",
-                         help="fill missing rows conservatively from real comp medians")
     command.add_argument("--no-resume", action="store_true")
     command.add_argument("--out", default=str(REPO_ROOT / "out" / "ebay-engine-prices.json"))
     command.set_defaults(func=engine_research)

@@ -56,6 +56,21 @@ def validate(title: str, current: str, limit: int = TITLE_MAX) -> tuple[bool, st
     return True, ""
 
 
+def decisions_for(
+    rows: list[dict],
+    resolved: dict[str, Part],
+    store: StoreProfile,
+    *,
+    limit: int = TITLE_MAX,
+) -> tuple[list[dict], list[dict]]:
+    """Decide titles for listings already resolved to their parts (see ``ebay/link.py``)."""
+    details = {listing_id: {"r_number": str(part.r_number)}
+               for listing_id, part in resolved.items()}
+    parts = {str(part.r_number): part for part in resolved.values()}
+    keep = [row for row in rows if str(row["listing_id"]) in resolved]
+    return decisions(keep, details, parts, store, limit=limit)
+
+
 def decisions(
     rows: list[dict],
     details: dict[str, dict],

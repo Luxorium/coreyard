@@ -62,6 +62,14 @@ class Matching(unittest.TestCase):
         """A tail lamp priced against headlamps is a wrong number, not a rough one."""
         self.assertFalse(self.keep("2012 Ford F150 Headlight Assembly"))
 
+    def test_sharing_only_a_generic_word_is_not_agreeing_on_the_part(self):
+        """A headlamp and a tail lamp share "light" and "lamp". That is not a match."""
+        self.assertFalse(self.keep("2012 Ford F150 Head Light Headlight Lamp OEM"))
+        self.assertFalse(self.keep("2012 Ford F150 Fog Light Lamp"))
+
+    def test_the_types_own_distinctive_word_is_what_makes_a_match(self):
+        self.assertTrue(self.keep("2012 Ford F150 Taillight Tail Light Lamp"))
+
     def test_a_different_vehicle_is_rejected(self):
         self.assertFalse(self.keep("2004 Honda Civic Tail Light Lamp"))
 
@@ -72,6 +80,23 @@ class Matching(unittest.TestCase):
         for title in ("Tail Light Lamp Repair Kit", "Tail Light Lamp Bulb Socket",
                       "Tail Light Lamp Lens Only", "Ford F150 Repair Manual"):
             self.assertFalse(self.keep(title), title)
+
+    def test_a_plural_piece_of_the_part_is_rejected_like_the_singular(self):
+        """Real titles say "Bulbs Combo Kit", and the singular pattern missed every one."""
+        for title in ("2012 Ford F150 Tail Light Bulbs Combo Kit",
+                      "2012 Ford F150 Tail Light Lamp Sockets",
+                      "2012 Ford F150 Tail Light Repair Kits"):
+            self.assertFalse(self.keep(title), title)
+
+    def test_a_broken_part_is_never_a_comparable_for_a_working_one(self):
+        """It sells for what a broken part is worth, and drags every median down with it."""
+        for title in ("BROKEN 2012 Ford F150 Tail Light Lamp",
+                      "2012 Ford F150 Tail Light Lamp - cracked, for parts only",
+                      "2012 Ford F150 Tail Light Lamp AS-IS not working"):
+            self.assertFalse(self.keep(title), title)
+
+    def test_an_undamaged_listing_is_still_kept(self):
+        self.assertTrue(self.keep("2012 Ford F150 Tail Light Lamp Assembly OEM"))
 
     def test_prices_outside_the_plausible_band_are_rejected(self):
         item = part()
@@ -189,3 +214,112 @@ class RecordShape(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Dimensions(unittest.TestCase):
+    """Part types sold by size judge a comparable on the size.
+
+    This is the capability the wheel-specific research module held, expressed as a
+    :class:`comps.Rule` so it belongs to every part type that needs it and to no module.
+    """
+
+    def wheel(self, note="17x7 Alloy 5 Spoke"):
+        return part(part_type="WHEEL", part_type_code=560, price=Decimal("120.00"),
+                    description=note)
+
+    def score(self, title, note="17x7 Alloy 5 Spoke", price=150.0):
+        return comps.score(self.wheel(note), STORE, candidate(title, price))
+
+    def test_a_matching_size_is_a_comparable(self):
+        self.assertIsNotNone(self.score("2012 Ford F150 17x7 Alloy Wheel Rim"))
+
+    def test_a_different_size_is_not_a_comparable(self):
+        """An 18x8 wheel is a different product, not a dearer 17x7."""
+        self.assertIsNone(self.score("2012 Ford F150 18x8 Alloy Wheel Rim"))
+
+    def test_a_different_bare_diameter_is_not_a_comparable(self):
+        self.assertIsNone(self.score("2012 Ford F150 20 inch Wheel Rim"))
+
+    def test_a_candidate_stating_no_size_is_weak_evidence_not_wrong_evidence(self):
+        """Rejecting these would throw away most of the comparable set."""
+        stated = self.score("2012 Ford F150 17x7 Alloy Wheel Rim")
+        silent = self.score("2012 Ford F150 Wheel Rim")
+        self.assertIsNotNone(silent)
+        self.assertGreater(stated[0], silent[0])
+
+    def test_a_part_whose_note_states_no_size_still_prices(self):
+        self.assertIsNotNone(self.score("2012 Ford F150 17x7 Wheel Rim", note="Alloy"))
+
+    def test_half_widths_normalise(self):
+        self.assertEqual(comps.norm_size("17x7-1/2 Wheel"), "17x7.5")
+        self.assertEqual(comps.norm_size("17X7.5 Wheel"), "17x7.5")
+
+    def test_a_part_type_without_the_rule_ignores_size(self):
+        """Only types that opt in pay the cost; a tail lamp has no size to disagree on."""
+        lamp = part(description="17x7 stamped on the bracket")
+        self.assertIsNotNone(comps.score(lamp, STORE, candidate(
+            "2012 Ford F150 Tail Light Lamp 18x8")))
+
+
+class TypeExclusions(unittest.TestCase):
+    """Rejections one part type needs and the others must not inherit."""
+
+    def engine(self):
+        return part(part_type="ENGINE ASSEMBLY", part_type_code=300,
+                    price=Decimal("900.00"), description="3.5L VIN 8")
+
+    def score(self, title, price=1200.0):
+        return comps.score(self.engine(), STORE, candidate(title, price))
+
+    def test_an_imported_engine_sells_in_a_different_market(self):
+        self.assertIsNone(self.score("2012 Ford F150 3.5L JDM Engine"))
+        self.assertIsNone(self.score("3.5L Engine Imported From Japan 2012 Ford F150"))
+
+    def test_a_rebuilt_or_crate_engine_is_not_a_used_one(self):
+        self.assertIsNone(self.score("2012 Ford F150 3.5L Rebuilt Engine"))
+        self.assertIsNone(self.score("2012 Ford F150 3.5L Crate Engine"))
+
+    def test_a_core_or_a_lot_is_not_one_working_unit(self):
+        self.assertIsNone(self.score("2012 Ford F150 3.5L Engine Core Only"))
+        self.assertIsNone(self.score("Lot of 3 Ford F150 3.5L Engines 2012"))
+
+    def test_an_ordinary_used_engine_is_still_a_comparable(self):
+        self.assertIsNotNone(self.score("2012 Ford F150 3.5L Engine Assembly 88k Miles"))
+
+    def test_the_exclusion_does_not_leak_to_other_part_types(self):
+        """"Rebuilt" is fatal for an engine and unremarkable elsewhere."""
+        self.assertIsNotNone(comps.score(part(), STORE, candidate(
+            "2012 Ford F150 Tail Light Lamp Rebuilt Housing")))
+
+
+class Variants(unittest.TestCase):
+    """Attributes that split one part type into products that don't price against each other."""
+
+    def wheel(self, note):
+        return part(part_type="WHEEL", part_type_code=560, price=Decimal("120.00"),
+                    description=note)
+
+    def score(self, title, note="17x7 Alloy 5 Spoke"):
+        return comps.score(self.wheel(note), STORE, candidate(title, 150.0))
+
+    def test_a_steel_wheel_is_not_a_comparable_for_an_alloy_one(self):
+        self.assertIsNone(self.score("2012 Ford F150 17x7 Steel Wheel Rim"))
+
+    def test_a_finish_word_reads_as_the_alloy_variant(self):
+        self.assertIsNotNone(self.score("2012 Ford F150 17x7 Machined Wheel Rim"))
+
+    def test_a_candidate_naming_no_variant_is_still_evidence(self):
+        stated = self.score("2012 Ford F150 17x7 Alloy Wheel Rim")
+        silent = self.score("2012 Ford F150 17x7 Wheel Rim")
+        self.assertIsNotNone(silent)
+        self.assertGreater(stated[0], silent[0])
+
+    def test_a_part_naming_no_variant_accepts_either(self):
+        for title in ("2012 Ford F150 17x7 Alloy Wheel Rim",
+                      "2012 Ford F150 17x7 Steel Wheel Rim"):
+            self.assertIsNotNone(self.score(title, note="17x7 5 Spoke"))
+
+    def test_a_part_type_without_variants_ignores_the_words(self):
+        self.assertIsNotNone(comps.score(
+            part(description="Steel bracket"), STORE,
+            candidate("2012 Ford F150 Tail Light Lamp Alloy Trim")))
