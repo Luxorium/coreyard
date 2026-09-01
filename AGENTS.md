@@ -10,10 +10,15 @@ the canonical renderer (`render.py`) plus the SEO engine, tag ownership, weights
 CSV framing; `sink/` contains the one Shopify client and the CSV and API
 publishers. `orders/` owns the order pipeline and its transports, `reconcile/` compares the
 store with the yard, `repair/` rewrites output an older renderer produced, and `audit/`
-reports listing quality. `run_sync.py` orchestrates syncs, `state.py` tracks fingerprints,
-`webhook.py` is the webhook transport, and `schedule.py` installs timers. Tests are in
-`tests/`; operational checks belong in `scripts/`. Photos are external; `out/`, `*.sqlite3`,
-`.env`, `schema.json`, and generated `bin/` content are private or generated.
+reports listing quality. `ebay/` is the optional
+listing-portal channel: a portal map, its client, comparable research, guarded writes, and
+`daily.py`, the unattended pass that composes them. `yms/part_types.py` reports every part
+type the yard can inventory and where the renderer's wording runs out.
+`overrides.py` carries the reviewed decisions that channel hands back to the renderer. `run_sync.py` orchestrates syncs,
+`state.py` tracks fingerprints, `webhook.py` is the webhook transport, and `schedule.py`
+installs timers. Tests are in `tests/`; operational checks belong in `scripts/`. Photos are
+external; `out/`, `*.sqlite3`, `.env`, `schema.json`, `portal.json`, `notes/`, and generated
+`bin/` content are private or generated.
 
 A storefront repository may live beside this one. CoreYard must never import it, assume it,
 or reach for a sibling path: site policy arrives as configuration files whose paths are named
@@ -71,12 +76,20 @@ Read config through `_get` and let the caller load the environment. Name files
 `test_<area>.py`, classes for the behavior, and methods `test_<expected_behavior>`.
 Add regression coverage for identifiers, mappings, fingerprints/state diffs, retirement,
 revival, webhooks, order guards, tag ownership, the listable policy, weight rules,
-reconciliation, repair, order polling, and rendered Shopify output. Run one test with, for
+reconciliation, repair, order polling, rendered Shopify output, and — for the listing-portal
+channel — cap guards, title validation, comparable selection, price guards, aspect
+derivation, and which listing ids a write resolves to. Run one test with, for
 example, `.venv/bin/python -m unittest tests.test_state.Diff.test_summary`.
 
 Anything that talks to Shopify takes a client so a fake can be passed in, and every planning
 decision that could empty a catalogue — retirement fractions, reconciliation buckets, repair
-diffs — lives in a pure function that a test can call directly.
+diffs — lives in a pure function that a test can call directly. The same rule covers the
+listing portal: its client is injectable, its planning (`ebay/engines.py`) is pure, and no
+test may reach a portal or a public index.
+
+CoreYard runs no model and calls no LLM. Titles come from the renderer, comparables from a
+parsed public index, and prices from arithmetic over those comparables — so every command
+is reproducible, and a test that wanted to stub inference would have nothing to stub.
 
 ## Commit & Pull Request Guidelines
 
@@ -91,8 +104,11 @@ for storefront-visible changes.
 
 Never commit secrets, customer data, generated output, or site-specific names. Source
 table/column names belong only in gitignored `schema.json`; keep
-`schema.example.json` generic. CI enforces vendor neutrality with
-`scripts/check_neutrality.py`.
+`schema.example.json` generic. The listing portal's routes, field ids and action ids follow
+the same rule in gitignored `portal.json`, with `portal.example.json` generic and the
+vendor's captured reference material confined to the ignored `notes/`. Portal session
+cookies are owner-only and never passed on a command line. CI enforces vendor neutrality
+with `scripts/check_neutrality.py`.
 
 Every database path is `SELECT`-only except `coreyard/yms/orders.py`. That opt-in
 work-order path requires an `order_write` mapping plus explicit enablement through
@@ -155,3 +171,12 @@ failed payloads may remain only in the owner-only queue for the bounded retry wi
 - Sale booking is idempotent on the stored order reference, not only webhook ID.
   Keep `order_write.line_items_taxable` false when the storefront remits tax; see
   `CLAUDE.md` before changing order or tax behavior.
+- The listing-portal channel has three write surfaces, and they stay three commands:
+  saving in the portal changes nothing a shopper sees, pushing makes it live, and delisting
+  is irreversible on eBay — a relist mints a new item id and loses the watchers and ranking.
+  The gap between the first two is the review window for researched prices.
+- Every portal write is a dry run without `--apply`, and its cap counts listings rather than
+  plan entries and refuses *before* the first write, so a refused batch writes nothing.
+- Researched titles and prices reach Shopify only as `STORE_CATALOG_OVERRIDES_FILE`, read by
+  the one renderer and keyed by R#. Never patch a product directly from that channel: the
+  value would sit outside the fingerprint and the next sync would revert it.

@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """Fail if vendor names or a site's real schema leak into the repository.
 
-CoreYard reads a database you license from someone else. Their product names and their
-table layout are theirs, so neither belongs in this source tree — every installation
-supplies those locally (``.env`` and ``schema.json``, both gitignored). The same applies
-to the identity of whichever yard maintains the project: this is a tool any yard can run,
-so its author's business name must be no more visible in the tree than anyone else's.
+CoreYard reads a database you license from someone else, and writes eBay listings through
+a portal you license from someone else. Their product names, their table layout and their
+field identifiers are theirs, so none of it belongs in this source tree — every
+installation supplies those locally (``.env``, ``schema.json`` and ``portal.json``, all
+gitignored). The same applies to the identity of whichever yard maintains the project:
+this is a tool any yard can run, so its author's business name must be no more visible in
+the tree than anyone else's.
+
+``.html`` is scanned as well as the obvious text suffixes. Test fixtures captured from a
+real portal or storefront are exactly the kind of file whose provenance is forgotten, and
+an unscanned suffix is a hole the rule cannot see through.
 
 This runs in CI so the rule is enforced rather than remembered.
 
@@ -105,8 +111,9 @@ _FORBIDDEN: dict[str, str] = {
 _LENGTHS = frozenset({5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 17})
 
 SKIP_DIRS = {".git", ".venv", "out", "__pycache__", "node_modules", ".github/workflows"}
-SKIP_FILES = {"schema.json", ".env"}
-TEXT_SUFFIXES = {".py", ".md", ".txt", ".json", ".sh", ".yml", ".yaml", ".toml", ".example", ""}
+SKIP_FILES = {"schema.json", "portal.json", ".env"}
+TEXT_SUFFIXES = {".py", ".md", ".txt", ".json", ".sh", ".yml", ".yaml", ".toml",
+                 ".html", ".example", ""}
 
 
 def offending_reason(line: str) -> str | None:

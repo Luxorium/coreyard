@@ -274,6 +274,8 @@ def render(
     store = store or StoreProfile()
     urls = [str(u) for u in (images or [])]
     product_type = seo.expand_part_type(part.part_type, store)
+    override = store.overrides.for_r_number(part.r_number)
+    title = override.title or seo.build_title(part, store)
     weight = resolve_weight(part, store, product_type)
     # Classified here, not by a later pass over the catalogue: a product that is live and
     # sellable before anything has said how it ships is a product that can be bought with
@@ -284,15 +286,19 @@ def render(
         tags.append(shipping.tag)
     return RenderedProduct(
         handle=handle_for(part, store),
-        title=seo.build_title(part, store),
+        title=title,
         description_html=seo.build_body_html(part, store),
         vendor=store.vendor,
         product_type=product_type,
         tags=tuple(tags),
-        seo_title=seo.meta_title(part, store),
+        seo_title=(seo.reviewed_meta_title(title) if override.title
+                   else seo.meta_title(part, store)),
         seo_description=seo.meta_description(part, store),
         sku=str(part.r_number),
-        price=retail_str(part.price, default="0.00"),
+        # A researched price is already a deliberate shopper-facing amount; storefront
+        # charm rounding must not silently move it after the research decision.
+        price=(f"{override.price:.2f}" if override.price is not None
+               else retail_str(part.price, default="0.00")),
         inventory=max(int(part.quantity or 0), 0),
         images=tuple(urls),
         image_alts=tuple(seo.image_alt(part, i, store) for i in range(1, len(urls) + 1)),

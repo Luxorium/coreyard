@@ -54,6 +54,13 @@ class Valid(Base):
         self.assertTrue(validate.validate(
             shipping=self.write("s.json", GOOD_SHIPPING)).ok)
 
+    def test_catalog_overrides_can_be_checked_alone(self):
+        value = {"version": 1, "parts": {"42": {
+            "title": "Researched Engine", "price": "299.99"}}}
+        result = validate.validate(overrides=self.write("c.json", value))
+        self.assertTrue(result.ok, result.errors)
+        self.assertTrue(any("1 title" in note for note in result.notes))
+
     def test_it_reports_what_it_found(self):
         result = validate.validate(shipping=self.write("s.json", GOOD_SHIPPING))
         self.assertTrue(any("ship:free" in note for note in result.notes))

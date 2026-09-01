@@ -382,6 +382,38 @@ def _selected(diff, args) -> set[str]:
     return set(diff.changed_in(scope))
 
 
+def _photo_refreshes(diff, args, selected: set[str]) -> set[str]:
+    """Media work a scoped run owns.
+
+    An inventory or catalogue run may touch a part whose photos also moved, but that does
+    not broaden the requested scope. Leaving the media fingerprint untouched lets the next
+    ``sync photos`` or full sync perform that work; rebuilding it here makes a copy-only
+    run fail on an unrelated stale-media problem and defeats the point of scopes.
+    """
+    if getattr(args, "scope", None) in {"inventory", "catalog"}:
+        return set()
+    return set(diff.image_changed) & selected
+
+
+def _published_fingerprints(fingerprints, keys, state, args, diff):
+    """The state a scoped publish actually established.
+
+    ``productSet`` sends the whole non-media product, so inventory and catalogue
+    projections can both advance. Media is a separate mutation: when those scopes leave a
+    changed photo set alone, preserve its old manifest fingerprint so ``sync photos`` still
+    sees and performs the outstanding work.
+    """
+    bundle = fp_subset(fingerprints, keys)
+    if getattr(args, "scope", None) not in {"inventory", "catalog"}:
+        return bundle
+    previous = state.load_images()
+    added = set(diff.added)
+    for key in list(bundle.images):
+        if key not in added and key in previous:
+            bundle.images[key] = previous[key]
+    return bundle
+
+
 def cmd_sync(args) -> int:
     from coreyard.yms.inventory import fetch_parts, is_configured, photos_required
 
@@ -483,8 +515,9 @@ def cmd_sync(args) -> int:
             # "as a preview" is not.
             selected = _selected(diff, args)
             upserts = 0 if args.retire_only else len(selected)
+            photo_refreshes = _photo_refreshes(diff, args, selected)
             print(f"Dry run: would upsert {upserts} product(s) "
-                  f"({0 if args.retire_only else len(set(diff.image_changed) & selected)} "
+                  f"({0 if args.retire_only else len(photo_refreshes)} "
                   f"photo refresh), "
                   f"revive {0 if args.retire_only else len(revivals)}, "
                   f"and consider {len(retire)} for retirement.")
@@ -512,7 +545,7 @@ def cmd_sync(args) -> int:
 
             # Media is torn down and re-uploaded only for parts whose photo set actually
             # moved, and only among the ones this run is touching.
-            needs_photos = set(diff.image_changed) & selected
+            needs_photos = _photo_refreshes(diff, args, selected)
             if args.retire_only:
                 print(f"Retire-only: skipping {len(todo)} upsert(s).")
                 todo = []
@@ -536,10 +569,14 @@ def cmd_sync(args) -> int:
                 # Bank the work so far. A run stopped by its timeout keeps everything it
                 # published instead of starting the same backlog again next hour.
                 if not args.dry_run and len(published_ok) - len(checkpointed) >= CHECKPOINT_EVERY:
-                    state.update(fp_subset(fingerprints, published_ok - checkpointed))
+                    state.update(_published_fingerprints(
+                        fingerprints, published_ok - checkpointed, state, args, diff
+                    ))
                     checkpointed |= published_ok
             if published_ok - checkpointed and not args.dry_run:
-                state.update(fp_subset(fingerprints, published_ok - checkpointed))
+                state.update(_published_fingerprints(
+                    fingerprints, published_ok - checkpointed, state, args, diff
+                ))
             # Only after the upsert landed: a part whose revival failed must still be
             # remembered, or the retry would republish it as ARCHIVED.
             state.clear_retired(revived)
@@ -579,7 +616,9 @@ def cmd_sync(args) -> int:
             # what moved. Committing would record every part it *declined* to publish as
             # up to date, and the change it skipped would never be published by anything.
             # So record exactly what landed and leave the rest of the snapshot alone.
-            state.update(fp_subset(fingerprints, published_ok))
+            state.update(_published_fingerprints(
+                fingerprints, published_ok, state, args, diff
+            ))
             state.forget(retired)
             print(f"State updated for {len(published_ok)} published part(s); "
                   f"the rest of the snapshot is untouched.")

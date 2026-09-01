@@ -1,10 +1,19 @@
 name: CI
 
 on:
+  # Every branch, not just the default one. A contributor who pushes a branch should
+  # learn it is broken from CI, not from a reviewer — and a branch that only runs its
+  # tests once a pull request exists gets no signal during the work that matters.
   push:
-    branches: [main, master]
+    branches: ['**']
   pull_request:
   workflow_dispatch:
+
+# A new push supersedes the run it interrupted, so a branch pushed three times in a
+# minute does not hold four sets of runners to answer the same question.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:

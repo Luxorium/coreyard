@@ -226,6 +226,35 @@ class Selection(unittest.TestCase):
         self.assertEqual(run_sync._selected(diff, sync_args(["inventory"])), {"2"})
         self.assertEqual(run_sync._selected(diff, sync_args(["catalog"])), {"3"})
 
+    def test_catalog_and_inventory_scopes_leave_photo_work_for_its_owner(self):
+        diff = DiffResult(changed=["1"], image_changed=["1"])
+        for scope in ("catalog", "inventory"):
+            with self.subTest(scope=scope):
+                self.assertEqual(run_sync._photo_refreshes(
+                    diff, sync_args([scope]), {"1"}), set())
+
+    def test_full_and_photo_runs_refresh_a_changed_photo_set(self):
+        diff = DiffResult(changed=["1"], image_changed=["1"])
+        self.assertEqual(run_sync._photo_refreshes(diff, sync_args([]), {"1"}), {"1"})
+        self.assertEqual(run_sync._photo_refreshes(
+            diff, sync_args(["photos"]), {"1"}), {"1"})
+
+    def test_catalog_publish_does_not_mark_skipped_media_as_current(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with SyncState(Path(directory) / "state.sqlite3") as state:
+                old = Fingerprints(
+                    content={"1": "old-content"}, images={"1": "old-image"},
+                    scopes={scope: {"1": f"old-{scope}"} for scope in SCOPES})
+                state.update(old)
+                current = Fingerprints(
+                    content={"1": "new-content"}, images={"1": "new-image"},
+                    scopes={scope: {"1": f"new-{scope}"} for scope in SCOPES})
+                got = run_sync._published_fingerprints(
+                    current, {"1"}, state, sync_args(["catalog"]),
+                    DiffResult(changed=["1"], image_changed=["1"]))
+        self.assertEqual(got.content["1"], "new-content")
+        self.assertEqual(got.images["1"], "old-image")
+
 
 class Defaults(unittest.TestCase):
     """Where each entry point publishes, if nobody says."""

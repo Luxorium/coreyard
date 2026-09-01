@@ -1,0 +1,8 @@
+r_number,part_type,part_type_code,stock_number,interchange_number,make,model,year,price,quantity,mileage,grade,description,side
+51,TAIL LAMP,166,S1001,545-01883,Ford,F150,2012,89.00,1,,A,LED type; clear lens,Right
+52,TAIL LAMP,166,S1001,545-01883,Ford,F150,2012,89.00,1,,A,LED type; clear lens,Left
+77,ENGINE ASSEMBLY,300,S1002,300-00421,Ford,F150,2013,1450.00,1,88000,A,3.5L VIN 8; runs strong,
+78,WHEEL,560,S1002,560-60219,Ford,F150,2013,120.00,4,,B,17x7 Alloy 5 Spoke,
+90,FRONT DOOR,120,S1003,240-51002,Honda,Accord,2016,275.00,1,,B,Power; no dents,Left
+91,HEADLAMP,164,S1003,331-51119,Honda,Accord,2016,145.00,1,,A,Halogen; small scuff on lens,Right
+104,TRANSMISSION,400,S1004,400-11207,Toyota,Camry,2015,975.00,1,112000,B,Automatic; 2.5L,
