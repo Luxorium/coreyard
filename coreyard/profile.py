@@ -115,6 +115,13 @@ class CatalogProfile:
     fitment_note: str = ("Verify fitment by year, options, and part/casting numbers where "
                          "shown in the photos.")
 
+    # Shown only when a part is published with photographs of the vehicle it came off rather
+    # than of itself. ``{donor}`` expands to the donor's year, make, model and stock number.
+    # A site that photographs every part never renders this; a site that does must not let a
+    # shopper believe the picture is of the part, so the default states it plainly.
+    donor_photo_note: str = ("Photographs show the donor vehicle ({donor}). This part was "
+                             "not photographed individually.")
+
     # "OEM" is a strong search term but it eats title characters, and some sellers prefer it
     # out of the customer-facing title. It stays in the tags and description either way.
     title_include_oem: bool = False

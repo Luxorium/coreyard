@@ -15,7 +15,7 @@ from typing import Any, Iterator
 from urllib.parse import quote
 
 from coreyard.config import _get
-from coreyard.ebay.auth import get_cookies
+from coreyard.ebay.auth import can_sign_in, get_cookies, sign_in
 from coreyard.ebay.portal import PortalConfigError, PortalMap, load as load_portal
 
 
@@ -97,7 +97,8 @@ def _number(key: str, default: float) -> float:
 # fires, and the handle reaches ``bulk_update`` as a perfectly ordinary non-empty string.
 # The portal then *accepts* every write made against it and discards them, returning no
 # error, which is how a batch of 12,887 prices once reported complete success and changed
-# nothing.
+# nothing. Recognising the anonymous handle is what turns that silent discard into a
+# re-sign, and failing that, into an error.
 def _is_anonymous_session(session_id: str | None) -> bool:
     """True for a missing handle or the all-zero one a signed-out request comes back with."""
     return not session_id or not str(session_id).strip("0-")
@@ -125,7 +126,7 @@ class PortalClient:
         self.timeout = _number("EBAY_PORTAL_TIMEOUT", 60.0) if timeout is None else timeout
         self.session_id: str | None = None
 
-    def _request(self, method: str, endpoint: str, **kwargs):
+    def _request(self, method: str, endpoint: str, _resign: bool = True, **kwargs):
         response = self.session.request(
             method, self.portal.endpoint(endpoint), timeout=self.timeout,
             allow_redirects=False, **kwargs
@@ -135,6 +136,15 @@ class PortalClient:
             response.status_code in {301, 302}
             and self.portal.login_path in location
         ):
+            # A borrowed browser session is shorter-lived than the runs that use it: an
+            # overnight research pass will outlast it, and dying two thirds of the way
+            # through costs the whole night. With credentials configured, establish a new
+            # session and retry once — but only once, so a genuinely bad password fails
+            # fast instead of hammering the sign-in form.
+            if _resign and can_sign_in(self.portal):
+                self.session.cookies.update(sign_in(self.portal))
+                self.session_id = None      # a new session invalidates the old handle
+                return self._request(method, endpoint, _resign=False, **kwargs)
             raise SessionExpired(
                 f"listing-portal session expired (HTTP {response.status_code}); "
                 f"log in at {self.portal.base_url} and retry"
@@ -159,6 +169,7 @@ class PortalClient:
         part_type: str | int | None = None,
         quick_search: str | None = None,
         search: dict | None = None,
+        _resign: bool = True,
     ) -> dict[str, Any]:
         """Read one grid page and return only neutral, mapped field names."""
         if page < 1 or rows < 1:
@@ -184,8 +195,16 @@ class PortalClient:
         session_id = raw.get(r("grid", "session"))
         if _is_anonymous_session(session_id):
             # Deliberately keyed on the handle and not on an empty grid: a filtered read
-            # of a part type the yard has none of is legitimately empty, and treating that
-            # as a dead session would refuse perfectly good reads.
+            # of a part type the yard has none of is legitimately empty, and re-signing
+            # for those would hammer the form once per type.
+            if _resign and can_sign_in(self.portal):
+                self.session.cookies.update(sign_in(self.portal))
+                self.session_id = None
+                return self.grid(
+                    tab=tab, page=page, rows=rows, sort_index=sort_index,
+                    sort_order=sort_order, part_type=part_type,
+                    quick_search=quick_search, search=search, _resign=False,
+                )
             raise SessionExpired(
                 "the listing portal returned an anonymous session handle, so this client "
                 "is not signed in. Reads come back empty and writes are accepted and "

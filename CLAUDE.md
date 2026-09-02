@@ -168,6 +168,17 @@ code must use `Part` fields, never source columns. `StoreProfile` in
 `coreyard/config.py` carries installation-specific storefront identity through
 rendering and fingerprinting so customer-facing strings are not hardcoded.
 
+**"Listable" has one definition, and it now has two halves.** `inventory.photos_required`
+(`STORE_REQUIRE_IMAGES`) and `inventory.researched_prices_required`
+(`STORE_REQUIRE_RESEARCHED_PRICE`, which reads the R#s carrying a price in
+`STORE_CATALOG_OVERRIDES_FILE`) are both asked in `yms/inventory.py`, by `fetch_parts` *and*
+by `listable_r_numbers` — reconciliation asking a different question from sync is how a part
+gets published on one run and archived on the next. Both default to off, because an
+installation that has photographed or researched nothing must not have its whole catalogue
+judged unlistable by an upgrade. `researched_r_numbers` returns `None` when the gate is off
+and a set when it is on: those mean opposite things, and collapsing them would silently
+unlist the entire catalogue.
+
 ```text
 coreyard/cli.py      the one command tree; every command is mounted here
 coreyard/setup_wizard.py  `coreyard init`: writes a working .env and store.json
@@ -201,6 +212,20 @@ to prevent: the two sinks used to render their own titles and tags, and the fing
 covered only the CSV one, so changing the renderer that actually published left the stored
 hash identical and every stale product read as "unchanged" forever. If you are about to write
 a second title/tag/description builder for publishing, don't — extend the renderer.
+
+The renderer asks for the **compact** title form (`seo.build_title(..., compact=True)`), which
+spans the years ("1998-2000") rather than listing them. The builder's own note argues the
+listed form tokenizes better for web search, and that is a real trade — but the two
+storefronts were publishing the same part under two different-looking titles, and one title
+on both channels is the whole point of a single renderer. Three rules downstream of it are
+worth keeping intact: `seo.group_model_labels` says each make once and drops the commas
+(a truck fitting three cab weights lists "Silverado 1500 2500 3500", not the model three
+times); `seo.title_condition` states finish and condition only from vocabularies it
+recognises in the part's own note, and never a negated one, because reading "chrome" out of
+"w/o chrome" asserts the opposite of what the yard wrote; and `seo._loss_rank` weights *what*
+an over-long title gives up instead of counting drops. Counting alone let a truncated title
+naming four vehicles beat an intact one naming a single vehicle — so the cheaper-looking
+answer was the one that stopped saying what the part is.
 
 There are four related publishing workflows, plus three that operate on what is already on
 the store:
@@ -362,7 +387,47 @@ stamps via `images._stamp`, or every delta run re-fingerprints what it touches.
 
 Changing the manifest shape means bumping `state.IMAGE_MANIFEST_VERSION`. A run whose stored
 version is behind **rebaselines**: it records the new manifest and reports no photo changes.
-Only `commit` may declare the new version, because only `commit` rewrites every row.
+Only `commit` may declare the new version, because only `commit` rewrites every row. Version
+**3** is the donor fallback below: a part that used to stamp nothing now stamps its donor's
+frames, and without the bump the first run after the upgrade would have reported a photo
+change for every unphotographed part in the yard at once.
+
+### Photographs of the donor, when there are none of the part
+
+A yard photographs the cars it buys and only some of the parts it pulls, so a large part of
+the catalogue is listable in every respect except that it has no picture. Those parts may
+publish with photographs of the vehicle they came off. The fallback is **opt-in and inert by
+default**: it needs a `donor_images` query in `schema.json`, and without one an unphotographed
+part publishes with no images exactly as before, and the second share listing is skipped
+entirely.
+
+- **A part with photographs of its own never consults the donor folder.** That is what keeps
+  the fallback from moving one already-published product's fingerprint.
+- **Donor references are namespaced** (`run_sync._DONOR_PREFIX`). The two folders share a key
+  space — donor vehicle 1001 and R# 1001 both file a `1001_01.jpg` — so an unnamespaced
+  reference could not tell the two pictures apart, and a part that later gets photographed
+  properly would read as unchanged.
+- **Both resolvers share one implementation** (`run_sync._photo_view`). The full path serves
+  it from one listing of each folder and the delta path lists per key, but the choosing, the
+  trimming and the spelling are the same code — the delta invariant above now has two folders
+  to get identically right instead of one.
+- **A part inherits only the opening frames** (`images.donor_photo_limit`,
+  `STORE_DONOR_PHOTO_LIMIT`, default 6), which are the general views. A donor shoot documents
+  a whole car — a median of 16 frames and up to 99 — because it was taken to record a vehicle,
+  not to sell one bracket off it. The resolver and the publisher must trim to the same number,
+  or the publisher attaches a set the fingerprint did not cover and the part republishes
+  forever.
+- **Each donor frame is uploaded once**, not once per part. Roughly seven parts come off each
+  donor, so staging its frames per product would send the same photograph seven times.
+  `state.donor_media` maps (donor key, filename) to the Shopify file id that `FileSetInput`
+  references, and a row is written only *after* `fileCreate` returned an id — for the same
+  reason a channel row is written only after a clean publish. A frame whose upload produced no
+  id is skipped rather than guessed at, and the parts after it try again.
+- **The listing says whose picture it is.** `profile.donor_photo_note` renders above
+  everything else in the body, and the alt text describes the donor vehicle rather than the
+  part. That a part was not photographed individually is a fact about the data, not a promise
+  about the business, which is why it rides on `Part.uses_donor_photos` and through the
+  renderer rather than being left to each site to remember.
 
 ### Saying nothing when nothing is wrong
 
@@ -455,11 +520,29 @@ list. The unlisted tab is the queue, so there is no cursor to keep or corrupt.
 **It stops at the portal.** It never calls submit. An unattended job is exactly the thing
 that must not close the review window, so pushing stays a separate command a person runs.
 
+### Staying signed in
+
+Borrowing the browser's session needs no password on disk, which is why it was the whole
+design. It does not survive a run that outlives the session, though, and an overnight research
+pass is exactly that — dying two thirds of the way through costs the night.
+
+`EBAY_PORTAL_USER`/`EBAY_PORTAL_PASSWORD` are therefore a sign-in of **last resort**:
+consulted only after the explicit jar, the live browser and the owner-only cache have all come
+up empty, and only when `portal.json` maps `auth.login_fields`. Which input the form calls the
+user, the password and the anti-forgery token is portal vocabulary and belongs in the map,
+exactly like a grid parameter or a tab status. `PortalClient._request` also re-signs **once**
+when a request is redirected to the login path mid-pass, and retries — once, so a genuinely
+wrong password fails fast instead of hammering the form, and the stale session handle is
+dropped with it. The token is read from the form on every attempt rather than cached, because
+it is bound to the page that issued it. A password is never printed, logged, or included in an
+error message, and a sign-in that returns HTTP 200 without every mapped cookie is treated as a
+failure — that is exactly what a wrong password looks like.
+
 ### Which part a listing is
 
 `ebay/link.py` answers this from grid data alone, because reading each listing's edit form
 costs about forty seconds — roughly sixty-six hours for the unlisted tab. Two independent
-rules, covering different halves of the catalogue:
+rules cover different halves of the catalogue:
 
 1. **The R# the portal put at the end of its own title**, accepted only when the part it
    names agrees with the donor stock number *and* part type the grid reported separately.
@@ -468,9 +551,26 @@ rules, covering different halves of the catalogue:
 2. **(donor stock number, part-type code)**, when that pair names exactly one yard part.
    This is what resolves engines, whose titles carry no R#.
 
-Neither is trusted alone, and a listing that resolves to no single part is **left alone**
-rather than retitled as a candidate. Keep that refusal: a listing repriced as the wrong part
-is worse than one nothing touched.
+Where a donor yielded a left and a right of the same type and no R# is in the title, two
+tie-breakers run inside that candidate set, strongest first:
+
+3. **The interchange number the grid reports** (`narrow_by_interchange`). It is not unique
+   across the yard — that is what makes it an *interchange* — but inside a set that already
+   agrees on donor and part type it is decisive, because the catalogue gives a car's left and
+   right the same number with a different side suffix. An identifier agreeing with an
+   identifier, so it goes first.
+4. **The side the portal's own title names** (`narrow_by_side`), against the side the yard
+   recorded. Measured on the unlisted tab the two agreed 1,009 times and contradicted zero
+   times; the interchange number settled 53 the title could not, and the title then settled
+   1,187 of the 1,274 listings the first two rules had left, 93%. Both are grid fields, so
+   neither costs an extra request.
+
+None of the four is trusted alone, and each tie-breaker refuses as readily as it decides:
+`narrow_by_side` requires *every* candidate to have a side on file, because picking the only
+part recorded as left out of a pair whose other side was simply never entered is a coin flip
+wearing a rule's clothes. A listing that resolves to no single part is **left alone** rather
+than retitled as a candidate. Keep that refusal: a listing repriced as the wrong part is worse
+than one nothing touched.
 
 ### Three separate write surfaces, in increasing order of consequence
 
@@ -506,6 +606,14 @@ which a person sees what a batch of researched prices actually says before buyer
   (`ebay/research.apply_guards`): a floor, a ceiling at `MAX_OVER_MEDIAN` times the
   comparable median, and a hard hold on any listing whose condition note mentions a defect.
   The unguarded answer is kept as `raw_suggested` so a reviewer can see what was overridden.
+- Every published price lands a penny under the same five-dollar grid (`research.PRICE_STEP`),
+  including one the floor supplied: a floor is a business minimum, not a shopper-facing
+  number, and `$12.50` sitting beside `$64.99` reads like two different shops. A
+  comparable-derived price still rounds **down**, for the reason it always has — the market
+  cleared there and rounding past it invents evidence. A floored one has no evidence to
+  respect, so it rounds to nearest, and either is nudged up a step if that would land it under
+  the floor. `STORE_PRICE_STEP` puts the catalogue's own charm rounding on the same grid; it
+  defaults to a dollar so no existing installation's prices move on upgrade.
 
 ### Where this channel meets Shopify
 

@@ -85,6 +85,17 @@ class Part:
     # Media — resolved image references (paths or URLs), ordered as they should appear
     images: list[str] = field(default_factory=list)
 
+    # The donor vehicle's photo-folder key, when the source mapping can name one. Carrying it
+    # is not the same as using it: a part with its own photographs never falls back, and both
+    # fields stay inert for such a part so its fingerprint does not move.
+    donor_image_key: Optional[str] = None
+
+    # Set by the image resolver when the fallback actually fired, i.e. this part has no
+    # photographs of its own and is being published with pictures of the car it came off.
+    # The renderer reads this to say so, which is a fact about the data rather than a claim
+    # about the business, so it belongs here and not in the site profile.
+    uses_donor_photos: bool = False
+
     def image_key(self) -> str:
         """Filename stem for this part's photos: its unique R#."""
         return str(self.r_number).strip()

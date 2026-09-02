@@ -208,6 +208,11 @@ class SourceSchema:
     # (stock_number, engine, transmission, drivetrain, body, trim, doors) for donor vehicles.
     vehicle_details: str = ""
 
+    # Maps a donor vehicle to the folder key its photographs are filed under, for parts
+    # the yard never photographed individually. Optional: without it, an unphotographed
+    # part simply publishes with no images, exactly as before.
+    donor_images: str = ""
+
     @property
     def supports_delta(self) -> bool:
         return bool(self.modified_at)
@@ -234,6 +239,11 @@ class SourceSchema:
                 f"{EXAMPLE_PATH.name}) or skip order status sync."
             )
         return self.order_status
+
+    @property
+    def supports_donor_images(self) -> bool:
+        """Whether this mapping can name the donor vehicle's photo folder for a part."""
+        return bool(self.donor_images)
 
     @property
     def supports_images_filter(self) -> bool:
@@ -275,6 +285,7 @@ class SourceSchema:
             part_types=(data.get("part_types") or "").strip(),
             part_type_aliases=(data.get("part_type_aliases") or "").strip(),
             vehicle_details=(data.get("vehicle_details") or "").strip(),
+            donor_images=(data.get("donor_images") or "").strip(),
             order_write=OrderWrite.from_dict(write) if write else None,
         )
 

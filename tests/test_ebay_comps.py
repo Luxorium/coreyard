@@ -73,7 +73,11 @@ class DeterministicFallback(unittest.TestCase):
             {"listing_id": "1", "miles": 250000, "grade": "C",
              "days_in_inventory": 2000, "conditions": "could not test, block is cracked"},
             self.GROUP)
-        self.assertGreaterEqual(record["suggested_price"], 0.40 * 2000 - 1)
+        # The bound is 40% of the median. The published price then lands on the price grid,
+        # a penny under a multiple of the step, so it may sit up to one step and a cent
+        # below the bound without the bound itself having failed.
+        self.assertGreaterEqual(record["suggested_price"],
+                                0.40 * 2000 - float(research.PRICE_STEP) - 0.01)
 
 
 PAGE = """

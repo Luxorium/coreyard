@@ -24,8 +24,12 @@ class PriceGuards(unittest.TestCase):
         out = research.apply_guards({"suggested_price": 5000},
                                     LISTING, {"comp_median": 1000, "comp_count": 5})
         self.assertTrue(out["capped"])
-        self.assertEqual(Decimal(str(out["suggested_price"])),
-                         Decimal("1000") * research.MAX_OVER_MEDIAN)
+        # Capped to the ceiling, then landed on the price grid — so at the ceiling or
+        # within one step under it, never above.
+        ceiling = Decimal("1000") * research.MAX_OVER_MEDIAN
+        price = Decimal(str(out["suggested_price"]))
+        self.assertLessEqual(price, ceiling)
+        self.assertGreater(price, ceiling - research.PRICE_STEP)
 
     def test_a_price_below_the_floor_is_raised_and_flagged(self):
         out = research.apply_guards({"suggested_price": 50},
@@ -94,3 +98,28 @@ class SessionJar(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EveryPriceIsAShopperFacingNumber(unittest.TestCase):
+    """Multiples of five, a penny under. $64.99, never $67.49."""
+
+    def _grid(self, value) -> bool:
+        cents = (Decimal(str(value)) + Decimal("0.01")) % research.PRICE_STEP
+        return cents == 0 and str(value).endswith(".99")
+
+    def test_a_comparable_derived_price_lands_on_the_grid(self):
+        out = research.apply_guards({"suggested_price": 267.43}, LISTING,
+                                    {"comp_median": 300, "comp_count": 8})
+        self.assertTrue(self._grid(out["suggested_price"]), out["suggested_price"])
+
+    def test_a_floored_price_lands_on_the_grid_too(self):
+        # The floor is a business minimum, not a shopper-facing number.
+        out = research.apply_guards({"suggested_price": 4}, LISTING,
+                                    {"comp_median": 5, "comp_count": 3, "floor": "12.50"})
+        self.assertTrue(out["floored"])
+        self.assertTrue(self._grid(out["suggested_price"]), out["suggested_price"])
+
+    def test_landing_on_the_grid_never_drops_below_the_floor(self):
+        out = research.apply_guards({"suggested_price": 4}, LISTING,
+                                    {"comp_median": 5, "comp_count": 3, "floor": "11.00"})
+        self.assertGreaterEqual(Decimal(str(out["suggested_price"])), Decimal("11.00"))

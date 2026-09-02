@@ -1,10 +1,18 @@
-"""Acquire listing-portal session cookies without storing a password.
+"""Acquire listing-portal session cookies.
 
 An explicit cookie header may be supplied in ``EBAY_PORTAL_COOKIES``.  Otherwise the
 most recently used Firefox profiles are inspected read-only: persistent cookies come from
 a temporary copy of ``cookies.sqlite`` and session cookies from Firefox's compressed
 session-restore snapshot.  A successful live jar is cached owner-only under ``out/`` so a
 valid server session survives closing the browser tab.
+
+Borrowing the browser's session was originally the whole design, on the grounds that it
+needs no password on disk.  It does not survive an unattended run that outlives the
+session, though, which is what a multi-hour research pass is, so ``sign_in`` will
+establish one from ``EBAY_PORTAL_USER``/``EBAY_PORTAL_PASSWORD`` when they are set.  Those
+are read through ``config._get`` like every other setting and belong in the gitignored
+``.env``; the form's own field names are portal vocabulary and live in ``portal.json``.
+A password is never printed, logged, or included in an error message.
 """
 
 from __future__ import annotations
@@ -14,6 +22,7 @@ import json
 import shutil
 import sqlite3
 import tempfile
+from html.parser import HTMLParser
 from pathlib import Path
 
 from coreyard.config import REPO_ROOT, _get
@@ -207,8 +216,82 @@ def save_cookies(jar: dict[str, str], path: Path | None = None) -> Path:
     return path
 
 
+class _Hidden(HTMLParser):
+    """Pull one hidden input's value out of a form, without a parser dependency."""
+
+    def __init__(self, field: str) -> None:
+        super().__init__()
+        self.field = field
+        self.value: str | None = None
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag != "input" or self.value is not None:
+            return
+        found = dict(attrs)
+        if found.get("name") == self.field:
+            self.value = found.get("value") or ""
+
+
+def can_sign_in(portal: PortalMap) -> bool:
+    """Whether this installation has both credentials and a mapped sign-in form."""
+    return bool(_get("EBAY_PORTAL_USER", "") and _get("EBAY_PORTAL_PASSWORD", "")
+                and portal.login_fields)
+
+
+def sign_in(portal: PortalMap, session=None) -> dict[str, str]:
+    """Establish a fresh session by posting the sign-in form, and return its cookies.
+
+    The anti-forgery token is read from the form itself on every attempt rather than
+    stored: it is bound to the page that issued it, so a cached one is worse than none.
+
+    Raises :class:`AuthError` when the post completes but the portal did not hand back
+    every cookie it is supposed to — a wrong password answers with the login page again
+    and HTTP 200, which is otherwise indistinguishable from success.
+    """
+    import requests
+
+    user = _get("EBAY_PORTAL_USER", "") or ""
+    password = _get("EBAY_PORTAL_PASSWORD", "") or ""
+    if not (user and password):
+        raise AuthError(
+            "no EBAY_PORTAL_USER/EBAY_PORTAL_PASSWORD is configured, so CoreYard cannot "
+            "establish a portal session of its own."
+        )
+    if not portal.login_fields:
+        raise AuthError(
+            "this portal map has no auth.login_fields, so CoreYard cannot tell the "
+            "sign-in form which input is the user and which is the password."
+        )
+    session = session or requests.Session()
+    url = portal.base_url + portal.login_path
+    headers = dict(portal.headers)
+    form = {portal.login_fields["username"]: user,
+            portal.login_fields["password"]: password}
+    token_field = portal.login_fields.get("token")
+    if token_field:
+        page = session.get(url, headers=headers, timeout=60)
+        parser = _Hidden(token_field)
+        parser.feed(page.text)
+        if parser.value:
+            form[token_field] = parser.value
+    session.post(url, data=form, headers=headers, timeout=60, allow_redirects=True)
+    jar = dict(session.cookies.get_dict())
+    missing = [name for name in portal.cookie_names if name not in jar]
+    if missing:
+        # Deliberately says which cookie is absent and nothing about the credentials.
+        raise AuthError(
+            f"portal sign-in did not establish a session (no {', '.join(missing)} "
+            f"cookie). Check EBAY_PORTAL_USER and EBAY_PORTAL_PASSWORD."
+        )
+    try:
+        save_cookies(jar)
+    except OSError:
+        pass
+    return jar
+
+
 def get_cookies(portal: PortalMap) -> dict[str, str]:
-    """Prefer an explicit jar, then the live browser, then the owner-only cache."""
+    """Explicit jar, then the live browser, then the cache, then a sign-in of our own."""
     explicit = parse_cookie_header(_get("EBAY_PORTAL_COOKIES", "") or "")
     if explicit:
         return explicit
@@ -218,6 +301,8 @@ def get_cookies(portal: PortalMap) -> dict[str, str]:
         cached = cached_cookies()
         if cached and all(name in cached for name in portal.cookie_names):
             return cached
+        if can_sign_in(portal):
+            return sign_in(portal)
         raise
     try:
         save_cookies(jar)

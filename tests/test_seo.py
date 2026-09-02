@@ -53,6 +53,16 @@ class Titles(unittest.TestCase):
             found = BANNED_IN_TITLE & set(title)
             self.assertFalse(found, f"{title!r} contains {sorted(found)}")
 
+    def test_spanned_titles_carry_no_symbol_but_the_year_span(self):
+        # Shopify publishes compact=True, so this is the form the catalogue actually
+        # carries; the span's own hyphen is the one symbol the site chose to allow.
+        for p in [part(), part(side="Right", part_type="Tail Lamp"),
+                  part(part_type="Grille", description="BLACK TEXTURED")]:
+            title = seo.build_title(p, compact=True)
+            bare = re.sub(r"\b\d{4}-\d{4}\b", "", title)
+            found = BANNED_IN_TITLE & set(bare)
+            self.assertFalse(found, f"{title!r} contains {sorted(found)}")
+
     def test_letter_digit_hyphen_closes_up_for_search(self):
         # Shoppers type "F150", not "F-150".
         self.assertIn("F150", seo.build_title(part()))
@@ -80,14 +90,34 @@ class Titles(unittest.TestCase):
         self.assertIn("2008 2009 2010", titled(2008, 2010))     # short span listed out
         self.assertIn("2004 thru 2012", titled(2004, 2012))     # long span uses a word
 
-    def test_multiple_models_are_comma_separated_not_slashed(self):
+    def test_multiple_models_run_together_without_punctuation(self):
         fit = [
             Fitment(make="GMC", model="Acadia", year_start=2008, year_end=2011),
             Fitment(make="Buick", model="Enclave", year_start=2009, year_end=2011),
         ]
         title = seo.build_title(part(side=None, part_type="Alternator", fitment=fit))
-        self.assertIn("GMC Acadia, Buick Enclave", title)
+        self.assertIn("GMC Acadia Buick Enclave", title)
         self.assertNotIn("/", title)
+        self.assertNotIn(",", title)
+
+    def test_a_make_is_never_said_twice(self):
+        fit = [
+            Fitment(make="Infiniti", model="QX60", year_start=2013, year_end=2017),
+            Fitment(make="Nissan", model="Pathfinder", year_start=2013, year_end=2017),
+            Fitment(make="Infiniti", model="JX35", year_start=2013, year_end=2017),
+        ]
+        title = seo.build_title(part(side=None, part_type="Alternator", fitment=fit),
+                                compact=True)
+        self.assertIn("Infiniti QX60 JX35 Nissan Pathfinder", title)
+        self.assertEqual(1, title.count("Infiniti"))
+
+    def test_a_repeated_model_word_collapses(self):
+        fit = [Fitment(make="Chevrolet", model=f"Silverado {n}", year_start=2015,
+                       year_end=2019) for n in (1500, 2500, 3500)]
+        title = seo.build_title(part(side=None, part_type="Alternator", fitment=fit),
+                                compact=True)
+        self.assertIn("Chevrolet Silverado 1500 2500 3500", title)
+        self.assertEqual(1, title.count("Silverado"))
 
 
 class Qualifiers(unittest.TestCase):
@@ -340,3 +370,116 @@ class TagsWithoutFitment(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TitleQualifierWording(unittest.TestCase):
+    """The catalogue writes for a parts counter; a title is read on a results page."""
+
+    def _with_note(self, note: str, **kw) -> Part:
+        app = Application(year_start=1998, year_end=2000, note=note)
+        fitment = Fitment(year_start=1998, year_end=2000, make="Ford", model="Ranger",
+                          applications=[app])
+        return part(fitment=[fitment], **kw)
+
+    def test_years_span_instead_of_listing(self):
+        self.assertIn("1998-2000", seo.build_title(self._with_note("2.3L"), compact=True))
+
+    def test_a_bare_side_letter_is_dropped_when_the_part_states_its_side(self):
+        title = seo.build_title(self._with_note("L"), compact=True)
+        self.assertNotRegex(title, r"\bL\b")
+
+    def test_a_bare_side_letter_is_spelled_out_when_the_part_has_none(self):
+        title = seo.build_title(self._with_note("R", side=None), compact=True)
+        self.assertIn("Right", title)
+
+    def test_an_exclusion_qualifier_never_reaches_a_title(self):
+        title = seo.build_title(self._with_note("exc electric vehicle"), compact=True)
+        self.assertNotIn("electric", title.lower())
+
+    def test_counter_abbreviations_are_expanded(self):
+        self.assertIn("Sedan", seo.build_title(self._with_note("Sdn"), compact=True))
+
+
+class FinishAndConditionFromNote(unittest.TestCase):
+    """What the yard wrote about this one part, normalised but not embellished."""
+
+    def test_finish_is_stated(self):
+        self.assertEqual("Chrome", seo.title_condition(part(description="CHROME")))
+
+    def test_the_yards_own_wording_and_order_is_kept(self):
+        self.assertEqual("Black Textured",
+                         seo.title_condition(part(description="BLACK TEXTURED")))
+
+    def test_a_flaw_is_disclosed_beside_the_finish(self):
+        # "CHROME BUBBLED" is bubbled chrome: the buyer sees it in the photographs either
+        # way, so it belongs in the title rather than in a not-as-described case.
+        self.assertEqual("Chrome Bubbled",
+                         seo.title_condition(part(description="CHROME BUBBLED")))
+
+    def test_misspelled_flaws_normalise_to_one_word(self):
+        for spelling in ("faded", "fading", "fadding", "fadded", "faddin"):
+            self.assertEqual("Faded", seo.title_condition(part(description=spelling)),
+                             f"{spelling!r} should normalise")
+
+    def test_a_positive_note_is_stated_too(self):
+        self.assertEqual("Tested", seo.title_condition(part(description="TESTED, RUNS")))
+
+    def test_a_note_it_cannot_read_makes_no_claim(self):
+        self.assertEqual("", seo.title_condition(part(description="upper, 4DR")))
+
+    def test_condition_reaches_the_title_after_the_part_type(self):
+        title = seo.build_title(part(part_type="Grille", side=None,
+                                     description="CHROME BUBBLED"), compact=True)
+        self.assertTrue(title.rstrip().endswith("Grille Chrome Bubbled"), title)
+
+
+class TruncationIsTheLastResort(unittest.TestCase):
+    """Naming one vehicle and the whole part beats four vehicles and half the part."""
+
+    def _many_models(self):
+        apps = [Application(year_start=2008, year_end=2011, note="")]
+        return part(
+            part_type="Anti-lock Brake Pts", side=None,
+            fitment=[Fitment(year_start=2008, year_end=2011, make=make, model=model,
+                             applications=apps)
+                     for make, model in (("GMC", "Acadia"), ("Saturn", "Outlook"),
+                                         ("Buick", "Enclave"), ("Chevrolet", "Traverse"))],
+        )
+
+    def test_a_marketplace_title_keeps_the_part_type_whole(self):
+        title, dropped = seo.fit_title(self._many_models(), STORE, limit=80, compact=True)
+        self.assertNotIn("truncated", dropped, title)
+        self.assertLessEqual(len(title), 80)
+        # The part type is the last segment in compact order, so this is what truncation ate.
+        self.assertTrue(title.rstrip().endswith("Module"), title)
+
+    def test_dropping_a_vehicle_name_is_preferred_to_cutting_the_title(self):
+        title, _ = seo.fit_title(self._many_models(), STORE, limit=80, compact=True)
+        self.assertIn("GMC Acadia", title)
+        self.assertNotIn("Chevrolet Traverse", title)
+
+
+class WhatATightTitleGivesUpFirst(unittest.TestCase):
+    """On eBay's 80 characters, what is sacrificed matters as much as how much."""
+
+    def _crowded(self):
+        apps = [Application(year_start=2005, year_end=2010, note="")]
+        return part(
+            part_type="Side View Mirror", side="Right",
+            fitment=[Fitment(year_start=2005, year_end=2010, make=make, model=model,
+                             applications=apps)
+                     for make, model in (("Chevrolet", "Cobalt"), ("Pontiac", "G5"),
+                                         ("Pontiac", "Pursuit"), ("Saturn", "Ion"))],
+        )
+
+    def test_a_vehicle_name_is_given_up_before_the_side(self):
+        # A mirror sold without a side is a return, not a sale; another vehicle name is not.
+        title, dropped = seo.fit_title(self._crowded(), STORE, limit=80, compact=True)
+        self.assertNotIn("side", dropped, title)
+        self.assertNotIn("truncated", dropped, title)
+        self.assertIn("Right", title)
+        self.assertLessEqual(len(title), 80)
+
+    def test_the_part_type_always_survives(self):
+        title, _ = seo.fit_title(self._crowded(), STORE, limit=80, compact=True)
+        self.assertIn("Mirror", title)

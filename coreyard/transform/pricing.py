@@ -62,11 +62,30 @@ def charm(value: Decimal, *, step: Decimal = ONE_DOLLAR,
     return low if (value - low) < (high - value) else high
 
 
+def retail_step() -> Decimal:
+    """The grid a published price sits under. ``STORE_PRICE_STEP`` overrides.
+
+    A dollar grid gives $49.99 but also $67.99 and $12.99. A site that wants every price to
+    read as a considered number rather than a converted one sets five, and gets $64.99 and
+    $14.99 instead. One is not tidier than the other in principle — it is a merchandising
+    choice, so it is configuration, and the default stays a dollar so no existing
+    installation's prices move on upgrade.
+    """
+    raw = (_get("STORE_PRICE_STEP", "") or "").strip()
+    if not raw:
+        return ONE_DOLLAR
+    try:
+        step = Decimal(raw)
+    except InvalidOperation:
+        return ONE_DOLLAR
+    return step if step > 0 else ONE_DOLLAR
+
+
 def retail(value: Optional[Decimal]) -> Optional[Decimal]:
     """The price to publish: charm-rounded when enabled, otherwise untouched."""
     if value is None:
         return None
-    return charm(value) if charm_enabled() else value
+    return charm(value, step=retail_step()) if charm_enabled() else value
 
 
 def retail_str(value: Optional[Decimal], default: str = "") -> str:

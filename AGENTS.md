@@ -4,8 +4,10 @@
 
 `coreyard/` implements the source-system-to-Shopify pipeline. `models.py`, `config.py` and
 `profile.py` define the neutral data/config/policy contracts. `yms/` owns schema-driven SQL
-extraction, SMB/TDS transport, photos, fitment, changed-since deltas (`delta.py`), optional
-catalogue enrichment (`enrich.py`), and the narrowly scoped order write. `transform/` holds
+extraction, SMB/TDS transport, photos (the part folder and, for parts the yard never
+photographed, the donor-vehicle folder behind them), fitment, changed-since deltas
+(`delta.py`), optional catalogue enrichment (`enrich.py`), and the narrowly scoped order
+write. `transform/` holds
 the canonical renderer (`render.py`) plus the SEO engine, tag ownership, weights, pricing,
 CSV framing; `sink/` contains the one Shopify client and the CSV and API
 publishers. `orders/` owns the order pipeline and its transports, `reconcile/` compares the
@@ -23,9 +25,10 @@ external; `out/`, `*.sqlite3`, `.env`, `schema.json`, `portal.json`, `notes/`, a
 A storefront repository may live beside this one. CoreYard must never import it, assume it,
 or reach for a sibling path: site policy arrives as configuration files whose paths are named
 in `.env` (`STORE_PROFILE_FILE`, `STORE_WEIGHT_RULES_FILE`, `STORE_SHIPPING_POLICY_FILE`,
-`STORE_ORDER_POLICY_FILE`), and everything else goes through Shopify or this CLI. Those four
-schemas are checkable offline with `bin/coreyard validate`, which is what lets a storefront
-repository verify its own files in CI without importing anything from here.
+`STORE_ORDER_POLICY_FILE`, and the reviewed decisions in `STORE_CATALOG_OVERRIDES_FILE`), and
+everything else goes through Shopify or this CLI. Those schemas are checkable offline with
+`bin/coreyard validate`, which is what lets a storefront repository verify its own files in CI
+without importing anything from here.
 
 ## Build, Test, and Development Commands
 
@@ -145,9 +148,15 @@ failed payloads may remain only in the owner-only queue for the bounded retry wi
 - Product/image rendering feeds stored fingerprints. Changing `transform/render.py`,
   `transform/seo.py`, the weight table, the site profile, or image resolution can trigger a
   full rewrite.
-- "Listable" has one definition: `yms.inventory.photos_required` plus the mapping's `scope`.
-  Sync, reconciliation, bulk publishing and the audit all read it; a second SQL condition
-  anywhere lets them publish and archive the same part in turn.
+- "Listable" has one definition and two optional halves, both in `yms/inventory.py`:
+  `photos_required` (`STORE_REQUIRE_IMAGES`) and `researched_prices_required`
+  (`STORE_REQUIRE_RESEARCHED_PRICE`, satisfied by an R# carrying a price in
+  `STORE_CATALOG_OVERRIDES_FILE`), on top of the mapping's `scope`. `fetch_parts` and
+  `listable_r_numbers` both apply them, so sync, reconciliation, bulk publishing and the audit
+  cannot disagree; a second condition anywhere lets them publish and archive the same part in
+  turn. Both default to off — an upgrade must not judge an unresearched catalogue unlistable.
+  `researched_r_numbers` returns `None` for "no gate" and a set for "gate on"; collapsing the
+  two unlists everything.
 - Retirement archives rather than deletes. API sync guards mass retirement with
   `--limit` and `--max-retire-fraction`; the webhook also retires ordered parts.
 - **Anything that narrows a run blocks retirement**: `--limit`, `--r-number`, and any scope
@@ -159,6 +168,16 @@ failed payloads may remain only in the owner-only queue for the bounded retry wi
   is rebuilt only for a part whose photo *set* moved, never for a copy change.
 - Photo refresh stages and attaches before deleting the superseded media, so a failure part
   way through leaves a stale photograph rather than a product with none.
+- A part with no photographs of its own may inherit its donor vehicle's, when `schema.json`
+  maps `donor_images`. A part that *has* its own never consults that folder, donor references
+  are namespaced (`run_sync._DONOR_PREFIX`) because the two folders share a key space, and
+  both resolvers go through `run_sync._photo_view` so the full and delta paths spell an
+  unchanged photo identically. Resolver and publisher must trim to the same
+  `images.donor_photo_limit`, or the part republishes forever.
+- Donor frames are uploaded once and referenced by every part off that donor
+  (`state.donor_media`, written only after `fileCreate` returned an id). The body note and the
+  alt text say the picture is of the car, not the part: that is a fact about the data, so it
+  travels on `Part.uses_donor_photos` through the renderer.
 - A long run banks its progress (`run_sync.CHECKPOINT_EVERY`), so a scheduled job stopped by
   its timeout keeps what it published instead of starting the same backlog again.
 - Both retirement paths record the pre-archive status in the sync state, and a part that
@@ -177,6 +196,17 @@ failed payloads may remain only in the owner-only queue for the bounded retry wi
   The gap between the first two is the review window for researched prices.
 - Every portal write is a dry run without `--apply`, and its cap counts listings rather than
   plan entries and refuses *before* the first write, so a refused batch writes nothing.
+- A listing is matched to a part from grid data alone, by the R# in the portal's own title or
+  by (donor stock number, part-type code), then — inside a candidate set only — by the grid's
+  interchange number and by the side the title names. Each refuses rather than guesses: a
+  listing that resolves to no single part is left alone, because repricing the wrong part is
+  worse than touching nothing.
+- `EBAY_PORTAL_USER`/`EBAY_PORTAL_PASSWORD` are a sign-in of last resort, used only when the
+  cookie sources yield nothing and only if `portal.json` maps `auth.login_fields`; the client
+  re-signs at most once per expired request. Never print, log, or put a password in an error.
+- Researched prices land a penny under a five-dollar grid (`research.PRICE_STEP`), rounding
+  down from comparable evidence and to nearest from the floor. `STORE_PRICE_STEP` puts the
+  catalogue's own charm rounding on the same grid, defaulting to a dollar.
 - Researched titles and prices reach Shopify only as `STORE_CATALOG_OVERRIDES_FILE`, read by
   the one renderer and keyed by R#. Never patch a product directly from that channel: the
   value would sit outside the fingerprint and the next sync would revert it.

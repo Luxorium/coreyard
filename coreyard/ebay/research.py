@@ -29,6 +29,7 @@ from coreyard.transform.pricing import charm, parse_money
 # module on the group, because a table of 143 hand-maintained floors would still say
 # nothing about the individual part in front of it.
 FLOOR = Decimal("199.99")
+PRICE_STEP = Decimal("5")
 MAX_OVER_MEDIAN = Decimal("1.6")
 
 _DEFECT = re.compile(
@@ -143,6 +144,17 @@ def apply_guards(record: dict, listing: dict, group: dict) -> dict:
     if not group.get("comp_count"):
         flags.append("no comparables found")
     out["capped"] = any(item.startswith("capped") for item in flags)
+    # Every published price lands a penny under the same five-dollar step — including one
+    # the floor supplied. A floor is a business minimum, not a shopper-facing number, and
+    # $12.50 sitting beside $64.99 reads like two different shops. A comparable-derived
+    # price still rounds *down*, for the reason it always has: the market cleared there and
+    # rounding past it invents evidence. A floored one rounds to the nearest instead, since
+    # there is no evidence to respect, and either is nudged up a step if it would otherwise
+    # land under the floor — a pretty number below the floor is not a floor.
+    landed = charm(suggested, step=PRICE_STEP, round_down=not out["floored"])
+    if landed < floor:
+        landed += PRICE_STEP
+    suggested = landed
     out["suggested_price"] = float(suggested.quantize(Decimal("0.01")))
     out["review_flags"] = flags
     return out
@@ -226,7 +238,10 @@ def price_listing(listing: dict, group: dict) -> dict:
     raw = Decimal(str(anchor)) * max(factor, Decimal("0.40"))
     # The same charm rule the catalogue and the comparable search use, rounded down so the
     # fallback never becomes less competitive than the evidence behind it.
-    suggested = charm(raw, round_down=True)
+    # The same five-dollar grid ``comps`` lands on. These two produced prices for the
+    # same storefront off a dollar grid and a five-dollar one, so a shopper saw $67.99
+    # beside $64.99 with nothing to explain the difference.
+    suggested = charm(raw, step=PRICE_STEP, round_down=True)
     nearest = sorted(comps, key=lambda item: abs(float(item["price"]) - float(anchor)))[:2]
     evidence = "\n".join(
         f"${float(item['price']):.2f} - {str(item['title'])[:100]}" for item in nearest

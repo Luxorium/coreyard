@@ -18,7 +18,7 @@ import re
 from decimal import Decimal
 from typing import Any, Optional
 
-from coreyard.config import require_images
+from coreyard.config import _get, flag, require_images
 from coreyard.models import Part
 from coreyard.yms import schema
 from coreyard.yms.db import connect, query
@@ -57,6 +57,37 @@ def photos_required(mapping: Optional[schema.SourceSchema] = None) -> bool:
             "schema.json (see schema.example.json) or turn the setting off."
         )
     return True
+
+
+def researched_prices_required() -> bool:
+    """Whether this storefront only lists a part once a researched price exists for it.
+
+    The other half of "listable", and deliberately the same shape as
+    :func:`photos_required`: sync, reconciliation, bulk publishing and the audit all ask
+    here rather than each deciding for itself, because when they disagree the storefront
+    ends up in a state none of them can explain.
+
+    Off by default. An installation that has researched nothing must not have its whole
+    catalogue judged unlistable by an upgrade.
+    """
+    return flag("STORE_REQUIRE_RESEARCHED_PRICE", False)
+
+
+def researched_r_numbers() -> Optional[set[str]]:
+    """R#s carrying a reviewed, researched price — or ``None`` when the gate is off.
+
+    ``None`` and ``set()`` mean opposite things and the difference matters: the first is
+    "this site does not gate on price", the second is "it does, and nothing qualifies yet".
+    Collapsing them would silently unlist the entire catalogue.
+
+    Reads the already-loaded environment. Like every other render-path gate it must not call
+    ``load_env`` itself, or a unit test picks up the installation's real ``.env``.
+    """
+    if not researched_prices_required():
+        return None
+    from coreyard.overrides import load as load_overrides
+    overrides = load_overrides(_get("STORE_CATALOG_OVERRIDES_FILE", "") or None)
+    return {r for r, item in overrides.parts.items() if item.price is not None}
 
 
 def build_query(limit: Optional[int] = None, images_only: Optional[bool] = None) -> str:
@@ -189,7 +220,11 @@ def fetch_parts(limit: Optional[int] = None, images_only: Optional[bool] = None)
                 conn,
                 mapping.build_page_query(page_size, after, images_only=images_only),
             )
-        parts.extend(p for p in (row_to_part(r) for r in rows) if p.is_listable())
+        priced = researched_r_numbers()
+        parts.extend(
+            p for p in (row_to_part(r) for r in rows)
+            if p.is_listable() and (priced is None or str(p.r_number).strip() in priced)
+        )
         fetched = len(rows)
         if fetched < page_size:
             break
@@ -247,11 +282,45 @@ def listable_r_numbers(images_only: Optional[bool] = None) -> set[str]:
             if value:
                 found.add(value)
         if len(rows) < FETCH_PAGE_SIZE:
-            return found
+            # Same gate ``fetch_parts`` applies, in the same module, because reconciliation
+            # asking a different question from sync is how a part gets published on one run
+            # and archived on the next.
+            priced = researched_r_numbers()
+            return found if priced is None else found & priced
         next_after = rows[-1].get("r_number")
         if next_after is None or str(next_after) == str(after):
             raise RuntimeError("listable paging did not advance past the last R#")
         after = next_after
+
+
+def donor_image_keys() -> dict[str, str]:
+    """Map a donor vehicle's stock number to the folder key its photographs are filed under.
+
+    This is what lets a part the yard never photographed publish with pictures of the car it
+    came off. It is keyed by stock number rather than by R# deliberately: every part off one
+    donor shares the answer, so the map is a few thousand rows instead of tens of thousands,
+    and a run pays for one small query rather than one per part.
+
+    Empty when the site's mapping declares no ``donor_images`` query, which is the default —
+    an installation that has not mapped it keeps publishing unphotographed parts with no
+    images at all, exactly as before.
+    """
+    other = _elsewhere()
+    if other is not None:
+        getter = getattr(other, "donor_image_keys", None)
+        return getter() if getter else {}
+    mapping = schema.load()
+    if not mapping.supports_donor_images:
+        return {}
+    with connect() as conn:
+        rows = query(conn, mapping.donor_images)
+    found: dict[str, str] = {}
+    for row in rows:
+        stock = _clean(row.get("stock_number"))
+        key = _clean(row.get("donor_key"))
+        if stock and key:
+            found[stock] = key
+    return found
 
 
 if __name__ == "__main__":

@@ -9,6 +9,12 @@ already validated against the server.
 
 The trailing underscore in the ``{r_number}_*`` mask anchors the match, so R# ``1000``
 does not pick up ``10001_01.jpg`` and R# ``10002`` does not pick up ``100020_01.jpg``.
+
+A second folder, keyed by the source system's own donor-vehicle identifier, holds photographs
+of the car a part came off. It is read only for parts the yard never photographed
+individually, and every read goes through the same listing, stamping and ordering code as the
+inventory folder — a donor photo replaced under its own filename has to be as visible as a
+part photo replaced under its own filename.
 """
 
 from __future__ import annotations
@@ -24,6 +30,23 @@ from pathlib import Path
 from coreyard.config import SmbConfig, load_smb_config
 
 _IMAGE_RE = re.compile(r".+\.(jpg|jpeg|png)$", re.IGNORECASE)
+
+# A donor shoot documents a whole car — a median of 16 frames and up to 99 — because it was
+# taken to record a vehicle, not to sell one bracket off it. Publishing all of them would put
+# dozens of near-identical car pictures on a listing, so a part inherits only the opening
+# frames, which are the general views. The resolver and the publisher both trim here, because
+# a publisher that attached a different set from the one the fingerprint covered would
+# republish the part forever.
+DONOR_PHOTO_LIMIT = 6
+
+
+def donor_photo_limit() -> int:
+    """How many donor frames one part may inherit. ``STORE_DONOR_PHOTO_LIMIT`` overrides."""
+    from coreyard.config import _get
+    try:
+        return max(1, int(_get("STORE_DONOR_PHOTO_LIMIT", "") or DONOR_PHOTO_LIMIT))
+    except (TypeError, ValueError):
+        return DONOR_PHOTO_LIMIT
 
 # One `smbclient ls` row: name, DOS attribute letters, size in bytes, modification time.
 # The size and time are the point. Listing names alone could not see a photo *replaced*
@@ -105,15 +128,40 @@ class SmbImageStore:
 
     def list_inventory_manifest(self, r_number: str) -> list[tuple[str, str]]:
         """(filename, stamp) for one R#'s photos, ordered by sequence."""
-        subdir = self.cfg.inventory_subdir
-        mask = f"{r_number}_*"
-        out = self._run(f'cd "{subdir}"; ls "{mask}"')
-        return self._parse_ls(out, r_number)
+        return self._list_manifest(self.cfg.inventory_subdir, r_number)
+
+    def list_vehicle_images(self, donor_key: str) -> list[str]:
+        """Return the donor vehicle's image filenames, ordered by sequence."""
+        return [name for name, _stamp_text in self.list_vehicle_manifest(donor_key)]
+
+    def list_vehicle_manifest(self, donor_key: str) -> list[tuple[str, str]]:
+        """(filename, stamp) for one donor vehicle's photos, ordered by sequence.
+
+        The donor folder is keyed by the source system's own vehicle identifier, not by
+        stock number and not by R#. Those key spaces overlap numerically, which is why a
+        donor photo is namespaced before it reaches a fingerprint (see
+        ``run_sync._make_resolver``): ``1001_01.jpg`` is a different picture depending on
+        which folder it came out of.
+        """
+        return self._list_manifest(self.cfg.vehicle_subdir, donor_key)
+
+    def _list_manifest(self, subdir: str, key: str) -> list[tuple[str, str]]:
+        """(filename, stamp) for one key's photos in one folder, ordered by sequence."""
+        out = self._run(f'cd "{subdir}"; ls "{key}_*"')
+        return self._parse_ls(out, key)
 
     def list_all_inventory_images(self) -> dict[str, list[str]]:
         """Map every R# on the share to its ordered photo filenames, in one listing."""
         return {r: [name for name, _ in entries]
                 for r, entries in self.list_all_inventory_manifest().items()}
+
+    def list_all_vehicle_manifest(self) -> dict[str, list[tuple[str, str]]]:
+        """Map every donor vehicle on the share to its ordered photos, in one listing.
+
+        Same round-trip argument as the inventory folder: a run asks about thousands of
+        donors at once, and one directory listing answers all of them.
+        """
+        return self._list_all_manifest(self.cfg.vehicle_subdir)
 
     def list_all_inventory_manifest(self) -> dict[str, list[tuple[str, str]]]:
         """Map every R# on the share to its ordered photo filenames, in one listing.
@@ -127,7 +175,11 @@ class SmbImageStore:
         Files that do not match ``{R#}_{NN}.ext`` are ignored, so stray uploads in the
         folder cannot invent an R#.
         """
-        out = self._run(f'cd "{self.cfg.inventory_subdir}"; ls')
+        return self._list_all_manifest(self.cfg.inventory_subdir)
+
+    def _list_all_manifest(self, subdir: str) -> dict[str, list[tuple[str, str]]]:
+        """Map every key in one folder to its ordered (filename, stamp) pairs."""
+        out = self._run(f'cd "{subdir}"; ls')
         by_part: dict[str, list[tuple[str, str]]] = {}
         for line in out.splitlines():
             line = line.strip()
@@ -174,13 +226,25 @@ class SmbImageStore:
         ``get`` commands are batched into a single smbclient connection. Returns the
         ordered list of local paths that now exist.
         """
-        names = self.list_inventory_images(r_number)
+        return self._fetch(self.cfg.inventory_subdir,
+                           self.list_inventory_images(r_number), dest_dir)
+
+    def fetch_vehicle(self, donor_key: str, dest_dir: Path) -> list[Path]:
+        """Download a donor vehicle's images into ``dest_dir``.
+
+        Used only for a part the yard has not photographed itself; a part with its own
+        photos never reaches here, so its published media are untouched by this path.
+        """
+        return self._fetch(self.cfg.vehicle_subdir,
+                           self.list_vehicle_images(donor_key), dest_dir)
+
+    def _fetch(self, subdir: str, names: list[str], dest_dir: Path) -> list[Path]:
+        """Download ``names`` from one folder into ``dest_dir``, batched into one session."""
         if not names:
             return []
         dest_dir.mkdir(parents=True, exist_ok=True)
         to_get = [n for n in names if not (dest_dir / n).exists() or (dest_dir / n).stat().st_size == 0]
         if to_get:
-            subdir = self.cfg.inventory_subdir
             gets = "; ".join(f'get "{n}"' for n in to_get)
             self._run(f'lcd "{dest_dir}"; cd "{subdir}"; {gets}', cwd=str(dest_dir))
         return [dest_dir / n for n in names if (dest_dir / n).exists()]

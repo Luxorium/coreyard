@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 from decimal import Decimal
 from pathlib import Path
 
@@ -162,10 +163,33 @@ class AnonymousSession(unittest.TestCase):
         return Response({"pages": 1, "page": 1, "records": len(rows),
                          "session": session_id, "rows": list(rows)})
 
-    def test_an_anonymous_read_fails_loudly_instead_of_coming_back_empty(self):
+    ROW = {"listing_id": 7, "interchange_number": "300-A", "title": "Engine",
+           "price": "$10.00", "part_type": 300}
+
+    def test_an_anonymous_handle_signs_in_again_and_retries_the_read(self):
+        session = Session([self._page(self.ANON), self._page("live", [self.ROW])])
+        client = self._client(session)
+        with mock.patch("coreyard.ebay.client.can_sign_in", return_value=True), \
+                mock.patch("coreyard.ebay.client.sign_in", return_value={}) as signed:
+            page = client.grid(tab="unlisted")
+        self.assertEqual(signed.call_count, 1)
+        self.assertEqual(client.session_id, "live")
+        self.assertEqual(page["rows"][0]["listing_id"], "7")
+
+    def test_it_re_signs_only_once_rather_than_hammering_the_form(self):
+        session = Session([self._page(self.ANON), self._page(self.ANON)])
+        client = self._client(session)
+        with mock.patch("coreyard.ebay.client.can_sign_in", return_value=True), \
+                mock.patch("coreyard.ebay.client.sign_in", return_value={}) as signed:
+            with self.assertRaises(SessionExpired):
+                client.grid()
+        self.assertEqual(signed.call_count, 1)
+
+    def test_without_credentials_it_fails_loudly_instead_of_reading_empty(self):
         client = self._client(Session([self._page(self.ANON)]))
-        with self.assertRaises(SessionExpired):
-            client.grid()
+        with mock.patch("coreyard.ebay.client.can_sign_in", return_value=False):
+            with self.assertRaises(SessionExpired):
+                client.grid()
 
     def test_a_write_against_an_anonymous_handle_is_refused_not_discarded(self):
         client = self._client(Session([]))
@@ -175,10 +199,12 @@ class AnonymousSession(unittest.TestCase):
                 ["7"], session_id=self.ANON,
             )
 
-    def test_an_empty_grid_with_a_live_handle_is_still_a_good_read(self):
+    def test_an_empty_grid_with_a_live_handle_is_not_treated_as_signed_out(self):
         # A filtered read of a part type the yard holds none of is legitimately empty.
-        # Only the handle says whether anyone is signed in.
+        # Re-signing for those would hammer the sign-in form once per part type.
         client = self._client(Session([self._page("live")]))
-        page = client.grid(part_type="999")
+        with mock.patch("coreyard.ebay.client.sign_in") as signed:
+            page = client.grid(part_type="999")
+        signed.assert_not_called()
         self.assertEqual(page["records"], 0)
         self.assertEqual(client.session_id, "live")

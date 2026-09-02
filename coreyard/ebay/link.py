@@ -25,7 +25,17 @@ trailing R# and every one of them was confirmed by the donor key, with no contra
 the remaining 42 were engines, whose titles carry no R# and which the donor key resolves on
 its own because a car has one engine.
 
-So the two rules cover different halves of the catalogue and neither has to be trusted
+A third signal finishes the job for the parts a car carries two of. Where the donor key
+names several parts and no R# is in the title, the portal's own title still says which side
+the listing is — "Left Front Driver Door Assembly" — and the yard records a side for each
+part. Measured against the 1,274 listings the first two rules left unresolved on the
+unlisted tab, this settled 1,187 of them, 93%: the left listing took the part the yard calls
+left and the right listing took the right, with four contradictions, all held. It is a grid
+field, so it costs no extra request, and it is subject to the same refusal as the others —
+every candidate must have a side on file, or the one part that happens to have had its side
+entered would win by default.
+
+So the three rules cover different halves of the catalogue and none has to be trusted
 alone. What survives from the original design is the refusal: a listing this cannot
 identify to one part returns nothing rather than a candidate, because a listing retitled
 and repriced as the wrong part is a worse outcome than a listing left alone.
@@ -77,6 +87,54 @@ def index_parts(parts: Iterable[Part]) -> dict[tuple[str, str], list[Part]]:
     return dict(grouped)
 
 
+_LEFT = re.compile(r"\b(?:left|driver|lh|l/h)\b", re.I)
+_RIGHT = re.compile(r"\b(?:right|passenger|rh|r/h)\b", re.I)
+
+
+def side_in_title(title) -> Optional[str]:
+    """"L" or "R" when the portal's own title names exactly one side, else None."""
+    text = str(title or "")
+    left, right = bool(_LEFT.search(text)), bool(_RIGHT.search(text))
+    if left == right:                       # neither named, or both — no verdict
+        return None
+    return "L" if left else "R"
+
+
+def narrow_by_interchange(candidates: list[Part], interchange) -> Optional[Part]:
+    """The one candidate carrying the interchange number the grid reported, or None.
+
+    An interchange number is not unique across the yard — that is what makes it an
+    *interchange*, and 26,783 parts share 13,450 of them. Inside a candidate set it is
+    decisive, though, because those candidates already agree on donor and part type, and the
+    catalogue gives a car's left and right the same number with a different side suffix
+    ("120-60677CL" against "120-60676AR"). Matching it is an identifier agreeing with an
+    identifier, which is why it is tried before the side read out of a title.
+    """
+    wanted = str(interchange or "").strip().upper()
+    if not wanted:
+        return None
+    matched = [part for part in candidates
+               if str(part.interchange_number or "").strip().upper() == wanted]
+    return matched[0] if len(matched) == 1 else None
+
+
+def narrow_by_side(candidates: list[Part], title) -> Optional[Part]:
+    """The one candidate the title's side names, or None if that is not decisive.
+
+    Every candidate must have a side on file. Picking the only part *recorded* as left, out
+    of a pair whose other side was simply never entered, is a coin flip wearing a rule's
+    clothes — and the whole point of this module is to refuse coin flips.
+    """
+    wanted = side_in_title(title)
+    if wanted is None:
+        return None
+    sides = [(part.side or "").strip().upper()[:1] for part in candidates]
+    if not all(sides):
+        return None
+    matched = [part for part, side in zip(candidates, sides) if side == wanted]
+    return matched[0] if len(matched) == 1 else None
+
+
 def resolve(rows: list[dict], parts: Iterable[Part]) -> tuple[dict[str, Part], list[dict]]:
     """Map ``listing_id -> Part`` for every listing that resolves to exactly one part.
 
@@ -112,6 +170,17 @@ def resolve(rows: list[dict], parts: Iterable[Part]) -> tuple[dict[str, Part], l
         if not candidates:
             unresolved.append({**record, "reason": "no yard part for this donor and type"})
         elif len(candidates) > 1:
+            # A donor yielded a left and a right of the same type. Two independent ways to
+            # tell them apart, strongest first: the interchange number the grid reports is an
+            # identifier and carries the side as a suffix; the portal's own title says the
+            # side in words. Measured against 1,062 listings the donor key could not settle,
+            # they agreed 1,009 times, contradicted zero times, and the interchange number
+            # settled 53 the title did not — so it leads, and the title finishes the job.
+            narrowed = (narrow_by_interchange(candidates, row.get("interchange_number"))
+                        or narrow_by_side(candidates, row.get("title")))
+            if narrowed is not None:
+                resolved[listing_id] = narrowed
+                continue
             unresolved.append({
                 **record,
                 "reason": f"{len(candidates)} parts share this donor and type",

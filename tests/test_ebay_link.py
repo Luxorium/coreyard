@@ -144,3 +144,97 @@ class DetailRescue(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SideSettlesALeftRightPair(unittest.TestCase):
+    """A donor yields a left and a right; the portal's own title says which is which."""
+
+    def _pair(self):
+        return [
+            Part(r_number="49767", part_type="Door Assembly", stock_number="251373",
+                 part_type_code=120, side="Right", price=Decimal("200")),
+            Part(r_number="49768", part_type="Door Assembly", stock_number="251373",
+                 part_type_code=120, side="Left", price=Decimal("200")),
+        ]
+
+    def _row(self, title, listing_id="1"):
+        return {"listing_id": listing_id, "stock_number": "251373",
+                "part_type": "120", "title": title}
+
+    def test_each_side_takes_the_part_the_yard_calls_that_side(self):
+        rows = [self._row("2000-2004 Toyota Avalon Left Front Driver Door Assembly", "1"),
+                self._row("2000-2004 Toyota Avalon Right Front Passenger Door Assembly", "2")]
+        resolved, unresolved = link.resolve(rows, self._pair())
+        self.assertEqual([], unresolved)
+        self.assertEqual("49768", resolved["1"].r_number)
+        self.assertEqual("49767", resolved["2"].r_number)
+
+    def test_a_title_naming_no_side_is_still_refused(self):
+        _, unresolved = link.resolve([self._row("2000-2004 Toyota Avalon Door Assembly")],
+                                     self._pair())
+        self.assertEqual(1, len(unresolved))
+
+    def test_a_title_naming_both_sides_is_refused(self):
+        _, unresolved = link.resolve(
+            [self._row("Toyota Avalon Left Right Driver Passenger Door")], self._pair())
+        self.assertEqual(1, len(unresolved))
+
+    def test_an_unrecorded_side_on_the_other_part_refuses_rather_than_wins_by_default(self):
+        pair = self._pair()
+        pair[0].side = None                    # the right-hand part's side was never entered
+        _, unresolved = link.resolve(
+            [self._row("Toyota Avalon Left Front Driver Door Assembly")], pair)
+        self.assertEqual(1, len(unresolved), "picked the only part with a side on file")
+
+    def test_three_parts_on_one_side_stay_ambiguous(self):
+        parts = self._pair() + [
+            Part(r_number="49769", part_type="Door Assembly", stock_number="251373",
+                 part_type_code=120, side="Left", price=Decimal("200"))]
+        _, unresolved = link.resolve(
+            [self._row("Toyota Avalon Left Front Driver Door Assembly")], parts)
+        self.assertEqual(1, len(unresolved))
+
+
+class InterchangeSettlesWhatTheTitleCannot(unittest.TestCase):
+    """The grid reports an identifier; prefer it to reading the side out of prose."""
+
+    def _pair(self):
+        return [
+            Part(r_number="49767", part_type="Door Assembly", stock_number="251373",
+                 part_type_code=120, side="Right", interchange_number="120-60676AR",
+                 price=Decimal("200")),
+            Part(r_number="49768", part_type="Door Assembly", stock_number="251373",
+                 part_type_code=120, side="Left", interchange_number="120-60677CL",
+                 price=Decimal("200")),
+        ]
+
+    def _row(self, **kw):
+        row = {"listing_id": "1", "stock_number": "251373", "part_type": "120", "title": ""}
+        row.update(kw)
+        return row
+
+    def test_the_interchange_number_alone_resolves_it(self):
+        # No side word anywhere in the title; the identifier still settles it.
+        resolved, unresolved = link.resolve(
+            [self._row(title="Front Door Assembly", interchange_number="120-60677CL")],
+            self._pair())
+        self.assertEqual([], unresolved)
+        self.assertEqual("49768", resolved["1"].r_number)
+
+    def test_an_interchange_shared_by_both_falls_back_to_the_side(self):
+        pair = self._pair()
+        pair[0].interchange_number = pair[1].interchange_number = "120-SAME"
+        resolved, _ = link.resolve(
+            [self._row(title="Left Front Driver Door", interchange_number="120-SAME")], pair)
+        self.assertEqual("49768", resolved["1"].r_number)
+
+    def test_an_interchange_matching_no_candidate_falls_back_to_the_side(self):
+        resolved, _ = link.resolve(
+            [self._row(title="Right Passenger Front Door",
+                       interchange_number="120-NOT-OURS")], self._pair())
+        self.assertEqual("49767", resolved["1"].r_number)
+
+    def test_neither_signal_still_refuses(self):
+        _, unresolved = link.resolve(
+            [self._row(title="Front Door Assembly", interchange_number="")], self._pair())
+        self.assertEqual(1, len(unresolved))

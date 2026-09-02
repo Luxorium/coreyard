@@ -281,3 +281,39 @@ class Loading(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExcludedNames(unittest.TestCase):
+    """A pattern that swallows a name belonging to another group."""
+
+    def _policy(self):
+        import json, tempfile, os
+        body = {
+            "groups": {
+                "FREIGHT": {"tag": "ship:freight", "price": "299.99",
+                            "match": ["battery"], "exclude": ["battery tray"]},
+                "PICKUP": {"tag": "ship:pickup", "price": None,
+                           "match": ["back glass"], "exclude": ["back glass regulato"]},
+                "GROUND": {"tag": "ship:free", "price": "0.00", "default": True},
+            },
+            "match_order": ["FREIGHT", "PICKUP"],
+        }
+        fh = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(body, fh); fh.close()
+        self.addCleanup(lambda: os.unlink(fh.name))
+        return shipping.load(fh.name)
+
+    def test_the_pattern_still_catches_what_it_is_for(self):
+        self.assertEqual("ship:freight", self._policy().tag_for("BATTERY"))
+
+    def test_the_excluded_name_falls_through_to_the_default(self):
+        # "battery" is a substring of "battery tray"; only an exclusion can separate them.
+        self.assertEqual("ship:free", self._policy().tag_for("BATTERY TRAY"))
+
+    def test_exclusion_works_for_a_non_shipping_group_too(self):
+        p = self._policy()
+        self.assertEqual("ship:pickup", p.tag_for("BACK GLASS"))
+        self.assertEqual("ship:free", p.tag_for("BACK GLASS REGULATO"))
+
+    def test_a_group_with_no_exclusions_is_unaffected(self):
+        self.assertEqual("ship:free", self._policy().tag_for("ALTERNATOR"))

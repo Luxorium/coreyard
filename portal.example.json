@@ -1,8 +1,16 @@
 {
   "base_url": "https://portal.example.invalid",
   "auth": {
-    "cookies": ["session", "account"],
-    "login_path": "/account/login"
+    "cookies": [
+      "session",
+      "account"
+    ],
+    "login_path": "/account/login",
+    "login_fields": {
+      "username": "USERNAME_FIELD",
+      "password": "PASSWORD_FIELD",
+      "token": "ANTIFORGERY_TOKEN_FIELD"
+    }
   },
   "headers": {
     "Accept": "application/json",

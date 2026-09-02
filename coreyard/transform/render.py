@@ -275,7 +275,12 @@ def render(
     urls = [str(u) for u in (images or [])]
     product_type = seo.expand_part_type(part.part_type, store)
     override = store.overrides.for_r_number(part.r_number)
-    title = override.title or seo.build_title(part, store)
+    # ``compact`` spans the years ("1998-2000") instead of listing them ("1998 1999 2000").
+    # The builder's own note argues the listed form tokenizes better for web search, and that
+    # is a real trade — but the two storefronts were publishing the same part under two
+    # different-looking titles, and the site chose the spanned form for both. One title, both
+    # channels, which is the whole point of a single renderer.
+    title = override.title or seo.build_title(part, store, compact=True)
     weight = resolve_weight(part, store, product_type)
     # Classified here, not by a later pass over the catalogue: a product that is live and
     # sellable before anything has said how it ships is a product that can be bought with

@@ -67,7 +67,7 @@ SCOPES = ("inventory", "catalog")
 # the new version, because only a full commit rewrites every row; a scoped or delta run
 # that claimed it would leave most rows at version 1 and the run after that would compare
 # the two shapes against each other.
-IMAGE_MANIFEST_VERSION = "2"
+IMAGE_MANIFEST_VERSION = "3"
 _MANIFEST_KEY = "image_manifest_version"
 
 
@@ -174,6 +174,21 @@ class SyncState:
             " last_synced TEXT NOT NULL DEFAULT '',"
             " last_error TEXT NOT NULL DEFAULT '',"
             " PRIMARY KEY (channel, r_number))"
+        )
+        # One donor photograph, uploaded once. Roughly seven parts come off each donor
+        # vehicle, so attaching its frames per-product would upload the same picture seven
+        # times — 102,810 uploads where 16,827 will do. ``FileSetInput`` takes an ``id``, so
+        # the frame is uploaded on first use and referenced by every part after it.
+        # Keyed by the folder key and filename, which is what the share calls the picture;
+        # the Shopify id is meaningful only to this store, which is why it lives in this
+        # per-installation database and not in the manifest.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS donor_media ("
+            " donor_key TEXT NOT NULL,"
+            " filename TEXT NOT NULL,"
+            " file_id TEXT NOT NULL,"
+            " uploaded_at TEXT NOT NULL DEFAULT '',"
+            " PRIMARY KEY (donor_key, filename))"
         )
         # Where a delta run left off. Kept beside the fingerprints on purpose: a cursor that
         # outlived the snapshot it was taken against would make the next delta run skip every
@@ -392,6 +407,41 @@ class SyncState:
                 "  last_synced=excluded.last_synced,"
                 "  last_error=''",
                 rows,
+            )
+
+    def donor_file_id(self, donor_key: str, filename: str) -> str:
+        """The Shopify file already created for this donor frame, or "" if there is none."""
+        row = self.conn.execute(
+            "SELECT file_id FROM donor_media WHERE donor_key = ? AND filename = ?",
+            (str(donor_key), str(filename)),
+        ).fetchone()
+        return row[0] if row else ""
+
+    def record_donor_file(self, donor_key: str, filename: str, file_id: str) -> None:
+        """Remember a donor frame's Shopify file, so no other part re-uploads it.
+
+        Written only after the upload returned an id, for the same reason a channel row is
+        written only after a clean publish: a remembered id that does not exist would attach
+        nothing to every part that trusted it.
+        """
+        if not (donor_key and filename and file_id):
+            return
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO donor_media (donor_key, filename, file_id, uploaded_at)"
+                " VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(donor_key, filename) DO UPDATE SET"
+                "   file_id = excluded.file_id, uploaded_at = excluded.uploaded_at",
+                (str(donor_key), str(filename), str(file_id),
+                 datetime.now(timezone.utc).isoformat()),
+            )
+
+    def forget_donor_file(self, donor_key: str, filename: str) -> None:
+        """Drop a remembered file, for when Shopify reports the id no longer resolves."""
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM donor_media WHERE donor_key = ? AND filename = ?",
+                (str(donor_key), str(filename)),
             )
 
     def record_channel_failure(self, channel: str, r_number: str, error: str) -> None:

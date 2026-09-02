@@ -57,7 +57,7 @@
     "                    AND o.ORDER_STATUS_COLUMN IN ('OPEN','PICKING'))"
   ],
   "scope": "i.PRICE_COLUMN > 0 AND i.QUANTITY_COLUMN > 0 AND i.BLOCK_ONLINE_FLAG = 0",
-  "images_filter": "i.HAS_PHOTOS_FLAG_COLUMN = 1",
+  "images_filter": "(i.HAS_IMAGES_COLUMN = 1 OR EXISTS (SELECT 1 FROM dbo.VEHICLE_TABLE dv WHERE dv.STOCK_NUMBER_COLUMN = i.STOCK_NUMBER_COLUMN AND dv.VEHICLE_HAS_IMAGES_COLUMN = 1))",
   "order_by": "i.PART_ID_COLUMN",
   "_delta": [
     "OPTIONAL. Supplying these lets `--delta` ask 'what changed since <cursor>' instead of",
@@ -189,5 +189,6 @@
     "inventory_take": "UPDATE dbo.PARTS_TABLE\n   SET QUANTITY_COLUMN = QUANTITY_COLUMN - @li_qty\n WHERE PART_ID_COLUMN = @li_rnum AND QUANTITY_COLUMN >= @li_qty",
     "_audit_insert": "Record the availability change the way your application records it, so the yard's own audit history stays truthful. Check first whether your application audits order creation \u2014 if it does not, do not.",
     "audit_insert": "INSERT dbo.AUDIT_TABLE\n  (AUDIT_ID_COLUMN, AUDIT_DATE_COLUMN, EMPLOYEE_COLUMN, EVENT_TYPE_COLUMN,\n   KEY_COLUMN, TABLE_NAME_COLUMN, COLUMN_NAME_COLUMN, OLD_VALUE_COLUMN,\n   NEW_VALUE_COLUMN)\nVALUES\n  (@audit_id, GETDATE(), @employee, 'U',\n   CAST(@li_rnum AS varchar(10)), 'PARTS_TABLE', 'QUANTITY_COLUMN',\n   CAST(@oldqty AS varchar(10)), CAST(@oldqty - @li_qty AS varchar(10)))"
-  }
+  },
+  "donor_images": "SELECT RTRIM(CAST(v.STOCK_NUMBER_COLUMN AS varchar(20))) AS stock_number, RTRIM(CAST(v.VEHICLE_PHOTO_KEY_COLUMN AS varchar(20))) AS donor_key FROM dbo.VEHICLE_TABLE v WHERE CAST(v.VEHICLE_HAS_IMAGES_COLUMN AS int) = 1 AND v.VEHICLE_PHOTO_KEY_COLUMN IS NOT NULL"
 }

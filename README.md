@@ -71,6 +71,7 @@ whose columns are named after `Part` fields and set `COREYARD_SOURCE=tabular:<pa
 | Shopify Admin API sink (products + photos + inventory) | **working** — validated on a live catalog of ~9,400 image-backed parts |
 | Sold-part retirement (qty 0 → archived, with safety guards) | **working, unit-tested** |
 | Photo-change detection (share listing folded into the fingerprint) | **working, unit-tested** |
+| Donor-vehicle photos for parts the yard never photographed | **working, unit-tested**, off by default |
 | Paid-order webhook → yard work order + instant delist | **working, unit-tested** |
 | Shipping classification applied during publish, from a site policy | **working, unit-tested** |
 | Structured metafields (grade, mileage, condition, fitment) | **working, unit-tested** |
@@ -82,6 +83,7 @@ whose columns are named after `Part` fields and set `COREYARD_SOURCE=tabular:<pa
 | Catalog repair (titles, tags, SEO, weights) against the renderer | **working, unit-tested** |
 | Generic catalog audit with site-configurable thresholds | **working, unit-tested** |
 | Guarded listing-portal title/price planning with shared Shopify overrides | **working, unit-tested** |
+| Researched-price gate on what may be listed | **working, unit-tested**, off by default |
 
 Known gaps: a part's *variant-level* media assignment is not managed — photos attach to the
 product, not to a specific variant, which is fine while every part is a single-variant product.
@@ -102,7 +104,8 @@ coreyard/
   overrides.py               reviewed per-R# title/price decisions for the renderer
   ai.py                      opt-in local-CLI transport for batched catalogue analysis
   profile.py                 site merchandising policy (what a listing may claim)
-  state.py                   SQLite fingerprint store + add/change/remove diff
+  state.py                   SQLite fingerprint store + add/change/remove diff, per-channel
+                             state, retirement memory, and uploaded donor frames
   run_sync.py                the sync itself: full, delta, and the scope selectors
   yms/
     smb_tds.py               TDS over an SMB2/3 named pipe (impacket); the transport
@@ -113,7 +116,7 @@ coreyard/
     interchange.py           resolve full fitment (which vehicles a part fits)
     delta.py                 changed-since catch-up extraction
     enrich.py                optional part-type aliases and donor-vehicle detail
-    images.py                fetch {R#}_NN.jpg photos from the SMB share
+    images.py                fetch {R#}_NN.jpg photos, and the donor vehicle's behind them
     orders.py                guarded, opt-in storefront order booking
   transform/
     render.py                THE canonical renderer: Part -> RenderedProduct -> fingerprint
@@ -276,6 +279,7 @@ a fixed model can't capture:
 | `modified_at` | optional "when did this row last change" expression; enables `--delta` |
 | `image_changes` | optional query for parts whose *photos* moved since `{since}` |
 | `part_type_aliases` / `vehicle_details` | optional enrichment; see `COREYARD_ENRICH` |
+| `donor_images` | optional: maps a donor vehicle to the folder key its photographs are filed under, so a part the yard never photographed can publish with pictures of the car it came off |
 
 **Before adding a work-order exclusion to `scope`, check whether you need one.** Many yard
 systems already decrement available quantity when a part is reserved, in which case the
@@ -359,12 +363,20 @@ quoted for an empty box, so supplying one is worth the hour it takes.
 > editing either makes the next run republish everything it covers. Check the count with
 > `bin/coreyard --sink api --dry-run` first.
 
-Two policy switches live in `.env` rather than in a file:
+These policy switches live in `.env` rather than in a file:
 
 * `STORE_REQUIRE_IMAGES=true` publishes only parts that have at least one photo. It needs an
   `images_filter` expression in `schema.json`, and it applies to sync, reconciliation, bulk
   publishing and the audit at once, so those four cannot disagree about what is listable.
   Off by default, so upgrading never silently changes which parts you list.
+* `STORE_REQUIRE_RESEARCHED_PRICE=true` publishes only parts carrying a reviewed price in
+  `STORE_CATALOG_OVERRIDES_FILE` — the other half of "listable", read in the same place and by
+  the same four consumers. Also off by default: an install that has researched nothing must not
+  have its whole catalogue judged unlistable by an upgrade.
+* `STORE_DONOR_PHOTO_LIMIT=6` caps how many of a donor vehicle's frames an unphotographed part
+  inherits (see below). `STORE_PRICE_STEP=5` puts charm pricing on a five-dollar grid, so every
+  price reads as a considered number ($64.99, $14.99) rather than a converted one ($67.99,
+  $12.99). It defaults to a dollar, so no existing install's prices move on upgrade.
 * `STORE_PUBLICATIONS=Online Store` puts activated products on a sales channel. A product's
   status and its channel publication are different things in Shopify and only the second
   makes its URL resolve — an ACTIVE product on no channel is a 404 to shoppers and to Google.
@@ -441,6 +453,14 @@ fields, statuses and action IDs, then point `EBAY_PORTAL_FILE` at it. Authentica
 from an explicit cookie header or an existing local Firefox session; cached cookies and all
 research checkpoints stay under ignored, owner-only local paths.
 
+A borrowed browser session is shorter-lived than the runs that use it — an overnight research
+pass will outlast it, and dying two thirds of the way through costs the night. Setting
+`EBAY_PORTAL_USER`/`EBAY_PORTAL_PASSWORD` and mapping `auth.login_fields` in `portal.json`
+lets CoreYard establish a session of its own. It is a fallback of last resort, consulted only
+when every cookie source has come up empty, and the client re-signs at most once per expired
+request so a wrong password fails fast rather than hammering the form. The password is never
+printed, logged, or included in an error message.
+
 ```bash
 bin/coreyard ebay pull --tab unlisted --part-type engine \
   --out out/ebay-engines.json
@@ -472,6 +492,13 @@ comparables — a median anchor
 adjusted by named percentages for mileage, grade, test status, a stated defect and time in
 inventory, then floored and capped. Each price carries those adjustments as its reasoning,
 and a listing with no usable comparable is held rather than guessed at.
+
+Every published price lands a penny under the same five-dollar grid, including one the floor
+supplied — a floor is a business minimum, not a shopper-facing number, and `$12.50` beside
+`$64.99` reads like two different shops. A price derived from comparables rounds *down*,
+because the market cleared there and rounding past it invents evidence; a floored one has no
+evidence to respect, so it rounds to nearest and is nudged up a step rather than landing under
+the floor.
 
 Item specifics are a separate pass, because eBay ranks on aspect *match* and buyers filter
 on it:
@@ -612,7 +639,8 @@ window in which a product is live, buyable, and wearing the wrong shipping or no
 {
   "groups": {
     "PICKUP": {"tag": "ship:pickup-only", "price": null,     "label": "Pickup only",
-               "match": ["door assembly", "glass"], "fulfillment": "yard"},
+               "match": ["door assembly", "glass"], "exclude": ["glass channel"],
+               "fulfillment": "yard"},
     "A":      {"tag": "ship:freight-299", "price": "299.99", "label": "Freight",
                "match": ["engine assembly"],        "fulfillment": "yard"},
     "GROUND": {"tag": "ship:free",        "price": "0.00",   "label": "Free ground",
@@ -623,7 +651,11 @@ window in which a product is live, buyable, and wearing the wrong shipping or no
 ```
 
 Groups are tried in `match_order`, first substring hit against the part type wins, and
-exactly one group is the `default` that catches the rest. `fulfillment` says who ships it —
+exactly one group is the `default` that catches the rest. `exclude` names what a pattern would
+otherwise swallow: substring matching cannot say *glass but not glass channel*, and the two
+belong in different groups — one is a two-person lift, the other fits in an envelope. Ordering
+cannot settle it either, because the group that should win is the `default`, and a default
+carrying match patterns is refused for good reason. `fulfillment` says who ships it —
 `external` means another system buys the label and will close the order out, which is what
 stops `orders sync-status` fulfilling a parcel order before the shipping app has attached a
 tracking number. Because the shipping policy already declares that, the order policy derives
@@ -633,6 +665,30 @@ The tag is part of the rendered product, so it is fingerprinted like any other
 shopper-visible field, and CoreYard then **owns that namespace**: a stale `ship:` tag from
 whatever wrote them before is replaced rather than accumulated next to the new one. Two
 shipping tags on one product and the storefront reads whichever it tests for first.
+
+### Parts with no photographs of their own
+
+A yard photographs the cars it buys and only some of the parts it pulls, so a large slice of
+the catalogue is listable in every respect except that it has no picture. Map a `donor_images`
+query in `schema.json` and those parts publish with photographs of the vehicle they came off.
+
+It is opt-in and one-way. **A part that has its own photographs never consults the donor
+folder**, so nothing already published moves; without the mapping an unphotographed part
+publishes with no images exactly as before, and the extra share listing is skipped entirely.
+A part inherits only the opening frames — the general views — because a donor shoot documents
+a whole car (a median of 16 frames, sometimes 99) and was taken to record a vehicle, not to
+sell one bracket off it. `STORE_DONOR_PHOTO_LIMIT` sets how many; the default is 6.
+
+Each donor frame is uploaded to Shopify **once** and referenced by every part off that donor,
+rather than staged per product — roughly seven parts come off each car, so the naive version
+uploads the same photograph seven times.
+
+The listing says whose picture it is. The profile's `donor_photo_note` renders above
+everything else in the body — "Photographs show the donor vehicle (2016 Buick Encore (Stock
+#251026)). This part was not photographed individually." — and the alt text describes the
+vehicle rather than the part. That is a fact about the data rather than a claim about your
+business, so CoreYard states it for you; reword it in your profile if you like, but a shopper
+must not be left believing the picture is of the part.
 
 ### Structured product data
 
@@ -931,23 +987,24 @@ two.
 | Shopify field | Source (`Part`) |
 |---|---|
 | Handle | `<SHOPIFY_HANDLE_PREFIX>-<R#>` (stable and unique) |
-| Title | multi-model SEO title from resolved fitment, ≤255 with a word-boundary trim |
+| Title | multi-model SEO title from resolved fitment, ≤255 with a word-boundary trim: years spanned (`1998-2000`), each make named once without commas, finish and condition stated only from words recognised in the yard's own note |
 | Body (HTML) | fitment/"Fits" list, donor detail, condition, interchange #, mileage, warranty, stock #, R# |
 | SEO title / description | `coreyard/transform/seo.py`, under the site's profile |
 | Type / Tags | expanded part type; year/make/model/interchange/spec terms/profile tags |
 | Variant SKU | R# (`r_number`; unique and never reused) |
-| Variant Price | price, charm-rounded when the site asks (parts with no positive price are skipped) |
+| Variant Price | price, charm-rounded when the site asks, on the `STORE_PRICE_STEP` grid (parts with no positive price are skipped) |
 | Variant Inventory Qty / Policy | quantity / `deny` (unique parts don't oversell) |
 | Shipping weight | the site's weight table by part type, or a source weight if the yard records one |
 | Shipping tag | the site's shipping policy, classified by part type during publish |
 | Metafields | grade, mileage, condition, and structured fitment, in the profile's namespace |
-| Product media | `{R#}_NN.jpg` from the photo share, uploaded via staged uploads (API path) or referenced by URL (CSV path) |
+| Product media | `{R#}_NN.jpg` from the photo share, uploaded via staged uploads (API path) or referenced by URL (CSV path); a part with none of its own falls back to its donor vehicle's frames when `donor_images` is mapped |
 | Alt text | generated per photo, and covered by the fingerprint |
 
 Listing scope comes from your mapping's `scope` predicate — typically priced, in stock,
-and not blocked from online sale — plus `STORE_REQUIRE_IMAGES` if you set it. That one
-definition is shared by sync, reconciliation, bulk publishing and the audit, so they cannot
-drift into publishing and archiving the same part in turn.
+and not blocked from online sale — plus `STORE_REQUIRE_IMAGES` and
+`STORE_REQUIRE_RESEARCHED_PRICE` if you set them. That one definition is shared by sync,
+reconciliation, bulk publishing and the audit, so they cannot drift into publishing and
+archiving the same part in turn.
 Identifier mapping is intentionally explicit — these are the source system's own column
 names, which you supply in local configuration (see "Schema mapping"):
 
@@ -966,10 +1023,11 @@ python scripts/check_neutrality.py
 The suite is offline by design — no database, no network, no Shopify, no `.env` — and
 anything that needs the live server belongs in `scripts/` or behind a CLI flag. It covers the
 canonical renderer and fingerprint sensitivity, tag ownership, shipping classification,
-structured metafields and their staleness, weight rules, the listable policy, external
-config validation, reconciliation and its retirement guards, catalog repair, order polling
-and normalization, the order lifecycle policy, the Shopify client, retirement and revival,
-and the extract mapping.
+structured metafields and their staleness, weight rules, the listable policy and its
+researched-price half, the donor-photo fallback and the two resolvers agreeing on how an
+unchanged photo is spelled, external config validation, reconciliation and its retirement
+guards, catalog repair, order polling and normalization, the order lifecycle policy, the
+Shopify client, retirement and revival, listing-to-part resolution, and the extract mapping.
 
 ## Security notes
 - Secrets live only in `.env` (gitignored). The SMB password is written to a `0600` temp

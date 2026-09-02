@@ -413,6 +413,46 @@ _DATE_FRAGMENT = re.compile(r"\b(from|thru|through|to)\s+\d{1,2}\s*[/-]\s*\d{2,4
 # search value once separated from their context.
 _NOISE_PHRASE = re.compile(r"^(?:\d+(?:st|nd|rd|th)\s+digit|\d[\d\s]*)$", re.I)
 
+# The interchange catalogue is written for a parts counter, and it shows: body styles are
+# abbreviated ("Sdn"), sides are bare letters ("L"), and some notes say what a part does
+# *not* fit ("exc electric vehicle"). All three read badly on a results page, so a title
+# rewrites them. The description is untouched and still carries every note in full,
+# attributed to the years it belongs to — this drops nothing, it only stops the title
+# leading with counter shorthand.
+_QUALIFIER_EXCLUSION = re.compile(r"^(?:exc|except|w/?o|without)\b", re.I)
+_QUALIFIER_EXPAND = {
+    "sdn": "Sedan", "cpe": "Coupe", "conv": "Convertible", "wgn": "Wagon",
+    "hbk": "Hatchback", "at": "Automatic", "mt": "Manual", "dr": "Door",
+    "lh": "Left", "rh": "Right", "auto": "Automatic",
+}
+_SIDE_LETTER = {"l": "Left", "r": "Right"}
+
+
+def _title_phrase(phrase: str, has_side: bool) -> str:
+    """One catalogue qualifier rewritten for a title, or "" to leave it out."""
+    if _QUALIFIER_EXCLUSION.match(phrase):
+        return ""
+    words = phrase.split()
+    if len(words) == 1 and words[0].lower() in _SIDE_LETTER:
+        # A lone "L"/"R" is the catalogue's side code. It repeats the side the part already
+        # states, and where the part states none it is too cryptic to publish as-is.
+        return "" if has_side else _SIDE_LETTER[words[0].lower()]
+    out: list[str] = []
+    for word in words:
+        lowered = word.lower()
+        if len(word) == 1 and word.isalpha():
+            # A stray initial is how a truncated catalogue note reads ("Driver s"). It
+            # carries no meaning on a results page, so it is not worth a character.
+            continue
+        if lowered in _QUALIFIER_EXPAND:
+            out.append(_QUALIFIER_EXPAND[lowered])
+        elif word.isupper() or any(ch.isdigit() for ch in word):
+            out.append(word)          # "4x2", "2.4L", "BCM", VIN codes keep their casing
+        else:
+            out.append(word[:1].upper() + word[1:])
+    return " ".join(out)
+
+
 
 def _note_phrases(note: str) -> list[str]:
     """Split one qualifier note into clean phrases ("2.3L", "California emissions")."""
@@ -427,6 +467,77 @@ def _note_phrases(note: str) -> list[str]:
 _DISPLACEMENT_L = re.compile(r"\b(\d\.\d)\s*L\b", re.I)
 _CYLINDERS = re.compile(r"\b(\d{1,2})\s*cyl\b", re.I)
 _VIN_CODE = re.compile(r"\bVIN\s+([A-Z0-9])\b", re.I)
+
+# Finish and material, for the part types where it is the thing a buyer is choosing between
+# — a chrome grille and a textured one are not substitutes. Only these exact words are
+# recognised, because the note is free text written for a parts counter and a finish guessed
+# out of it would be exactly the wrong-aspect problem: worse than saying nothing.
+_FINISH_TERMS = ("chrome", "textured", "painted", "polished", "satin", "matte", "primed",
+                 "black", "alloy", "steel", "aluminum", "plastic", "mesh", "billet",
+                 "body color")
+_FINISH = re.compile(
+    r"\b(" + "|".join(term.replace(" ", r"\s+") for term in _FINISH_TERMS) + r")\b", re.I
+)
+# Condition, as the yard itself recorded it. Stating it is not a claim the tool invents:
+# "Tested" is in the record for this part, and a flaw the buyer will see in the photographs
+# belongs in the title rather than in a not-as-described case. Patterns rather than words
+# because the notes are typed at a counter — "faded" is spelled six ways in this data
+# (faded, fading, fadding, fadded, faddin, faddi) and all six mean the same thing.
+_CONDITION_TERMS = (
+    (re.compile(r"\btested\b", re.I), "Tested"),
+    (re.compile(r"\brebuilt\b", re.I), "Rebuilt"),
+    (re.compile(r"\breman\w*", re.I), "Remanufactured"),
+    (re.compile(r"\bfad\w*", re.I), "Faded"),
+    (re.compile(r"\bbubbl\w*", re.I), "Bubbled"),
+    (re.compile(r"\bcrack\w*", re.I), "Cracked"),
+    (re.compile(r"\bscratch\w*", re.I), "Scratched"),
+    (re.compile(r"\bchip\w*", re.I), "Chipped"),
+    (re.compile(r"\bpeel\w*", re.I), "Peeling"),
+    (re.compile(r"\bscuff\w*", re.I), "Scuffed"),
+    (re.compile(r"\bdent\w*", re.I), "Dented"),
+    (re.compile(r"\brust\w*", re.I), "Rusted"),
+    (re.compile(r"\bbent\b", re.I), "Bent"),
+    (re.compile(r"\bbroken\b", re.I), "Broken"),
+)
+
+
+# "w/o chrome" says this part is the one *without* it. Reading the word on its own and
+# asserting the opposite of the note is the worst failure available here, so a negated term
+# is not a finish at all.
+_NEGATED = re.compile(r"(?:w/?o|without|non|no|exc|except|not)\s*[-\s]*$", re.I)
+
+
+def _negated(text: str, start: int) -> bool:
+    """Whether the term at ``start`` is preceded by a word that reverses it."""
+    return bool(_NEGATED.search(text[max(0, start - 16):start]))
+
+
+def title_condition(part: Part) -> str:
+    """Finish and condition from the part's own note: "Chrome Bubbled", "Tested".
+
+    Both halves come from the same sentence a yard wrote about this one part, so they are
+    stated together and in the note's own order. Nothing outside the two vocabularies is
+    recognised — a note this cannot read produces no claim at all, which is the only safe
+    failure when the alternative is describing a part the seller has not described.
+    """
+    text = part.description or ""
+    found: list[tuple[int, str]] = []
+    for match in _FINISH.finditer(text):
+        if _negated(text, match.start()):
+            continue
+        found.append((match.start(),
+                      " ".join(w.capitalize() for w in match.group(1).split())))
+    for pattern, canonical_word in _CONDITION_TERMS:
+        for match in pattern.finditer(text):
+            if _negated(text, match.start()):
+                continue
+            found.append((match.start(), canonical_word))
+            break
+    words: list[str] = []
+    for _, word in sorted(found):
+        if word not in words:
+            words.append(word)
+    return " ".join(words[:3])
 
 
 def part_spec(part: Part) -> list[str]:
@@ -500,8 +611,32 @@ def title_qualifiers(part: Part, max_phrases: int = 5, max_chars: int = 55) -> l
 # rather than a second title builder somewhere else.
 _TITLE_RANKS = {
     "years": 1, "models": 1, "part_type": 1,
-    "side": 2, "spec": 3, "qualifiers": 4, "oem": 5, "more_models": 6,
+    "side": 2, "spec": 3, "condition": 3, "qualifiers": 4, "oem": 5, "more_models": 6,
 }
+
+
+def group_model_labels(labels: list[str]) -> str:
+    """Vehicle names for a title: each make said once, no punctuation, no repeated word.
+
+    "Infiniti QX60", "Nissan Pathfinder", "Infiniti JX35" becomes
+    "Infiniti QX60 JX35 Nissan Pathfinder" — the make is a search term, but saying it twice
+    buys nothing and spends characters a second model name could have used. Commas go for
+    the same reason every other symbol did: they fragment the title for search and read as
+    clutter in a results row.
+
+    Words are deduplicated inside a make, which is where the real saving is: a truck that
+    fits three cab weights lists "Silverado 1500 2500 3500" rather than the model name three
+    times over.
+    """
+    groups: dict[str, list[str]] = {}
+    for label in labels:
+        make, _, model = label.partition(" ")
+        words = groups.setdefault(make, [])
+        for word in model.split():
+            if word not in words:
+                words.append(word)
+    return " ".join(" ".join([make, *models]).strip()
+                    for make, models in groups.items()).strip()
 
 
 def title_segments(
@@ -533,10 +668,18 @@ def title_segments(
     years = _year_label(*span) if compact else _year_tokens(*span)
     labels = [c for c in (seo_clean(l) for l in _model_labels(part)) if c]
     spec = part_spec(part)
+    condition = title_condition(part)
     seen = {w.lower() for w in pt.split()}
     seen |= {w.lower() for term in spec for w in term.split()}
+    seen |= {w.lower() for w in condition.split()}
+    # The side segment already says "Driver Side Left"; a catalogue qualifier that repeats
+    # it spends characters on a word the title has used.
+    seen |= {w.lower() for w in side.split()}
     extra: list[str] = []
     for phrase in title_qualifiers(part):
+        phrase = _title_phrase(phrase, bool(side))
+        if not phrase:
+            continue
         kept = [w for w in phrase.split() if w.lower() not in seen]
         if not kept or _NOISE_PHRASE.match(" ".join(kept)):
             continue
@@ -547,7 +690,7 @@ def title_segments(
     if labels:
         shown = labels[:max_models]
         more = len(labels) - len(shown)
-        models = ", ".join(shown)
+        models = group_model_labels(shown)
         # Counted separately from the names themselves because it is worth much less than
         # them: on a tight budget "and 7 more" is characters that name no vehicle and carry
         # no search term, and a buyer looking for an engine would rather have its size.
@@ -557,13 +700,14 @@ def title_segments(
         ordered = [
             ("years", years), ("models", models), ("spec", " ".join(spec)),
             ("more_models", more_models), ("side", side), ("part_type", pt),
-            ("qualifiers", " ".join(extra)), ("oem", lead),
+            ("condition", condition), ("qualifiers", " ".join(extra)), ("oem", lead),
         ]
     else:
         ordered = [
             ("years", years), ("models", models), ("more_models", more_models),
             ("side", side), ("oem", lead),
-            ("part_type", pt), ("spec", " ".join(spec)), ("qualifiers", " ".join(extra)),
+            ("part_type", pt), ("spec", " ".join(spec)), ("condition", condition),
+            ("qualifiers", " ".join(extra)),
         ]
     return [(name, text, _TITLE_RANKS[name]) for name, text in ordered if text]
 
@@ -624,9 +768,30 @@ def fit_title(part: Part, store: "StoreProfile | CatalogProfile | None" = None,
         )
         if not dropped:
             return title, dropped
-        if fallback is None or len(dropped) < len(fallback[1]):
+        if fallback is None or _loss_rank(dropped) < _loss_rank(fallback[1]):
             fallback = (title, dropped)
     return fallback if fallback else ("", [])
+
+
+def _loss_rank(dropped: list[str]) -> tuple[int, int]:
+    """How bad a set of losses is: truncation first, then what was given up.
+
+    Counting losses alone made a truncated title with four vehicle names beat an intact one
+    with a single name, because it had "fewer" drops. But truncation cuts from the end, and
+    in the compact order the end is where the part type sits — so the cheaper-looking answer
+    was the one that stopped saying what the part is: "GMC Acadia, Saturn Outlook, Buick
+    Enclave, Chevrolet Traverse ABS Anti". Naming one vehicle and the whole part beats naming
+    four vehicles and half the part, every time.
+
+    Counting alone was also blind to *which* segment went. Dropping "and 3 more" and dropping
+    "Driver Side Left" both scored one, so a variant that listed another vehicle at the cost
+    of the side won on the tie — and a mirror sold without a side is a return, not a sale.
+    Losses are weighted by the same table that decides drop order, so giving up a vehicle
+    name to keep the side is now the cheaper answer rather than the more expensive one.
+    """
+    weight = sum(max(1, 7 - _TITLE_RANKS.get(name, 6)) for name in dropped
+                 if name != "truncated")
+    return (1 if "truncated" in dropped else 0, weight)
 
 
 def build_title(part: Part, store: "StoreProfile | CatalogProfile | None" = None,
@@ -697,6 +862,11 @@ def build_body_html(part: Part, store: Optional[StoreProfile] = None) -> str:
     pt = expand_part_type(part.part_type, store)
     origin = store.origin()
     lines = [_lead_html(policy, pt, origin)]
+    if part.uses_donor_photos and policy.donor_photo_note:
+        # Above everything else about the part: a shopper who scrolls no further has still
+        # been told what they are looking at.
+        note = policy.donor_photo_note.replace("{donor}", donor_label(part) or "donor vehicle")
+        lines.append(f"<p><strong>{html.escape(note)}</strong></p>")
     if _looks_like_prose(part.description):
         lines.append(f"<p>{html.escape(part.description)}</p>")
 
@@ -746,6 +916,22 @@ def build_body_html(part: Part, store: Optional[StoreProfile] = None) -> str:
     return "\n".join(lines)
 
 
+def donor_label(part: Part) -> str:
+    """"2016 Buick Encore (Stock #259965)" — how a donor photo is attributed.
+
+    Cased through the same helpers as a title, because the source writes "BUICK ENCORE" and
+    a shopper should not be shouted at from the alt text.
+    """
+    vehicle = " ".join(x for x in (
+        str(part.year) if part.year else "",
+        _vehicle_label(clean_make(part.make), clean_model(part.model)),
+    ) if x).strip()
+    stock = str(part.stock_number or "").strip()
+    if vehicle and stock:
+        return f"{vehicle} (Stock #{stock})"
+    return vehicle or (f"Stock #{stock}" if stock else "")
+
+
 def image_alt(part: Part, index: int = 1,
               store: "StoreProfile | CatalogProfile | None" = None) -> str:
     """Alt text for an uploaded photo.
@@ -757,6 +943,10 @@ def image_alt(part: Part, index: int = 1,
     # Screen readers announce alt text in full, so keep it to roughly one sentence
     # rather than the whole multi-model title.
     base = _cap(build_title(part, store), 125) or expand_part_type(part.part_type, store)
+    if part.uses_donor_photos:
+        # Alt text describes the image, and this image is of a car, not of the part.
+        label = donor_label(part)
+        base = _cap(f"Donor vehicle {label}" if label else f"Donor vehicle for {base}", 125)
     return f"{base} photo {index}" if index > 1 else base
 
 

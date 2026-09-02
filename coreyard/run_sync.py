@@ -63,6 +63,52 @@ class Photos(NamedTuple):
     stamps: object
 
 
+# Donor photos are namespaced before they reach a fingerprint. The two folders share a key
+# space — donor vehicle 1001 and R# 1001 both file a "1001_01.jpg" — so an unnamespaced
+# reference could not tell one picture from the other.
+_DONOR_PREFIX = "donor:"
+
+
+def _photo_view(inventory_entries, vehicle_entries, donors: dict, base: str | None) -> Photos:
+    """The (resolve, stamps) pair both sync paths share.
+
+    ``inventory_entries`` and ``vehicle_entries`` take a folder key and return that folder's
+    ordered (name, stamp) pairs. The full path serves them from one listing of each folder;
+    the delta path lists per key. Everything downstream of that is deliberately identical:
+    these strings land in the stored fingerprint, and a delta run that spelled them
+    differently would mark every part it touched as changed.
+
+    Choosing the photo set is also where a part learns it fell back, because the renderer has
+    to say so and only this code knows. A part with photographs of its own never consults the
+    donor folder, so its references, its fingerprint and its copy are all untouched by this.
+    """
+    from coreyard.yms.images import donor_photo_limit
+
+    def chosen(part) -> tuple[str, list]:
+        own = inventory_entries(part.image_key())
+        if own:
+            part.uses_donor_photos = False
+            return "", own
+        donor_key = donors.get(str(part.stock_number or "").strip(), "")
+        entries = vehicle_entries(donor_key)[:donor_photo_limit()] if donor_key else []
+        part.donor_image_key = donor_key or None
+        part.uses_donor_photos = bool(entries)
+        return (donor_key if entries else ""), entries
+
+    def resolve(part) -> list[str]:
+        donor_key, entries = chosen(part)
+        names = [name for name, _ in entries]
+        if base:
+            return [f"{base}/{donor_key or part.image_key()}/{n}" for n in names]
+        return [f"{_DONOR_PREFIX}{n}" for n in names] if donor_key else names
+
+    def stamps(part) -> list[str]:
+        donor_key, entries = chosen(part)
+        return [f"{_DONOR_PREFIX}{stamp}" if donor_key else stamp for _, stamp in entries]
+
+    return Photos(resolve, stamps)
+
+
 def _make_resolver(image_base_url: str | None, scan_images: bool = True) -> Photos:
     """Resolve each part's photos, for both the CSV rows and the change fingerprint.
 
@@ -80,19 +126,17 @@ def _make_resolver(image_base_url: str | None, scan_images: bool = True) -> Phot
 
     from coreyard.yms.images import SmbImageStore
 
+    from coreyard.yms.inventory import donor_image_keys
+
     store = SmbImageStore()
     base = image_base_url.rstrip("/") if image_base_url else None
     index = store.list_all_inventory_manifest()
-
-    def resolver(part) -> list[str]:
-        key = part.image_key()  # R# — the photo filename stem on the share
-        names = [name for name, _ in index.get(key, [])]
-        return [f"{base}/{key}/{n}" for n in names] if base else names
-
-    def stamps(part) -> list[str]:
-        return [stamp for _, stamp in index.get(part.image_key(), [])]
-
-    return Photos(resolver, stamps)
+    # Empty unless the site mapped ``donor_images``, and the second listing is skipped
+    # entirely when it did not — an installation without the mapping pays nothing.
+    donors = donor_image_keys()
+    vehicles = store.list_all_vehicle_manifest() if donors else {}
+    return _photo_view(lambda key: index.get(key, []),
+                       lambda key: vehicles.get(key, []), donors, base)
 
 
 def _make_part_resolver(image_base_url: str | None) -> Photos:
@@ -105,6 +149,7 @@ def _make_part_resolver(image_base_url: str | None) -> Photos:
     them differently would mark every part it touched as changed.
     """
     from coreyard.yms.images import SmbImageStore
+    from coreyard.yms.inventory import donor_image_keys
 
     store = SmbImageStore()
     base = image_base_url.rstrip("/") if image_base_url else None
@@ -112,22 +157,19 @@ def _make_part_resolver(image_base_url: str | None) -> Photos:
     # per part rather than two — and so the references and the manifest describe the same
     # instant. Two listings could straddle a photo being replaced.
     cache: dict[str, list[tuple[str, str]]] = {}
+    donor_cache: dict[str, list[tuple[str, str]]] = {}
 
-    def entries(part) -> list[tuple[str, str]]:
-        key = part.image_key()
+    def entries(key: str) -> list[tuple[str, str]]:
         if key not in cache:
             cache[key] = store.list_inventory_manifest(key)
         return cache[key]
 
-    def resolver(part) -> list[str]:
-        key = part.image_key()
-        names = [name for name, _ in entries(part)]
-        return [f"{base}/{key}/{n}" for n in names] if base else names
+    def donor_entries(key: str) -> list[tuple[str, str]]:
+        if key not in donor_cache:
+            donor_cache[key] = store.list_vehicle_manifest(key)
+        return donor_cache[key]
 
-    def stamps(part) -> list[str]:
-        return [stamp for _, stamp in entries(part)]
-
-    return Photos(resolver, stamps)
+    return _photo_view(entries, donor_entries, donor_image_keys(), base)
 
 
 def cmd_check(args) -> int:
@@ -296,7 +338,8 @@ def cmd_delta(args) -> int:
 
         from coreyard.sink.shopify_write import ShopifyPublisher
 
-        publisher = ShopifyPublisher(store=settings.store, status=args.status)
+        publisher = ShopifyPublisher(store=settings.store, status=args.status,
+                                     donor_files=state)
         if todo:
             from coreyard.yms.db import connect
             from coreyard.yms.interchange import InterchangeResolver
@@ -510,7 +553,8 @@ def cmd_sync(args) -> int:
         if args.sink == "api":
             from coreyard.sink.shopify_write import ShopifyPublisher
 
-            publisher = ShopifyPublisher(store=settings.store, status=args.status)
+            publisher = ShopifyPublisher(store=settings.store, status=args.status,
+                                     donor_files=state)
             if args.reconcile:
                 # Ask the store what it actually has, rather than trusting the state file.
                 # A fresh state file knows about nothing, and the bulk path keeps its own

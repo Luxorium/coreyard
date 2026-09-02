@@ -18,7 +18,7 @@ from typing import Optional
 
 from coreyard.config import StoreProfile, publication_names
 from coreyard.models import Part
-from coreyard.yms.images import SmbImageStore
+from coreyard.yms.images import SmbImageStore, donor_photo_limit
 from coreyard.sink.shopify_api import ShopifyClient, product_set_input
 from coreyard.transform.render import RenderedProduct, handle_for, render
 
@@ -49,6 +49,8 @@ _DELETE_FILES = """mutation($ids:[ID!]!){ fileDelete(fileIds:$ids){
 _SET = """mutation($input:ProductSetInput!){ productSet(synchronous:true, input:$input){
   product{ id handle } userErrors{ field message } } }"""
 
+_FILE_CREATE = """mutation($files:[FileCreateInput!]!){ fileCreate(files:$files){
+  files { id fileStatus } userErrors { field message } } }"""
 _STAGE = """mutation($input:[StagedUploadInput!]!){ stagedUploadsCreate(input:$input){
   stagedTargets{ url resourceUrl parameters{ name value } } userErrors{ field message } } }"""
 
@@ -72,6 +74,7 @@ class ShopifyPublisher:
         require_images: bool = False,
         retire_status: str = "ARCHIVED",
         publications: Optional[list[str]] = None,
+        donor_files=None,
     ) -> None:
         from coreyard.config import load_store
 
@@ -85,6 +88,10 @@ class ShopifyPublisher:
         self.require_images = require_images
         self.location = self.client.primary_location_id()
         self.images = SmbImageStore()
+        # Remembers which donor frame is already a Shopify file, so the same photograph is
+        # not uploaded once per part off that donor. Optional: without it the donor frames
+        # are simply staged per product, which is correct but far slower.
+        self.donor_files = donor_files
         # Status and channel publication are different things: an ACTIVE product that is on
         # no channel is a 404 to every shopper and to Google. Configured names are resolved
         # once, here, so a typo fails at startup instead of per product.
@@ -158,6 +165,17 @@ class ShopifyPublisher:
         )
 
     # -- images -------------------------------------------------------------
+    def _fetch_photos(self, part: Part, dest: Path) -> list[Path]:
+        """This part's own photographs, or its donor vehicle's when it has none.
+
+        Which of the two applies was decided by the image resolver, over the same manifests
+        the fingerprint was taken from — so what is published here is what the diff said had
+        changed, rather than a second opinion formed at publish time.
+        """
+        if part.uses_donor_photos and part.donor_image_key:
+            return self.images.fetch_vehicle(part.donor_image_key, dest)
+        return self.images.fetch(part.image_key(), dest)
+
     def _staged_files(self, part: Part, alt_for) -> list[dict]:
         """Upload this part's photos to Shopify's staging area.
 
@@ -166,53 +184,17 @@ class ShopifyPublisher:
         renderer's alt text for photo *n*, so the alt a photo is created with and the alt
         the audit and repair paths expect are one string, not two.
         """
-        import requests
+        if part.uses_donor_photos and part.donor_image_key and self.donor_files is not None:
+            return self._donor_file_inputs(part, alt_for)
 
         with tempfile.TemporaryDirectory(prefix=f"coreyard-r{part.r_number}-") as tmp:
-            paths = self.images.fetch(part.image_key(), Path(tmp))
+            paths = self._fetch_photos(part, Path(tmp))
             if not paths:
                 if self.require_images:
                     raise RuntimeError(f"R#{part.r_number} is marked as having images, but none were found")
                 return []
 
-            mime_types = [mimetypes.guess_type(p.name)[0] or "image/jpeg" for p in paths]
-            stage_in = [
-                {"resource": "IMAGE", "filename": p.name, "mimeType": mime, "httpMethod": "POST"}
-                for p, mime in zip(paths, mime_types)
-            ]
-            staged = self.client.graphql(_STAGE, {"input": stage_in})["stagedUploadsCreate"]
-            if staged["userErrors"]:
-                raise RuntimeError(f"staged upload R#{part.r_number}: {staged['userErrors']}")
-            targets = staged["stagedTargets"]
-            if len(targets) != len(paths):
-                raise RuntimeError(
-                    f"staged upload R#{part.r_number}: expected {len(paths)} targets, got {len(targets)}"
-                )
-
-            urls = []
-            session = requests.Session()
-            for p, mime, target in zip(paths, mime_types, targets):
-                form = [(x["name"], x["value"]) for x in target["parameters"]]
-                last_error: Exception | None = None
-                for attempt in range(4):
-                    try:
-                        with p.open("rb") as image_file:
-                            resp = session.post(
-                                target["url"],
-                                data=form,
-                                files={"file": (p.name, image_file, mime)},
-                                timeout=90,
-                            )
-                        resp.raise_for_status()
-                        last_error = None
-                        break
-                    except (requests.RequestException, OSError) as exc:
-                        last_error = exc
-                        if attempt < 3:
-                            time.sleep(2 ** attempt)
-                if last_error:
-                    raise RuntimeError(f"image upload R#{part.r_number} ({p.name}): {last_error}")
-                urls.append((target["resourceUrl"], p.name))
+            urls = self._stage_and_put(paths, f"R#{part.r_number}")
 
             return [
                 {
@@ -223,6 +205,84 @@ class ShopifyPublisher:
                 }
                 for i, (url, name) in enumerate(urls, start=1)
             ]
+
+    def _stage_and_put(self, paths: list[Path], label: str) -> list[tuple[str, str]]:
+        """Upload local files to Shopify's staging area; returns (resourceUrl, filename)."""
+        import requests
+
+        mime_types = [mimetypes.guess_type(p.name)[0] or "image/jpeg" for p in paths]
+        stage_in = [
+            {"resource": "IMAGE", "filename": p.name, "mimeType": mime, "httpMethod": "POST"}
+            for p, mime in zip(paths, mime_types)
+        ]
+        staged = self.client.graphql(_STAGE, {"input": stage_in})["stagedUploadsCreate"]
+        if staged["userErrors"]:
+            raise RuntimeError(f"staged upload {label}: {staged['userErrors']}")
+        targets = staged["stagedTargets"]
+        if len(targets) != len(paths):
+            raise RuntimeError(
+                f"staged upload {label}: expected {len(paths)} targets, got {len(targets)}"
+            )
+        urls: list[tuple[str, str]] = []
+        session = requests.Session()
+        for p, mime, target in zip(paths, mime_types, targets):
+            form = [(x["name"], x["value"]) for x in target["parameters"]]
+            last_error: Exception | None = None
+            for attempt in range(4):
+                try:
+                    with p.open("rb") as image_file:
+                        resp = session.post(target["url"], data=form,
+                                            files={"file": (p.name, image_file, mime)},
+                                            timeout=90)
+                    resp.raise_for_status()
+                    last_error = None
+                    break
+                except (requests.RequestException, OSError) as exc:
+                    last_error = exc
+                    if attempt < 3:
+                        time.sleep(2 ** attempt)
+            if last_error:
+                raise RuntimeError(f"image upload {label} ({p.name}): {last_error}")
+            urls.append((target["resourceUrl"], p.name))
+        return urls
+
+    def _donor_file_inputs(self, part: Part, alt_for) -> list[dict]:
+        """Attach the donor vehicle's frames, uploading each one only the first time.
+
+        About seven parts come off each donor, so staging its frames per product would send
+        the same photograph seven times. ``FileSetInput`` takes an ``id``, so a frame is
+        uploaded once, remembered against (donor, filename), and referenced by every part
+        after it. The alt text describes the donor vehicle rather than the part, which is
+        why one shared file carrying one alt is correct here and not a compromise.
+        """
+        key = str(part.donor_image_key or "")
+        names = self.images.list_vehicle_images(key)[:donor_photo_limit()]
+        if not names:
+            return []
+        known = {name: self.donor_files.donor_file_id(key, name) for name in names}
+        missing = [name for name in names if not known[name]]
+        if missing:
+            with tempfile.TemporaryDirectory(prefix=f"coreyard-donor{key}-") as tmp:
+                paths = self.images.fetch_vehicle(key, Path(tmp))
+                wanted = [p for p in paths if p.name in set(missing)]
+                if wanted:
+                    staged = self._stage_and_put(wanted, f"donor {key}")
+                    order = {name: i for i, name in enumerate(names)}
+                    created = self.client.graphql(_FILE_CREATE, {"files": [
+                        {"originalSource": url, "contentType": "IMAGE", "filename": name,
+                         "alt": alt_for(order.get(name, 0) + 1)}
+                        for url, name in staged
+                    ]})["fileCreate"]
+                    if created["userErrors"]:
+                        raise RuntimeError(f"fileCreate donor {key}: {created['userErrors']}")
+                    for (_url, name), created_file in zip(staged, created["files"]):
+                        file_id = created_file.get("id") or ""
+                        if file_id:
+                            known[name] = file_id
+                            self.donor_files.record_donor_file(key, name, file_id)
+        # A frame whose upload produced no id is skipped rather than guessed at; the parts
+        # that follow will try it again.
+        return [{"id": known[name]} for name in names if known.get(name)]
 
     # -- orchestration ------------------------------------------------------
     def publish(self, part: Part, refresh_images: bool = False,

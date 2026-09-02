@@ -85,6 +85,7 @@ class PortalMap:
     base_url: str
     cookie_names: tuple[str, ...]
     login_path: str
+    login_fields: Mapping[str, str]
     headers: Mapping[str, str]
     statuses: Mapping[str, str]
     endpoints: Mapping[str, str]
@@ -171,7 +172,7 @@ def load(path: str | Path | None = None) -> PortalMap:
         raise PortalConfigError("base_url must be an absolute HTTP(S) URL")
 
     auth = _object(data.get("auth"), "auth")
-    unknown_auth = sorted(set(auth) - {"cookies", "login_path"})
+    unknown_auth = sorted(set(auth) - {"cookies", "login_path", "login_fields"})
     if unknown_auth:
         raise PortalConfigError(f"auth: unknown key(s): {', '.join(unknown_auth)}")
     cookies = auth.get("cookies")
@@ -180,6 +181,15 @@ def load(path: str | Path | None = None) -> PortalMap:
     cookie_names = tuple(_string(item, "auth.cookies[]") for item in cookies)
     if len(set(cookie_names)) != len(cookie_names):
         raise PortalConfigError("auth.cookies contains a duplicate name")
+
+    login_fields: dict[str, str] = {}
+    if auth.get("login_fields") is not None:
+        # Which input the sign-in form calls the user and which it calls the password is
+        # the portal's vocabulary, exactly like a grid parameter or a tab status, so it is
+        # mapped here rather than spelled into the client. ``token`` is optional: a form
+        # with no anti-forgery field simply does not name one.
+        login_fields = _string_map(auth.get("login_fields"), "auth.login_fields",
+                                   {"username", "password"})
 
     parameters = _object(data.get("parameters"), "parameters")
     parameter_maps = {
@@ -196,6 +206,7 @@ def load(path: str | Path | None = None) -> PortalMap:
         base_url=base_url,
         cookie_names=cookie_names,
         login_path=_string(auth.get("login_path"), "auth.login_path"),
+        login_fields=login_fields,
         headers=_string_map(data.get("headers", {}), "headers"),
         statuses=_string_map(data.get("statuses"), "statuses", _STATUSES),
         endpoints=_string_map(data.get("endpoints"), "endpoints", _ENDPOINTS),

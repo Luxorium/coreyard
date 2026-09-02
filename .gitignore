@@ -37,3 +37,6 @@ portal.json
 # Reverse-engineered portal protocol notes and the vendor's own reference data.
 # Same rule as portal.json: useful next to the code, never in the tree.
 notes/
+
+# Browser network captures: these carry live session cookies.
+*.har

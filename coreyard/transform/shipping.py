@@ -68,6 +68,11 @@ class ShippingGroup:
     price: Optional[str] = None          # None = not shipped at any price
     note: str = ""
     match: tuple[str, ...] = ()
+    # Names a pattern would otherwise swallow. Substring matching cannot say "battery but
+    # not battery tray", and the two belong in different groups: one is freight, the other
+    # goes in a envelope. Ordering cannot settle it either, because the group that should
+    # win is the default, and a default carrying patterns is refused for good reason.
+    exclude: tuple[str, ...] = ()
     default: bool = False
     fulfillment: str = ""
 
@@ -78,6 +83,8 @@ class ShippingGroup:
     def matches(self, *part_types: Optional[str]) -> bool:
         """Whether any of the given part-type spellings falls in this group."""
         candidates = [str(t).lower() for t in part_types if t]
+        if any(word in candidate for word in self.exclude for candidate in candidates):
+            return False
         return any(pattern in candidate
                    for pattern in self.match for candidate in candidates)
 
@@ -181,6 +188,8 @@ class ShippingPolicy:
             if raw_match is None:
                 raw_match = data.get(group_id) if isinstance(data.get(group_id), list) else []
             match = tuple(str(m).strip().lower() for m in raw_match if str(m).strip())
+            exclude = tuple(str(m).strip().lower()
+                            for m in (body.get("exclude") or []) if str(m).strip())
             groups.append(ShippingGroup(
                 id=str(group_id),
                 tag=tag,
@@ -189,6 +198,7 @@ class ShippingPolicy:
                 price=price,
                 note=str(body.get("note") or "").strip(),
                 match=match,
+                exclude=exclude,
                 default=bool(body.get("default", False)),
                 fulfillment=fulfillment,
             ))
