@@ -137,3 +137,48 @@ class EnginePlanning(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+class AnonymousSession(unittest.TestCase):
+    """An expired portal session arrives as HTTP 200, an empty grid and an all-zero handle.
+
+    None of that trips the redirect path in ``_request``, and the handle is a perfectly
+    ordinary non-empty string by the time it reaches ``bulk_update`` — where the portal
+    accepts every write made against it, changes nothing and returns no error. A batch of
+    12,887 prices once reported complete success that way. These are the guards that make
+    the failure loud instead.
+    """
+
+    ANON = "00000000-0000-0000-0000-000000000000"
+
+    def setUp(self):
+        self.portal = load(REPO_ROOT / "portal.example.json")
+
+    def _client(self, session):
+        return PortalClient(self.portal, cookies={"session": "x"}, session=session,
+                            delay=0)
+
+    def _page(self, session_id, rows=()):
+        return Response({"pages": 1, "page": 1, "records": len(rows),
+                         "session": session_id, "rows": list(rows)})
+
+    def test_an_anonymous_read_fails_loudly_instead_of_coming_back_empty(self):
+        client = self._client(Session([self._page(self.ANON)]))
+        with self.assertRaises(SessionExpired):
+            client.grid()
+
+    def test_a_write_against_an_anonymous_handle_is_refused_not_discarded(self):
+        client = self._client(Session([]))
+        with self.assertRaises(SessionExpired):
+            client.bulk_update(
+                [{"field": "title", "action": "change_to", "value": "x"}],
+                ["7"], session_id=self.ANON,
+            )
+
+    def test_an_empty_grid_with_a_live_handle_is_still_a_good_read(self):
+        # A filtered read of a part type the yard holds none of is legitimately empty.
+        # Only the handle says whether anyone is signed in.
+        client = self._client(Session([self._page("live")]))
+        page = client.grid(part_type="999")
+        self.assertEqual(page["records"], 0)
+        self.assertEqual(client.session_id, "live")

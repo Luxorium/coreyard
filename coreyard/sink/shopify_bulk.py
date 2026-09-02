@@ -14,6 +14,7 @@ from typing import Any
 
 from coreyard.config import REPO_ROOT
 from coreyard.models import Part
+from coreyard.state import DEFAULT_STATE_DB, SyncState
 from coreyard.yms.db import connect
 from coreyard.yms.interchange import InterchangeResolver
 from coreyard.yms.inventory import fetch_parts, photos_required
@@ -39,7 +40,14 @@ def _completed_r_numbers(path: Path) -> set[str]:
 def _publisher(status: str, require_images: bool = True) -> ShopifyPublisher:
     publisher = getattr(_thread_local, "publisher", None)
     if publisher is None:
-        publisher = ShopifyPublisher(status=status, require_images=require_images)
+        # One state connection per worker, not one shared: sqlite3 binds a connection to
+        # the thread that opened it. It exists only to remember which donor frames are
+        # already Shopify files — without it every part off a donor stages the same
+        # photographs again, and roughly seven parts come off each donor.
+        state = SyncState(DEFAULT_STATE_DB)
+        _thread_local.state = state
+        publisher = ShopifyPublisher(status=status, require_images=require_images,
+                                     donor_files=state)
         _thread_local.publisher = publisher
     return publisher
 
@@ -153,11 +161,22 @@ def run(args) -> int:
                 flush=True,
             )
 
+    # Which photographs a part publishes with — its own, or its donor vehicle's — is
+    # decided in exactly one place, and this is the third caller of it after the full and
+    # delta sync paths. Resolving here is what tells the publisher a part fell back to its
+    # donor; without it an unphotographed part reaches ``_staged_files`` with nothing to
+    # stage and, under ``require_images``, fails outright. It also lists each folder once
+    # for the whole run rather than once per part.
+    from coreyard.run_sync import _make_resolver
+
+    photos = _make_resolver(None, scan_images=True)
+
     with args.log.open("a", encoding="utf-8") as log_file:
         with connect() as conn, ThreadPoolExecutor(max_workers=args.workers) as pool:
             resolver = InterchangeResolver(conn)
             for part in selected:
                 part.fitment = resolver.fitment_for(part)
+                photos.resolve(part)
                 future = pool.submit(_publish_with_retry, part, args.status,
                                      args.max_attempts, require_images)
                 pending[future] = part
