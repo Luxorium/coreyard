@@ -92,6 +92,17 @@ def _number(key: str, default: float) -> float:
     return value
 
 
+# An expired session does not always arrive as a redirect. The portal answers one with
+# HTTP 200, an empty grid and an all-zero session handle — so nothing in ``_request``
+# fires, and the handle reaches ``bulk_update`` as a perfectly ordinary non-empty string.
+# The portal then *accepts* every write made against it and discards them, returning no
+# error, which is how a batch of 12,887 prices once reported complete success and changed
+# nothing.
+def _is_anonymous_session(session_id: str | None) -> bool:
+    """True for a missing handle or the all-zero one a signed-out request comes back with."""
+    return not session_id or not str(session_id).strip("0-")
+
+
 class PortalClient:
     def __init__(
         self,
@@ -171,8 +182,16 @@ class PortalClient:
         raw = self._request("GET", "grid", params=params).json()
         r = self.portal.response
         session_id = raw.get(r("grid", "session"))
-        if session_id:
-            self.session_id = str(session_id)
+        if _is_anonymous_session(session_id):
+            # Deliberately keyed on the handle and not on an empty grid: a filtered read
+            # of a part type the yard has none of is legitimately empty, and treating that
+            # as a dead session would refuse perfectly good reads.
+            raise SessionExpired(
+                "the listing portal returned an anonymous session handle, so this client "
+                "is not signed in. Reads come back empty and writes are accepted and "
+                f"discarded. Sign in at {self.portal.base_url} and retry"
+            )
+        self.session_id = str(session_id)
         source_rows = raw.get(r("grid", "rows")) or []
         if not isinstance(source_rows, list):
             raise PortalError("grid response rows are not an array")
@@ -266,6 +285,15 @@ class PortalClient:
         token = session_id or self.session_id
         if not token:
             raise PortalError("bulk_update needs a live session token; call grid() first")
+        if _is_anonymous_session(token):
+            # Refused before the first write rather than reported afterwards: the portal
+            # takes a write made against an anonymous handle, answers without an error and
+            # changes nothing, so every guard downstream of here would call it a success.
+            raise SessionExpired(
+                "refusing to write with an anonymous session handle: the portal would "
+                "accept these changes and discard them silently. Re-read the grid to "
+                "establish a live session first"
+            )
         p = self.portal.parameter
         encoded = []
         for change in changes:
