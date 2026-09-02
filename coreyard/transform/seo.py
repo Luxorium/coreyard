@@ -296,9 +296,16 @@ def _plausible_end(year: int) -> int:
 
 
 def _year_span(part: Part) -> tuple[Optional[int], Optional[int]]:
-    starts = [f.year_start for f in part.fitment
+    # A row that names no make is a catalogue artifact rather than a vehicle application:
+    # it carries a placeholder span beside a bare or truncated model string ("1960-1970
+    # VOLVO", "1950-1950 CX-"). The sentinels above catch the 1940 and 2030 markers but
+    # not these. ``_model_labels`` already drops such rows, so counting their years made
+    # the two halves of one title disagree with each other — "1960-2008 Volvo 70 Series
+    # 60 80 XC90", where every model it names comes from a row starting in 2001.
+    rows = [f for f in part.fitment if clean_make(f.make)] or list(part.fitment)
+    starts = [f.year_start for f in rows
               if f.year_start and f.year_start > _SENTINEL_START]
-    ends = [f.year_end for f in part.fitment
+    ends = [f.year_end for f in rows
             if f.year_end and f.year_end < _SENTINEL_END]
     if starts:
         return min(starts), _plausible_end(max(ends or starts))
