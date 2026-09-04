@@ -6,7 +6,7 @@ was safe by accident, because a model number cannot form one.
 """
 import unittest
 
-from coreyard.yms.interchange import parse_application
+from coreyard.yms.interchange import _NOTE_MAX, _tidy_note, parse_application
 
 
 class TwoDigitModelNumbers(unittest.TestCase):
@@ -46,6 +46,40 @@ class TwoDigitModelNumbers(unittest.TestCase):
         parsed = parse_application("VOLVO 60 SERIES")
         self.assertEqual(parsed["model"], "VOLVO 60 SERIES")
         self.assertIsNone(parsed["y1"])
+
+
+class QualifierNotes(unittest.TestCase):
+    """A fitment qualifier is the part of the row that decides whether a part fits.
+
+    The cap used to be a bare slice, so "…, AT, California, thru VIN 090310" was stored as
+    "…, AT, California, th" — not merely unfinished, but missing the production-date split
+    entirely, and reading as though no such restriction existed.
+    """
+
+    def test_a_long_note_keeps_its_production_date_split(self):
+        raw = ("Throttle Valve Assembly; Base (4AFE engine, opt L01, VIN 6, 8th digit), "
+               "AT, California, thru VIN 090310")
+        self.assertEqual(_tidy_note(raw), raw)
+
+    def test_a_note_never_ends_mid_word(self):
+        note = _tidy_note("word " * 80)
+        self.assertFalse(note.rstrip("\u2026").endswith("wor"))
+        self.assertTrue(note.endswith("\u2026"))
+        self.assertLessEqual(len(note), _NOTE_MAX + 1)
+
+    def test_a_clause_the_source_repeated_is_collapsed(self):
+        self.assertEqual(
+            _tidy_note("w/o automatic dimming; w/o automatic dimming; w/o compass"),
+            "w/o automatic dimming; w/o compass")
+
+    def test_collapsing_is_case_insensitive_and_keeps_first_order(self):
+        self.assertEqual(_tidy_note("AT; California; at"), "AT; California")
+
+    def test_a_short_note_is_returned_verbatim(self):
+        self.assertEqual(_tidy_note("4x4, thru 12/82, Federal"), "4x4, thru 12/82, Federal")
+
+    def test_whitespace_and_edge_punctuation_still_normalise(self):
+        self.assertEqual(_tidy_note("  4x4,\n  thru 12/82 ;"), "4x4, thru 12/82")
 
 
 if __name__ == "__main__":

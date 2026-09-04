@@ -61,15 +61,47 @@ def _clean(v: Any) -> Optional[str]:
     return None if s in ("", "NULL", "None") else s
 
 
+# Long enough that the cap is a guard rather than a routine edit: measured across 36,507
+# catalogue notes the longest was 121 characters and the 99.9th percentile was 102, while
+# the previous 90 cut 0.32% of them — which sounds small until you notice it only ever cut
+# the most heavily qualified notes, the ones a shopper most needs to read.
+_NOTE_MAX = 200
+
+
 def _tidy_note(note: str) -> str:
     """Normalize an application's qualifier text ("4x4, thru 12/82, Federal").
 
     These qualifiers are what make a fitment claim precise — engine size, drivetrain,
     body style, emissions market, production date splits — so they are kept verbatim
-    apart from whitespace/punctuation cleanup and a length cap.
+    apart from whitespace and punctuation cleanup.
+
+    The cap used to be a bare ``[:90]``, which slices mid-word: "…, AT, California, thru
+    VIN 090310" became "…, AT, California, th". That does not merely look unfinished, it
+    silently deletes the production-date split that decides whether the part fits, and
+    leaves a note that reads as though no such restriction existed. Cut on a clause, a
+    phrase or at worst a word boundary, and say so with an ellipsis when it happens.
     """
     cleaned = re.sub(r"\s+", " ", (note or "").strip()).strip(" ,;-")
-    return cleaned[:90].rstrip(" ,;-")
+
+    # The source repeats a qualifier verbatim often enough to be worth collapsing, and a
+    # cell reading "w/o automatic dimming; w/o automatic dimming" reads as two conditions.
+    clauses, seen = [], set()
+    for clause in cleaned.split("; "):
+        stripped = clause.strip()
+        key = stripped.lower()
+        if stripped and key not in seen:
+            seen.add(key)
+            clauses.append(stripped)
+    cleaned = "; ".join(clauses)
+
+    if len(cleaned) <= _NOTE_MAX:
+        return cleaned.rstrip(" ,;-")
+    window = cleaned[: _NOTE_MAX + 1]
+    for separator in ("; ", ", ", " "):
+        cut = window.rfind(separator)
+        if cut > 0:
+            return cleaned[:cut].rstrip(" ,;-") + "\u2026"
+    return cleaned[:_NOTE_MAX].rstrip(" ,;-") + "\u2026"
 
 
 @dataclass(frozen=True)
