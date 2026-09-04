@@ -24,6 +24,28 @@ from coreyard.yms.db import query
 _YEAR_RANGE = re.compile(r"\b((?:19|20)?\d{2})\s*-\s*((?:19|20)?\d{2})\b")
 _YEAR_ONE = re.compile(r"\b((?:19|20)?\d{2})\b")
 
+# A model number can be two digits and sit exactly where a two-digit year would:
+# "VOLVO 60 SERIES 09 (turbo)". Nothing in the number itself distinguishes the two, but
+# the word that follows does — a model number is what SERIES refers back to.
+_MODEL_NUMBER = re.compile(r"\s*SERIES\b", re.I)
+
+
+def _year_match(app: str):
+    """The first year token in an application that is not part of the model's own name.
+
+    Ranges were always safe by luck: "VOLVO 60 SERIES 11-13 XC60" has no range for the
+    model number to form, so the search found 11-13 and the model kept its number. A lone
+    year had no such protection — in "VOLVO 60 SERIES 09" the first two-digit token is the
+    60, which became 1960, leaving the model as a bare "VOLVO". That is how 43 live
+    listings came to be titled "1960-2008 Volvo 70 Series 60 80 XC90": one corrupt row per
+    part, carrying a 1960s span, merged into the real 2001-2008 applications beside it.
+    """
+    for pattern in (_YEAR_RANGE, _YEAR_ONE):
+        for m in pattern.finditer(app):
+            if not _MODEL_NUMBER.match(app, m.end()):
+                return m
+    return None
+
 
 def _to_year(tok: str) -> Optional[int]:
     n = int(tok)
@@ -102,7 +124,7 @@ def parse_application(app: str) -> Optional[dict]:
     """Split a raw Application string into {model, y1, y2, note}. Model is the text before
     the first year token; a 2- or 4-digit year (optionally a range) follows; rest is a note."""
     app = app.strip()
-    m = _YEAR_RANGE.search(app) or _YEAR_ONE.search(app)
+    m = _year_match(app)
     if not m:
         return {"model": app.rstrip(" ,;"), "y1": None, "y2": None, "note": ""}
     model = app[: m.start()].strip().rstrip(" ,;")
