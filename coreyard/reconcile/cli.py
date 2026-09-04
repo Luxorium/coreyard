@@ -111,8 +111,36 @@ def run(args) -> int:
                 print(f"    ! R#{r_number}: {exc}", file=sys.stderr)
                 return False
 
+        # PUBLISH BEFORE ACTIVATE, ALWAYS. Status and channel are separate in Shopify and
+        # only the channel makes a URL resolve, so an ACTIVE product on no channel is a 404
+        # to every shopper and to Google. Activating first opened exactly that window for
+        # as long as the activate pass ran — hours, across the whole catalogue — and a
+        # customer was sent to a part that would not load. Publishing a DRAFT is harmless
+        # (a draft is invisible either way), so this order has no window at all.
+        published: set[str] = set()
+        if actions.publish and publisher.publications:
+            done = 0
+            for r_number in actions.publish:
+                try:
+                    publisher.publish_to_channels(shop[r_number].product_id)
+                    done += 1
+                    published.add(r_number)
+                except RuntimeError as exc:
+                    print(f"    ! R#{r_number}: {exc}", file=sys.stderr)
+            print(f"  published to channel: {done}/{len(actions.publish)}")
+
+        # A requested publication is a prerequisite for making this product visible. If it
+        # failed, leave the product in its safe invisible state so the next reconcile retries
+        # both steps. Activating anyway recreates the exact ACTIVE-but-404 state this pass is
+        # meant to repair.
+        blocked_visibility = set(actions.publish) - published
+
         done = 0
         for r_number in actions.activate:
+            if r_number in blocked_visibility:
+                print(f"    ! R#{r_number}: not activated because channel publication failed",
+                      file=sys.stderr)
+                continue
             done += set_status(r_number, planner.ACTIVE)
         if actions.activate:
             print(f"  activated: {done}/{len(actions.activate)}")
@@ -120,6 +148,10 @@ def run(args) -> int:
         done = 0
         revived: list[str] = []
         for r_number, status in actions.revive:
+            if r_number in blocked_visibility:
+                print(f"    ! R#{r_number}: not revived because channel publication failed",
+                      file=sys.stderr)
+                continue
             if set_status(r_number, status):
                 done += 1
                 revived.append(r_number)
@@ -128,16 +160,6 @@ def run(args) -> int:
         # Only once the product is actually back does the memory stop being needed; a failed
         # revival must stay remembered or the retry republishes it as ARCHIVED.
         state.clear_retired(revived)
-
-        if actions.publish and publisher.publications:
-            done = 0
-            for r_number in actions.publish:
-                try:
-                    publisher.publish_to_channels(shop[r_number].product_id)
-                    done += 1
-                except RuntimeError as exc:
-                    print(f"    ! R#{r_number}: {exc}", file=sys.stderr)
-            print(f"  published to channel: {done}/{len(actions.publish)}")
 
         if actions.retire:
             print(f"  Retiring {len(actions.retire)} product(s) "

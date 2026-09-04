@@ -158,8 +158,7 @@ class StoreProfile:
     # (STORE_SHIPPING_POLICY_FILE). Empty means CoreYard classifies nothing.
     shipping: ShippingPolicy = field(default_factory=lambda: NO_SHIPPING)
 
-    # Per-R# decisions made by a catalogue channel (for example a researched engine
-    # price). They feed the canonical renderer; they are not a second publishing path.
+    # Reviewed per-R# title decisions. Prices always come from the source database.
     overrides: CatalogOverrides = field(default_factory=lambda: NO_OVERRIDES)
 
     def origin(self) -> str:

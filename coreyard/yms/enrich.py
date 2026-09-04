@@ -56,7 +56,7 @@ def enabled() -> bool:
     """Whether this installation has opted into enriched rendering.
 
     Reads the already-loaded environment rather than loading ``.env`` itself, matching
-    ``pricing.charm_enabled``. A render-path gate that pulled in ``.env`` on its own would
+    other render-path configuration. A render-path gate that pulled in ``.env`` itself would
     also pull it into every unit test that happens to render a product.
     """
     return (_get("COREYARD_ENRICH", "") or "").strip().lower() in ("1", "true", "yes", "on")

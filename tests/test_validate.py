@@ -56,7 +56,7 @@ class Valid(Base):
 
     def test_catalog_overrides_can_be_checked_alone(self):
         value = {"version": 1, "parts": {"42": {
-            "title": "Researched Engine", "price": "299.99"}}}
+            "title": "Reviewed Engine"}}}
         result = validate.validate(overrides=self.write("c.json", value))
         self.assertTrue(result.ok, result.errors)
         self.assertTrue(any("1 title" in note for note in result.notes))

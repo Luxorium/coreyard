@@ -20,6 +20,12 @@ own order booking writes the storefront order name there, so an installation tha
 through CoreYard has the link already; one that books some other way supplies a query that
 produces the same pairing. Either way the SQL is the site's, in the local schema mapping.
 
+Each row carries a ``status``. ``booked`` means the work order exists but has not been
+invoiced: only the reference tag (``wo-<n>``) is written, so an operator can find the
+order, and the rest waits. Anything else — ``invoiced``, or the empty string a
+single-state query returns — gets the full treatment above. A query that reports only
+invoiced orders therefore behaves exactly as before.
+
     bin/coreyard orders sync-status              # plan; writes nothing
     bin/coreyard orders sync-status --apply
 
@@ -95,8 +101,19 @@ def decide(order: dict, source: SourceOrder,
     policy = policy or OrderPolicy()
     reference = source.external_reference or source.order_reference
     decision = Decision(order_id=order.get("id", ""), order_name=order.get("name", ""))
-
     existing = {str(t) for t in (order.get("tags") or [])}
+
+    # A work order that exists but has not been invoiced yet. CoreYard books it the moment
+    # the sale is paid and knows its number then, so the reference tag can go on now — an
+    # operator filters on it — but the ``invoiced`` tag, the note and any fulfillment all
+    # name an invoice that has not happened, so they wait. Any other status (including the
+    # empty one a single-state query returns) keeps the original behaviour.
+    if source.status.strip().lower() == "booked":
+        decision.add_tags = [t for t in policy.reference_tag_for(reference)
+                             if t not in existing]
+        decision.reason = "work order booked, not yet invoiced"
+        return decision
+
     decision.add_tags = [t for t in policy.tags_for(reference) if t not in existing]
 
     marker = policy.note_for(reference)

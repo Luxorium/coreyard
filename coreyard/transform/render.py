@@ -28,7 +28,7 @@ from typing import Optional, Sequence
 from coreyard.config import StoreProfile
 from coreyard.models import Part
 from coreyard.transform import seo
-from coreyard.transform.pricing import retail_str
+from coreyard.transform.pricing import money_str
 from coreyard.transform.shipping import ShippingGroup
 from coreyard.transform.weights import GRAMS_PER_UNIT, Weight
 
@@ -97,25 +97,36 @@ def fitment_rows(part: Part, store: Optional[StoreProfile] = None) -> list[dict]
     vehicle picker, a related-parts link — would silently lose them.
     """
     rows: list[dict] = []
-    for entry in part.fitment or []:
+    for entry in seo.display_fitments(part):
         make = seo.clean_make(entry.make)
-        model = seo.clean_model(entry.model)
+        model = seo.model_without_make(make, entry.model)
         label = seo._vehicle_label(make, model)
         if not label:
             continue
+        notes: list[str] = []
+        seen_notes: set[str] = set()
+        for application in entry.qualifiers():
+            note = " ".join(str(application.note or "").split())
+            key = note.casefold()
+            if not note or key in seen_notes:
+                continue
+            seen_notes.add(key)
+            notes.append(note)
+            if len(notes) == 4:
+                break
         rows.append({
-            "years": entry.year_label(),
+            "years": seo.fitment_year_label(entry),
             "make": make or "",
             "model": model or "",
             # The qualifier text only. `Application.label()` prefixes its own year span,
             # which the row's own `years` column already states.
-            "note": "; ".join(a.note for a in entry.qualifiers()[:4] if a.note),
+            "note": "; ".join(notes),
             "label": label,
         })
     if rows:
         return rows
     make = seo.clean_make(part.make)
-    model = seo.clean_model(part.model)
+    model = seo.model_without_make(make, part.model)
     label = seo._vehicle_label(make, model)
     if not label:
         return []
@@ -300,10 +311,10 @@ def render(
                    else seo.meta_title(part, store)),
         seo_description=seo.meta_description(part, store),
         sku=str(part.r_number),
-        # A researched price is already a deliberate shopper-facing amount; storefront
-        # charm rounding must not silently move it after the research decision.
-        price=(f"{override.price:.2f}" if override.price is not None
-               else retail_str(part.price, default="0.00")),
+        # The source database is the price authority. No override or presentation transform is
+        # allowed here: publishing a different number would make the storefront disagree
+        # with the counter and the next source-system update.
+        price=(money_str(part.price) if part.price is not None else "0.00"),
         inventory=max(int(part.quantity or 0), 0),
         images=tuple(urls),
         image_alts=tuple(seo.image_alt(part, i, store) for i in range(1, len(urls) + 1)),

@@ -168,16 +168,12 @@ code must use `Part` fields, never source columns. `StoreProfile` in
 `coreyard/config.py` carries installation-specific storefront identity through
 rendering and fingerprinting so customer-facing strings are not hardcoded.
 
-**"Listable" has one definition, and it now has two halves.** `inventory.photos_required`
-(`STORE_REQUIRE_IMAGES`) and `inventory.researched_prices_required`
-(`STORE_REQUIRE_RESEARCHED_PRICE`, which reads the R#s carrying a price in
-`STORE_CATALOG_OVERRIDES_FILE`) are both asked in `yms/inventory.py`, by `fetch_parts` *and*
-by `listable_r_numbers` — reconciliation asking a different question from sync is how a part
-gets published on one run and archived on the next. Both default to off, because an
-installation that has photographed or researched nothing must not have its whole catalogue
-judged unlistable by an upgrade. `researched_r_numbers` returns `None` when the gate is off
-and a set when it is on: those mean opposite things, and collapsing them would silently
-unlist the entire catalogue.
+**"Listable" has one definition.** The source mapping's scope, `Part.is_listable`'s positive
+price check, and `inventory.photos_required` (`STORE_REQUIRE_IMAGES`) are applied in
+`yms/inventory.py` by `fetch_parts` *and* `listable_r_numbers` — reconciliation asking a
+different question from sync is how a part gets published on one run and archived on the
+next. The photo policy defaults off so an installation with no image mapping is unchanged by
+an upgrade. The price is always the source database's value.
 
 ```text
 coreyard/cli.py      the one command tree; every command is mounted here
@@ -194,7 +190,7 @@ coreyard/orders/     order pipeline + queue, poll transport, lifecycle sync, pol
 coreyard/reconcile/  yard-vs-store comparison, planning, and guarded application
 coreyard/repair/     rewrite catalog output an older renderer produced
 coreyard/audit/      read-only listing-quality checks with configurable thresholds
-coreyard/ebay/       the listing-portal channel: portal map, client, research, guarded writes
+coreyard/ebay/       the listing-portal channel: portal map, client, guarded writes
 coreyard/ebay/index.py      the one place pricing evidence is fetched from, and so replaceable
 coreyard/yms/part_types.py  every part type the yard can inventory, and wording coverage
 coreyard/overrides.py reviewed per-R# title/price decisions, read by the canonical renderer
@@ -523,8 +519,8 @@ that must not close the review window, so pushing stays a separate command a per
 ### Staying signed in
 
 Borrowing the browser's session needs no password on disk, which is why it was the whole
-design. It does not survive a run that outlives the session, though, and an overnight research
-pass is exactly that — dying two thirds of the way through costs the night.
+design. It does not survive a run that outlives the session, though, and an overnight
+maintenance pass can do that — dying two thirds of the way through costs the night.
 
 `EBAY_PORTAL_USER`/`EBAY_PORTAL_PASSWORD` are therefore a sign-in of **last resort**:
 consulted only after the explicit jar, the live browser and the owner-only cache have all come
@@ -574,14 +570,14 @@ than one nothing touched.
 
 ### Three separate write surfaces, in increasing order of consequence
 
-1. **Saving in the portal** (`ebay apply`, `ebay engine-apply`, `ebay aspects --apply`)
+1. **Saving in the portal** (`ebay apply`, `ebay daily --apply`, `ebay aspects --apply`)
    changes stored values only. Nothing a shopper sees moves. This is the review window.
 2. **Pushing** (`ebay push --apply`) sends those values to eBay. Now they are live.
 3. **Delisting** (`ebay delist --apply`) ends live listings. This is **irreversible**:
    relisting mints a new item id and loses the watchers and the ranking the old one had.
 
 Keep those three as three commands. Collapsing the first two removes the only point at
-which a person sees what a batch of researched prices actually says before buyers do.
+which a person sees what a batch of portal changes says before buyers do.
 
 ### Guards that are part of the feature
 
@@ -602,50 +598,24 @@ which a person sees what a batch of researched prices actually says before buyer
   (`EBAY_ASPECTS_FILE`). A value that is not derivable with confidence is left unset, and
   `--apply` refuses outright without the metadata: eBay ranks on aspect *match* and buyers
   filter on it, so a wrong aspect is worse than a missing one.
-- Prices are guarded outside the calculation that proposes them
-  (`ebay/research.apply_guards`): a floor, a ceiling at `MAX_OVER_MEDIAN` times the
-  comparable median, and a hard hold on any listing whose condition note mentions a defect.
-  The unguarded answer is kept as `raw_suggested` so a reviewer can see what was overridden.
-- Every published price lands a penny under the same five-dollar grid (`research.PRICE_STEP`),
-  including one the floor supplied: a floor is a business minimum, not a shopper-facing
-  number, and `$12.50` sitting beside `$64.99` reads like two different shops. A
-  comparable-derived price still rounds **down**, for the reason it always has — the market
-  cleared there and rounding past it invents evidence. A floored one has no evidence to
-  respect, so it rounds to nearest, and either is nudged up a step if that would land it under
-  the floor. `STORE_PRICE_STEP` puts the catalogue's own charm rounding on the same grid; it
-  defaults to a dollar so no existing installation's prices move on upgrade.
+- A resolved listing's proposed price is the exact positive source price, formatted to
+  cents. Missing and nonpositive source prices are held. There is no override, floor,
+  rounding grid, or second calculation to disagree with the source system.
 
 ### Where this channel meets Shopify
 
-At exactly one place: `engine-plan` writes a per-R# overrides file, and configuring it as
-`STORE_CATALOG_OVERRIDES_FILE` makes the canonical renderer read those reviewed titles and
-prices. That is deliberate — it is the same rule `transform/render.py` exists to enforce.
-A researched price must reach Shopify *through the renderer*, so it lands in the
-fingerprint and both sinks serialize it, rather than as an out-of-band product patch that
-the next sync would silently revert. Overrides are keyed by **R#**, never by portal listing
-id; `build_overrides` refuses rather than guessing when a listing has no R#.
+At exactly one place: the daily title pass can write a per-R# title override file, and
+configuring it as `STORE_CATALOG_OVERRIDES_FILE` makes the canonical renderer read those
+reviewed titles. Overrides are keyed by **R#**, never by portal listing id, and the builder
+refuses rather than guessing when a listing has no R#. Prices are absent from the override
+schema; Shopify and the listing portal both take them from the source database.
 
 ### No inference, anywhere
 
-**CoreYard runs no model and calls no LLM.** Titles come from the canonical renderer,
-comparables from a parsed public index, and prices from arithmetic over those comparables.
-This is a hard constraint, not a preference, and it is the reason the channel can run
-unattended: a program that prices 20,000 listings the same way twice can be reviewed once
-and trusted, while an answer that varies between runs has to be read every time — and
-nobody reads 20,000 of anything.
-
-Three properties follow, and are worth keeping:
-
-- **Every price explains itself.** `research.price_listing` returns the named adjustments
-  that produced it ("96% of the supplied domestic median; under 100k miles +7%; tested
-  +8%"), so a reviewer checks the reasoning rather than trusting the number.
-- **Nothing is invented.** With no comparable median a listing gets *no price* and is held,
-  because a listing left at the yard's own price merely fails to improve, while a guessed
-  one is wrong in a direction nobody can predict.
-- **A run has no external budget to exhaust.** There is no rate limit, no backoff, no
-  wall-clock deadline, and no reason for a scheduled job to bank partial work against a
-  quota. Checkpointing survives because a portal read is still slow, not because a
-  provider might refuse.
+**CoreYard runs no model and calls no LLM.** Titles come from the canonical renderer and
+prices come from the source database. This is a hard constraint: the same part must produce the same
+listing on every run, and no external pricing source or inference may override the yard's
+recorded amount.
 
 If a future task seems to want a model — better titles, a judgement call on a defect note —
 the answer is a rule in the renderer or a held listing for a person to decide, not a

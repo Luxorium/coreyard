@@ -2,6 +2,7 @@
 
 import unittest
 import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock
 
@@ -23,6 +24,24 @@ class Credentials(unittest.TestCase):
 
     def test_default_oauth_scopes_allow_paid_order_webhooks(self):
         self.assertIn("read_orders", DEFAULT_SCOPES.split(","))
+
+
+class StorefrontInventoryCount(unittest.TestCase):
+    def test_count_and_freshness_are_written_as_shop_metafields(self):
+        publisher = _publisher()
+        publisher.client.graphql.return_value = {"shop": {"id": "gid://shopify/Shop/1"}}
+        observed = datetime(2026, 9, 2, 20, 0, tzinfo=timezone.utc)
+
+        publisher.publish_source_inventory_count(27163, observed)
+
+        mutation, variables, root = publisher.client.mutate.call_args.args
+        self.assertEqual(root, "metafieldsSet")
+        self.assertIn("metafieldsSet", mutation)
+        by_key = {field["key"]: field for field in variables["fields"]}
+        self.assertEqual(by_key["source_inventory_count"]["value"], "27163")
+        self.assertEqual(by_key["source_inventory_count"]["type"], "number_integer")
+        self.assertEqual(by_key["source_inventory_updated_at"]["value"],
+                         "2026-09-02T20:00:00Z")
 
 
 class Retirement(unittest.TestCase):

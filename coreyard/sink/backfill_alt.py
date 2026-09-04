@@ -1,4 +1,4 @@
-"""Backfill alt text onto product photos that were uploaded without it.
+"""Backfill or repair alt text on product photos.
 
 Photos published before alt text was generated carry ``alt: ""`` — invisible to image
 search and unreadable to a screen reader. This walks the store, works out the alt each
@@ -32,8 +32,17 @@ BATCH = 25
 _PAGE = """query($cursor:String){
   products(first:50, after:$cursor){
     pageInfo{ hasNextPage endCursor }
-    nodes{ id handle media(first:10){ nodes{ ... on MediaImage { id alt } } } }
+    nodes{ id handle media(first:10){
+      pageInfo{ hasNextPage endCursor }
+      nodes{ ... on MediaImage { id alt } }
+    } }
   } }"""
+
+_MEDIA_PAGE = """query($id:ID!,$cursor:String){
+  product(id:$id){ media(first:100, after:$cursor){
+    pageInfo{ hasNextPage endCursor }
+    nodes{ ... on MediaImage { id alt } }
+  } } }"""
 
 _FILE_UPDATE = """mutation($files:[FileUpdateInput!]!){
   fileUpdate(files:$files){ files{ id } userErrors{ field message } } }"""
@@ -50,6 +59,25 @@ def _iter_products(client: ShopifyClient, max_pages: int | None = None) -> Itera
         if not page["pageInfo"]["hasNextPage"] or (max_pages and pages >= max_pages):
             return
         cursor = page["pageInfo"]["endCursor"]
+
+
+def _iter_media(client: ShopifyClient, product: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """Yield every image attached to a product, including media after the first ten."""
+    media = product.get("media") or {}
+    yield from media.get("nodes") or []
+    page_info = media.get("pageInfo") or {}
+    while page_info.get("hasNextPage"):
+        result = client.graphql(
+            _MEDIA_PAGE,
+            {"id": product["id"], "cursor": page_info.get("endCursor")},
+        ).get("product")
+        # The product can be deleted between the catalogue page and this overflow query.
+        # Its first page was still valid; there is simply nothing left to update now.
+        if not result:
+            return
+        media = result["media"]
+        yield from media.get("nodes") or []
+        page_info = media.get("pageInfo") or {}
 
 
 def _completed(path: Path) -> set[str]:
@@ -88,13 +116,14 @@ def _plan(client: ShopifyClient, store: StoreProfile, done: set[str], overwrite:
             stats["skipped_done"] += 1
             continue
         wanted: list[tuple[str, int]] = []
-        for index, media in enumerate(node["media"]["nodes"], start=1):
+        for index, media in enumerate(_iter_media(client, node), start=1):
             if not media.get("id"):
                 continue
             stats["photos"] += 1
-            if media.get("alt") and not overwrite:
+            if media.get("alt"):
                 stats["already_set"] += 1
-                continue
+                if not overwrite:
+                    continue
             wanted.append((media["id"], index))
         if wanted:
             todo[r_number] = wanted
@@ -104,15 +133,71 @@ def _plan(client: ShopifyClient, store: StoreProfile, done: set[str], overwrite:
 
 
 def _parts_for(r_numbers: set[str]) -> dict[str, Part]:
-    """Load just the parts we need, with interchange fitment resolved for their titles."""
-    from coreyard.yms.db import connect
-    from coreyard.yms.interchange import InterchangeResolver
-    from coreyard.yms.inventory import fetch_parts
+    """Load just the parts whose photos need object-focused alt text.
 
-    with connect() as conn:
-        parts = [p for p in fetch_parts(images_only=True) if p.r_number in r_numbers]
-        InterchangeResolver(conn).attach(parts)
-    return {p.r_number: p for p in parts}
+    Alt text describes the photographed part and its donor vehicle; it deliberately does
+    not include interchange fitment. Resolving tens of thousands of fitment keys here would
+    add many minutes of source-database traffic without changing a single generated alt.
+    """
+    from coreyard.run_sync import _make_resolver
+    from coreyard.yms.inventory import fetch_parts_by_r_number
+
+    # A live product can now be sold, archived, or using donor photographs;
+    # none of those states makes its existing image alt safe to misidentify. Targeted
+    # lookups intentionally bypass the current listable gates and stay below SQL's practical
+    # IN-list limits.
+    found: dict[str, Part] = {}
+    wanted = sorted(r_numbers)
+    for start in range(0, len(wanted), 250):
+        found.update(fetch_parts_by_r_number(wanted[start:start + 250]))
+
+    # This is the same own-photo-versus-donor decision used by sync. Calling resolve sets
+    # donor_image_key/uses_donor_photos on each Part; the returned filenames are irrelevant
+    # here, but those facts decide what the photograph truthfully depicts.
+    photos = _make_resolver(None)
+    for part in found.values():
+        photos.resolve(part)
+    return found
+
+
+def _updates_for(
+    todo: dict[str, list[tuple[str, int]]],
+    parts: dict[str, Part],
+    store: StoreProfile,
+) -> tuple[list[dict[str, str]], list[set[str]], dict[str, set[str]]]:
+    """Deduplicate global Shopify files and refuse conflicting descriptions.
+
+    A donor image is one global file referenced by several products. Sending one update per
+    product creates a last-write-wins race; one file must have one donor-vehicle alt instead.
+    If supposedly shared media resolve to different facts, skip the unsafe update and make
+    the collision visible rather than choosing whichever product happened to be scanned last.
+    """
+    by_media: dict[str, dict[str, str]] = {}
+    owners: dict[str, set[str]] = {}
+    conflicts: dict[str, set[str]] = {}
+    for r_number, media in todo.items():
+        part = parts.get(r_number)
+        if part is None:
+            continue
+        for media_id, index in media:
+            update = {"id": media_id, "alt": seo.image_alt(part, index, store)}
+            prior = by_media.get(media_id)
+            if media_id in conflicts:
+                conflicts[media_id].add(r_number)
+                continue
+            if prior is not None and prior["alt"] != update["alt"]:
+                conflicts.setdefault(media_id, set()).update(owners[media_id])
+                conflicts[media_id].add(r_number)
+            else:
+                by_media[media_id] = update
+                owners.setdefault(media_id, set()).add(r_number)
+
+    for media_id in conflicts:
+        by_media.pop(media_id, None)
+        owners.pop(media_id, None)
+    media_ids = list(by_media)
+    return ([by_media[media_id] for media_id in media_ids],
+            [owners[media_id] for media_id in media_ids], conflicts)
 
 
 def _record(log, payload: dict[str, Any]) -> None:
@@ -150,40 +235,40 @@ def run(args) -> int:
         print("Nothing to do.")
         return 0
 
-    print(f"Loading {len(todo)} parts from the source database (resolving fitment for titles) ...",
-          flush=True)
+    print(f"Loading {len(todo)} parts from the source database ...", flush=True)
     parts = _parts_for(set(todo))
     missing = sorted(set(todo) - set(parts))
     if missing:
-        print(f"  {len(missing)} product(s) have no matching listable part; skipping "
+        print(f"  {len(missing)} product(s) have no matching source part; skipping "
               f"(e.g. {missing[:5]})")
 
-    updates: list[dict[str, str]] = []
-    owner: list[str] = []
-    for r_number, media in todo.items():
-        part = parts.get(r_number)
-        if part is None:
-            continue
-        for media_id, index in media:
-            updates.append({"id": media_id, "alt": seo.image_alt(part, index, store)})
-            owner.append(r_number)
+    updates, owners_by_update, conflicts = _updates_for(todo, parts, store)
+    conflict_products = set().union(*conflicts.values()) if conflicts else set()
+    if conflicts:
+        sample = [(media_id, sorted(owners))
+                  for media_id, owners in list(conflicts.items())[:5]]
+        print(f"  ERROR: {len(conflicts)} shared media file(s) resolved to conflicting alt "
+              f"text; skipped them (e.g. {sample})")
 
     if not updates:
         print("No updatable photos matched a live part.")
-        return 0
+        return 1 if conflicts else 0
 
     if args.dry_run:
         print(f"\nDRY RUN — would update {len(updates)} photo(s). Samples:")
-        for u, r_number in list(zip(updates, owner))[:8]:
-            print(f"  R#{r_number:<8} {u['alt'][:78]}")
-        return 0
+        for update, owners in list(zip(updates, owners_by_update))[:8]:
+            label = ",".join(f"R#{r}" for r in sorted(owners))
+            print(f"  {label:<12} {update['alt'][:78]}")
+        return 1 if conflicts else 0
 
     args.log.parent.mkdir(parents=True, exist_ok=True)
     ok = failed = 0
+    all_products = set().union(*owners_by_update) if owners_by_update else set()
+    failed_products: set[str] = set(conflict_products)
     with args.log.open("a", encoding="utf-8") as log:
         for start in range(0, len(updates), BATCH):
             chunk = updates[start:start + BATCH]
-            owners = sorted(set(owner[start:start + BATCH]))
+            owners = sorted(set().union(*owners_by_update[start:start + BATCH]))
             try:
                 result = client.graphql(_FILE_UPDATE, {"files": chunk})["fileUpdate"]
                 errors = result["userErrors"]
@@ -191,18 +276,23 @@ def run(args) -> int:
                 errors = [{"message": str(exc)}]
             if errors:
                 failed += len(chunk)
+                failed_products.update(owners)
                 for r_number in owners:
                     _record(log, {"status": "error", "r_number": r_number,
                                   "error": str(errors)})
                 print(f"  [{start + len(chunk)}/{len(updates)}] ERROR {errors}", flush=True)
             else:
                 ok += len(chunk)
-                for r_number in owners:
-                    _record(log, {"status": "ok", "r_number": r_number})
                 print(f"  [{start + len(chunk)}/{len(updates)}] ok", flush=True)
 
+        # A product can have more photos than one API batch. Mark it resumable only after
+        # every batch containing one of its photos succeeded; otherwise an early success
+        # followed by a later failure would cause the retry to skip its remaining photos.
+        for r_number in sorted(all_products - failed_products):
+            _record(log, {"status": "ok", "r_number": r_number})
+
     print(f"\nFinished: photos updated={ok} failed={failed} log={args.log}")
-    return 1 if failed else 0
+    return 1 if failed or conflicts else 0
 
 
 def main(argv: list[str] | None = None) -> int:

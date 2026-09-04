@@ -198,7 +198,7 @@ class FingerprintStability(unittest.TestCase):
 class Gate(unittest.TestCase):
     def test_checking_the_gate_does_not_pull_in_dotenv(self):
         """A render-path gate that loaded `.env` would leak the site's real settings into
-        every other test in the process — which is how charm pricing once turned itself on
+        every other test in the process — which is how a pricing setting once turned itself on
         mid-suite and failed an unrelated price assertion."""
         import os
 

@@ -9,7 +9,13 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 from coreyard.yms import schema
-from coreyard.yms.inventory import FETCH_PAGE_SIZE, _clean_note, fetch_parts, row_to_part
+from coreyard.yms.inventory import (
+    FETCH_PAGE_SIZE,
+    _clean_note,
+    fetch_parts,
+    row_to_part,
+    source_inventory_count,
+)
 
 FIXTURE = {
     "select": {
@@ -120,7 +126,6 @@ class PagedFetch(unittest.TestCase):
             [f"page:None:{FETCH_PAGE_SIZE}", f"page:1:{FETCH_PAGE_SIZE}"],
         )
         self.assertEqual(connect.call_count, 2)
-
     @patch("coreyard.yms.inventory.query")
     @patch("coreyard.yms.inventory.connect")
     @patch("coreyard.yms.inventory.schema.load")
@@ -139,6 +144,24 @@ class PagedFetch(unittest.TestCase):
             [f"page:None:{FETCH_PAGE_SIZE}", "page:1:250"],
         )
         self.assertEqual(connect.call_count, 2)
+
+
+class InventoryCount(unittest.TestCase):
+    @patch("coreyard.yms.inventory.query")
+    @patch("coreyard.yms.inventory.connect")
+    @patch("coreyard.yms.inventory.schema.load")
+    def test_exact_count_uses_one_aggregate_without_the_photo_gate(
+        self, load, connect, run_query
+    ):
+        mapping = load.return_value
+        mapping.build_inventory_count_query.return_value = "count sql"
+        connect.return_value.__enter__.return_value = MagicMock()
+        run_query.return_value = [{"part_count": "27163"}]
+
+        self.assertEqual(source_inventory_count(), 27163)
+
+        mapping.build_inventory_count_query.assert_called_once_with(images_only=False)
+        run_query.assert_called_once()
 
 
 if __name__ == "__main__":

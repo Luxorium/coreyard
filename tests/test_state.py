@@ -96,6 +96,31 @@ class Diff(unittest.TestCase):
                 self.assertNotIn("stock", columns)
                 self.assertIn("image_fingerprint", columns)
 
+    def test_old_donor_media_table_gains_source_stamp(self):
+        with TemporaryDirectory() as d:
+            db = Path(d) / "state.sqlite3"
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "CREATE TABLE donor_media ("
+                " donor_key TEXT NOT NULL, filename TEXT NOT NULL, file_id TEXT NOT NULL,"
+                " uploaded_at TEXT NOT NULL DEFAULT '',"
+                " PRIMARY KEY (donor_key, filename))"
+            )
+            conn.execute(
+                "INSERT INTO donor_media VALUES ('15', '15_01.jpg', 'gid://File/1', '')"
+            )
+            conn.commit()
+            conn.close()
+
+            with SyncState(db) as state:
+                self.assertEqual(
+                    ("gid://File/1", ""), state.donor_file("15", "15_01.jpg")
+                )
+                columns = {
+                    row[1] for row in state.conn.execute("PRAGMA table_info(donor_media)")
+                }
+                self.assertIn("source_stamp", columns)
+
 
 class ImageChanges(unittest.TestCase):
     """A photo added or swapped on the share has to reach the storefront."""

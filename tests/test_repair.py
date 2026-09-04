@@ -6,6 +6,7 @@ while it is fixing CoreYard's own.
 """
 
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 
 from coreyard.config import StoreProfile
@@ -136,6 +137,28 @@ class MetafieldRepair(unittest.TestCase):
         sent = client.calls[0][1]["fields"]
         self.assertTrue(all(set(f) == {"ownerId", "namespace", "key", "type", "value"}
                             for f in sent))
+
+    def test_a_metafield_change_does_not_replace_the_live_catalogue_map(self):
+        """Planning must continue after the first product with stale structured data."""
+        products = live(metafields=())
+        second = replace(
+            next(iter(live(title="wrong").values())),
+            r_number="52",
+            product_id="gid://shopify/Product/2",
+        )
+        products["52"] = second
+        rendered = next(iter(wanted().values()))
+
+        changes = engine.plan(
+            products,
+            {"51": rendered, "52": rendered},
+            ("title", "metafields"),
+            store=STORE,
+        )
+
+        self.assertEqual([change.r_number for change in changes], ["51", "52"])
+        self.assertIn("metafields", changes[0].fields)
+        self.assertEqual(changes[1].names(), ["title"])
 
 
 class TagRepair(unittest.TestCase):

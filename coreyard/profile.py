@@ -26,6 +26,7 @@ profile can change wording without being able to inject markup into the storefro
       "availability":     "In stock and tested at {origin}.",
       "availability_plain": "In stock and tested.",
       "fitment_note":     "Verify fitment by year, options, and part numbers.",
+      "part_type_notices": {"air bag": "Have this safety component inspected ..."},
       "title_include_oem": false,
       "title_max_models":  4,
       "tags":              ["Used OEM"],
@@ -115,6 +116,13 @@ class CatalogProfile:
     fitment_note: str = ("Verify fitment by year, options, and part/casting numbers where "
                          "shown in the photos.")
 
+    # Optional disclosures keyed by the exact shopper-facing product type. These belong to
+    # the site rather than CoreYard: whether a safety-critical used component may be sold,
+    # and what the seller can honestly say about its history, are business decisions. Exact
+    # matching keeps a notice for an "Air Bag" from leaking onto an air-bag sensor or an air
+    # suspension part merely because its title contains one of the same words.
+    part_type_notices: Mapping[str, str] = field(default_factory=dict)
+
     # Shown only when a part is published with photographs of the vehicle it came off rather
     # than of itself. ``{donor}`` expands to the donor's year, make, model and stock number.
     # A site that photographs every part never renders this; a site that does must not let a
@@ -162,6 +170,14 @@ class CatalogProfile:
         return (self.availability.format(origin=origin) if origin
                 else self.availability_plain)
 
+    def part_type_notice(self, part_type: str) -> str:
+        """The site's disclosure for this exact rendered product type, if any."""
+        wanted = str(part_type or "").strip().casefold()
+        for name, notice in self.part_type_notices.items():
+            if str(name).strip().casefold() == wanted:
+                return str(notice).strip()
+        return ""
+
 
 DEFAULT_PROFILE = CatalogProfile()
 
@@ -190,7 +206,7 @@ def from_dict(data: Mapping[str, Any]) -> CatalogProfile:
             kwargs[key] = AuditPolicy.from_dict(value or {})
         elif key in _TUPLE_KEYS:
             kwargs[key] = tuple(str(v).strip() for v in value if str(v).strip())
-        elif key == "part_types":
+        elif key in {"part_types", "part_type_notices"}:
             kwargs[key] = {str(k).strip().lower(): str(v).strip()
                            for k, v in (value or {}).items() if str(k).strip()}
         else:

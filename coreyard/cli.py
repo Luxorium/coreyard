@@ -35,6 +35,8 @@ COMMANDS: list[tuple[str, str, str]] = [
      "write a working .env and store.json (start here)"),
     ("status", "coreyard.status",
      "what the pipeline believes right now (read-only)"),
+    ("counts", "coreyard.storefront_counts",
+     "refresh the exact source-inventory counter shown on the storefront"),
     ("doctor", "coreyard.doctor",
      "check the installation, and whether the scheduled jobs are still running"),
     ("sync", "coreyard.run_sync",

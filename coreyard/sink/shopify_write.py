@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import mimetypes
 import tempfile
+import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -42,9 +44,12 @@ _SET_QUANTITIES = """mutation($input:InventorySetQuantitiesInput!,$idempotencyKe
 }"""
 
 # productDeleteMedia went the way of productCreateMedia/productUpdateMedia in 2026-07.
-# Product media are Files now, so they are removed with fileDelete.
-_DELETE_FILES = """mutation($ids:[ID!]!){ fileDelete(fileIds:$ids){
-  deletedFileIds userErrors{ field message } } }"""
+# A donor file can be referenced by many products. Removing one product's stale media must
+# detach that product reference, never globally delete the shared file from every sibling.
+# The configured 2026-07 schema exposes these fields on FileUpdateInput; older product media
+# deletion mutations are deprecated there.
+_REMOVE_FILE_REFERENCES = """mutation($files:[FileUpdateInput!]!){
+  fileUpdate(files:$files){ files{ id } userErrors{ field message } } }"""
 
 _SET = """mutation($input:ProductSetInput!){ productSet(synchronous:true, input:$input){
   product{ id handle } userErrors{ field message } } }"""
@@ -62,8 +67,70 @@ _PUBLISH = """mutation($id:ID!,$input:[PublicationInput!]!){
 _METAFIELDS_DELETE = """mutation($ids:[MetafieldIdentifierInput!]!){
   metafieldsDelete(metafields:$ids){ deletedMetafields{ key } userErrors{ field message } } }"""
 
+_SHOP_ID = "{ shop { id } }"
+_SHOP_METAFIELDS_SET = """mutation($fields:[MetafieldsSetInput!]!){
+  metafieldsSet(metafields:$fields){ metafields{ key value } userErrors{ field message } } }"""
+
 # productCreateMedia was removed from the Admin API; photos are now attached by passing
 # `files` to productSet in the same upsert.
+
+
+# One lock per donor vehicle, shared by every worker thread in a `coreyard bulk` run.
+#
+# ``bulk --workers N`` gives each thread its own publisher and its own state connection
+# (sqlite binds a connection to the thread that opened it), so the "has this frame been
+# uploaded yet?" read and the upload that answers it are not atomic across threads. Two
+# parts off the same donor could both find a frame missing and both stage it; fileCreate
+# does not deduplicate, so the loser's copy is left orphaned in the file library. Locking
+# per donor rather than globally keeps different donors uploading in parallel.
+_DONOR_LOCKS: dict[str, threading.Lock] = {}
+_DONOR_LOCKS_GUARD = threading.Lock()
+
+
+def _donor_lock(donor_key: str) -> threading.Lock:
+    with _DONOR_LOCKS_GUARD:
+        return _DONOR_LOCKS.setdefault(donor_key, threading.Lock())
+
+
+def set_source_inventory_count(
+    count: int,
+    updated_at: Optional[datetime] = None,
+    *,
+    client: Optional[ShopifyClient] = None,
+    store: Optional[StoreProfile] = None,
+) -> None:
+    """Expose an exact source-system inventory count to storefront Liquid.
+
+    Kept independent of ``ShopifyPublisher`` construction so the minute counter job does
+    not resolve product publications, locate inventory, or connect to the photo share.
+    """
+    from coreyard.config import load_store
+
+    if int(count) < 0:
+        raise ValueError("source inventory count cannot be negative")
+    stamp = updated_at or datetime.now(timezone.utc)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    gql = client or ShopifyClient()
+    profile = store or load_store()
+    owner_id = gql.graphql(_SHOP_ID)["shop"]["id"]
+    fields = [
+        {
+            "ownerId": owner_id,
+            "namespace": profile.catalog.metafield_namespace,
+            "key": "source_inventory_count",
+            "type": "number_integer",
+            "value": str(int(count)),
+        },
+        {
+            "ownerId": owner_id,
+            "namespace": profile.catalog.metafield_namespace,
+            "key": "source_inventory_updated_at",
+            "type": "date_time",
+            "value": stamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        },
+    ]
+    gql.mutate(_SHOP_METAFIELDS_SET, {"fields": fields}, "metafieldsSet")
 
 
 class ShopifyPublisher:
@@ -109,6 +176,13 @@ class ShopifyPublisher:
                 )
             ids.append(found)
         return ids
+
+    def publish_source_inventory_count(
+        self, count: int, updated_at: Optional[datetime] = None
+    ) -> None:
+        set_source_inventory_count(
+            count, updated_at, client=self.client, store=self.store
+        )
 
     # -- product ------------------------------------------------------------
     def _find(self, handle: str):
@@ -256,30 +330,53 @@ class ShopifyPublisher:
         why one shared file carrying one alt is correct here and not a compromise.
         """
         key = str(part.donor_image_key or "")
-        names = self.images.list_vehicle_images(key)[:donor_photo_limit()]
-        if not names:
+        entries = self.images.list_vehicle_manifest(key)[:donor_photo_limit()]
+        if not entries:
             return []
-        known = {name: self.donor_files.donor_file_id(key, name) for name in names}
-        missing = [name for name in names if not known[name]]
-        if missing:
-            with tempfile.TemporaryDirectory(prefix=f"coreyard-donor{key}-") as tmp:
-                paths = self.images.fetch_vehicle(key, Path(tmp))
-                wanted = [p for p in paths if p.name in set(missing)]
-                if wanted:
-                    staged = self._stage_and_put(wanted, f"donor {key}")
-                    order = {name: i for i, name in enumerate(names)}
-                    created = self.client.graphql(_FILE_CREATE, {"files": [
-                        {"originalSource": url, "contentType": "IMAGE", "filename": name,
-                         "alt": alt_for(order.get(name, 0) + 1)}
-                        for url, name in staged
-                    ]})["fileCreate"]
-                    if created["userErrors"]:
-                        raise RuntimeError(f"fileCreate donor {key}: {created['userErrors']}")
-                    for (_url, name), created_file in zip(staged, created["files"]):
-                        file_id = created_file.get("id") or ""
-                        if file_id:
-                            known[name] = file_id
-                            self.donor_files.record_donor_file(key, name, file_id)
+        names = [name for name, _stamp in entries]
+        stamps = dict(entries)
+        # Read and upload under the donor's lock, so a concurrent worker that wants the
+        # same frames waits and then sees what this one recorded instead of re-uploading.
+        with _donor_lock(key):
+            known: dict[str, str] = {}
+            missing: list[str] = []
+            for name in names:
+                file_id, old_stamp = self.donor_files.donor_file(key, name)
+                if not file_id:
+                    missing.append(name)
+                elif old_stamp and old_stamp != stamps[name]:
+                    # Same filename, different source file. Create a replacement id; every
+                    # sibling product's manifest also moved, so each will repoint safely.
+                    missing.append(name)
+                else:
+                    known[name] = file_id
+                    # Rows created before source stamps existed establish their baseline
+                    # without forcing a catalogue-wide re-upload during migration.
+                    if not old_stamp:
+                        self.donor_files.record_donor_file(
+                            key, name, file_id, stamps[name]
+                        )
+            if missing:
+                with tempfile.TemporaryDirectory(prefix=f"coreyard-donor{key}-") as tmp:
+                    paths = self.images.fetch_vehicle(key, Path(tmp))
+                    wanted = [p for p in paths if p.name in set(missing)]
+                    if wanted:
+                        staged = self._stage_and_put(wanted, f"donor {key}")
+                        order = {name: i for i, name in enumerate(names)}
+                        created = self.client.graphql(_FILE_CREATE, {"files": [
+                            {"originalSource": url, "contentType": "IMAGE", "filename": name,
+                             "alt": alt_for(order.get(name, 0) + 1)}
+                            for url, name in staged
+                        ]})["fileCreate"]
+                        if created["userErrors"]:
+                            raise RuntimeError(f"fileCreate donor {key}: {created['userErrors']}")
+                        for (_url, name), created_file in zip(staged, created["files"]):
+                            file_id = created_file.get("id") or ""
+                            if file_id:
+                                known[name] = file_id
+                                self.donor_files.record_donor_file(
+                                    key, name, file_id, stamps[name]
+                                )
         # A frame whose upload produced no id is skipped rather than guessed at; the parts
         # that follow will try it again.
         return [{"id": known[name]} for name in names if known.get(name)]
@@ -294,8 +391,8 @@ class ShopifyPublisher:
 
         ``refresh_images`` is for the case the state diff says this part's photo set changed
         on the share: the current set is uploaded and attached, and the superseded media are
-        deleted only once that has succeeded. It costs a full re-upload, so callers should
-        pass it only on a detected change, never blanket.
+        detached from this product only once that has succeeded. It costs a full re-upload,
+        so callers should pass it only on a detected change, never blanket.
 
         ``revive_status`` is the status this product held before it was retired. A part can
         come back — a voided work order returns it to the yard — and the status read-back
@@ -313,7 +410,7 @@ class ShopifyPublisher:
         # Stage the replacements before removing anything, and remove the old media only
         # once the write that attached the new set has come back clean.
         #
-        # The old order deleted first. Everything after that point can fail — the share can
+        # The old order detached first. Everything after that point can fail — the share can
         # be unreachable, a staged upload can be rejected, an HTTP PUT can time out four
         # times, productSet can return userErrors — and each of those left a live product
         # with no photographs at all, which is worse than the stale photo the refresh was
@@ -322,7 +419,11 @@ class ShopifyPublisher:
         if refresh_images and media_ids:
             files = self._staged_files(part, alt_for)
             if files:
-                stale_media = media_ids
+                # A donor refresh often reuses some existing file ids and adds only a new
+                # frame. Do not detach ids that the replacement set deliberately retained.
+                retained = {str(item.get("id")) for item in files if item.get("id")}
+                stale_media = [media_id for media_id in media_ids
+                               if media_id not in retained]
             # No replacement could be staged: keep what the product already has rather
             # than stripping it. The next run tries again.
         elif not media_ids:
@@ -333,7 +434,12 @@ class ShopifyPublisher:
         product_id = self._upsert(rendered, part.quantity, product_id, files, status,
                                   existing_tags)
         if stale_media:
-            self.client.mutate(_DELETE_FILES, {"ids": stale_media}, "fileDelete")
+            self.client.mutate(
+                _REMOVE_FILE_REFERENCES,
+                {"files": [{"id": media_id, "referencesToRemove": [product_id]}
+                           for media_id in stale_media]},
+                "fileUpdate",
+            )
         # Only a product that is meant to be visible is put on a channel: publishing a DRAFT
         # would make the holding state for "not ready yet" mean nothing.
         if (status or self.status) == "ACTIVE":

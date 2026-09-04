@@ -10,6 +10,7 @@ import argparse
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -212,6 +213,54 @@ class PartialView(unittest.TestCase):
         self.assertIn("--limit", run_sync._partial_view(sync_args(["--limit", "5"])))
         self.assertIn("--r-number",
                       run_sync._partial_view(sync_args(["--r-number", "51"])))
+
+
+class CursorHold(unittest.TestCase):
+    """A delta may only advance its cursor over rows it actually read.
+
+    The delta query pages on R#, not on ``modified_at``, so a read that hits the row cap is
+    an arbitrary slice of the window rather than its oldest part. Advancing the cursor past
+    it puts the rows it never read permanently behind the cursor, where only a full sync
+    would find them. Retirement was already guarded for this reason; the cursor was not.
+    """
+
+    def result(self, **kw):
+        from coreyard.yms.delta import DeltaResult
+        fields = dict(cursor=datetime(2026, 9, 2, 12, 0, 0), truncated=False)
+        fields.update(kw)
+        return DeltaResult(**fields)
+
+    def test_a_complete_read_advances_the_cursor(self):
+        self.assertEqual("", run_sync._cursor_hold_reason(self.result()))
+
+    def test_a_truncated_read_holds_the_cursor(self):
+        reason = run_sync._cursor_hold_reason(self.result(truncated=True))
+        self.assertIn("truncated", reason)
+
+    def test_a_read_that_reported_no_cursor_holds(self):
+        self.assertIn("no cursor", run_sync._cursor_hold_reason(self.result(cursor=None)))
+
+
+class StorefrontCount(unittest.TestCase):
+    def test_source_count_ignores_the_storefront_image_gate(self):
+        from unittest import mock
+
+        publisher = mock.MagicMock()
+        with mock.patch("coreyard.yms.inventory.source_inventory_count",
+                        return_value=3) as counted:
+            self.assertEqual(run_sync._refresh_source_inventory_count(publisher), 3)
+
+        counted.assert_called_once_with(images_only=False)
+        publisher.publish_source_inventory_count.assert_called_once_with(3)
+
+    def test_counter_failure_does_not_fail_a_completed_product_sync(self):
+        from unittest import mock
+
+        publisher = mock.MagicMock()
+        publisher.publish_source_inventory_count.side_effect = RuntimeError("scope missing")
+        with mock.patch("coreyard.yms.inventory.source_inventory_count",
+                        return_value=1):
+            self.assertIsNone(run_sync._refresh_source_inventory_count(publisher))
 
 
 class Selection(unittest.TestCase):

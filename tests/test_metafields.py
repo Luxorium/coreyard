@@ -131,6 +131,30 @@ class StructuredFitment(unittest.TestCase):
         rows = fitment_rows(part(fitment=[fitment("DODGE TRUCK", "DODGE 1500")]), STORE)
         self.assertEqual(rows[0]["label"], "Dodge 1500")
 
+    def test_a_make_prefix_is_removed_from_the_separate_model_column(self):
+        rows = fitment_rows(
+            part(fitment=[fitment("LEXUS", "LEXUS ES350")]), STORE
+        )
+        self.assertEqual(rows[0]["make"], "Lexus")
+        self.assertEqual(rows[0]["model"], "ES350")
+        self.assertEqual(rows[0]["label"], "Lexus ES350")
+
+    def test_identical_qualifier_notes_are_not_repeated_in_the_table(self):
+        repeated = fitment(notes=("3.5L, VIN 1", "3.5L, VIN 1", "Federal emissions"))
+        rows = fitment_rows(part(fitment=[repeated]), STORE)
+        self.assertEqual(rows[0]["note"], "3.5L, VIN 1; Federal emissions")
+
+    def test_placeholder_years_and_make_less_artifacts_do_not_reach_the_theme(self):
+        p = part(fitment=[
+            fitment("MAZDA", "3", 2014, 2023),
+            fitment(None, "CX-", 1950, 1950),
+            fitment(None, "Mazda CX-", 2030, 2030),
+        ])
+        rows = fitment_rows(p, STORE)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["years"], "2014-2023")
+        self.assertEqual(rows[0]["model"], "3")
+
 
 class Serialization(unittest.TestCase):
     def test_metafields_reach_the_graphql_input(self):

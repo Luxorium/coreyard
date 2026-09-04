@@ -137,7 +137,7 @@ class PortalClient:
             and self.portal.login_path in location
         ):
             # A borrowed browser session is shorter-lived than the runs that use it: an
-            # overnight research pass will outlast it, and dying two thirds of the way
+            # overnight maintenance pass can outlast it, and dying two thirds of the way
             # through costs the whole night. With credentials configured, establish a new
             # session and retry once — but only once, so a genuinely bad password fails
             # fast instead of hammering the sign-in form.

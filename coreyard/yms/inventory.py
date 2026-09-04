@@ -18,7 +18,7 @@ import re
 from decimal import Decimal
 from typing import Any, Optional
 
-from coreyard.config import _get, flag, require_images
+from coreyard.config import require_images
 from coreyard.models import Part
 from coreyard.yms import schema
 from coreyard.yms.db import connect, query
@@ -57,37 +57,6 @@ def photos_required(mapping: Optional[schema.SourceSchema] = None) -> bool:
             "schema.json (see schema.example.json) or turn the setting off."
         )
     return True
-
-
-def researched_prices_required() -> bool:
-    """Whether this storefront only lists a part once a researched price exists for it.
-
-    The other half of "listable", and deliberately the same shape as
-    :func:`photos_required`: sync, reconciliation, bulk publishing and the audit all ask
-    here rather than each deciding for itself, because when they disagree the storefront
-    ends up in a state none of them can explain.
-
-    Off by default. An installation that has researched nothing must not have its whole
-    catalogue judged unlistable by an upgrade.
-    """
-    return flag("STORE_REQUIRE_RESEARCHED_PRICE", False)
-
-
-def researched_r_numbers() -> Optional[set[str]]:
-    """R#s carrying a reviewed, researched price — or ``None`` when the gate is off.
-
-    ``None`` and ``set()`` mean opposite things and the difference matters: the first is
-    "this site does not gate on price", the second is "it does, and nothing qualifies yet".
-    Collapsing them would silently unlist the entire catalogue.
-
-    Reads the already-loaded environment. Like every other render-path gate it must not call
-    ``load_env`` itself, or a unit test picks up the installation's real ``.env``.
-    """
-    if not researched_prices_required():
-        return None
-    from coreyard.overrides import load as load_overrides
-    overrides = load_overrides(_get("STORE_CATALOG_OVERRIDES_FILE", "") or None)
-    return {r for r, item in overrides.parts.items() if item.price is not None}
 
 
 def build_query(limit: Optional[int] = None, images_only: Optional[bool] = None) -> str:
@@ -137,6 +106,21 @@ def _clean_note(value: Any) -> Optional[str]:
         return None
     if ",,," in text or "||" in text:
         text = _NOTE_TAIL.sub("", text, count=1)
+    # Counter notes occasionally retain a closing parenthesis whose opening half was in the
+    # legacy header we just removed (or was truncated at the source), followed immediately
+    # by a comma: ``pump only),4 WHEEL ABS``. Remove only genuinely unmatched closers and
+    # normalize comma spacing; substantive wording and balanced option groups stay intact.
+    balanced: list[str] = []
+    depth = 0
+    for character in text:
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            if depth == 0:
+                continue
+            depth -= 1
+        balanced.append(character)
+    text = re.sub(r"\s*,\s*", ", ", "".join(balanced))
     text = text.strip().strip("()").strip(" ,;|")
     return text or None
 
@@ -163,7 +147,7 @@ def row_to_part(row: dict[str, Any]) -> Part:
         grade=_clean(row.get("grade")),
         mileage=_to_int(row.get("mileage")),
         location=_clean(row.get("location")),
-        description=_clean(row.get("ecom_desc")) or _clean_note(row.get("notes")),
+        description=_clean_note(row.get("ecom_desc")) or _clean_note(row.get("notes")),
     )
     return part
 
@@ -220,11 +204,7 @@ def fetch_parts(limit: Optional[int] = None, images_only: Optional[bool] = None)
                 conn,
                 mapping.build_page_query(page_size, after, images_only=images_only),
             )
-        priced = researched_r_numbers()
-        parts.extend(
-            p for p in (row_to_part(r) for r in rows)
-            if p.is_listable() and (priced is None or str(p.r_number).strip() in priced)
-        )
+        parts.extend(p for p in (row_to_part(r) for r in rows) if p.is_listable())
         fetched = len(rows)
         if fetched < page_size:
             break
@@ -282,15 +262,32 @@ def listable_r_numbers(images_only: Optional[bool] = None) -> set[str]:
             if value:
                 found.add(value)
         if len(rows) < FETCH_PAGE_SIZE:
-            # Same gate ``fetch_parts`` applies, in the same module, because reconciliation
-            # asking a different question from sync is how a part gets published on one run
-            # and archived on the next.
-            priced = researched_r_numbers()
-            return found if priced is None else found & priced
+            return found
         next_after = rows[-1].get("r_number")
         if next_after is None or str(next_after) == str(after):
             raise RuntimeError("listable paging did not advance past the last R#")
         after = next_after
+
+
+def source_inventory_count(images_only: bool = False) -> int:
+    """Exact count of saleable parts held in the source system right now.
+
+    This ignores the photo gate unless explicitly requested. It answers the customer-facing
+    question "how many parts are in the yard?" with one aggregate query instead of opening
+    more than a hundred paged connections.
+    """
+    other = _elsewhere()
+    if other is not None:
+        return len(other.listable_r_numbers(images_only=images_only))
+    mapping = schema.load()
+    with connect() as conn:
+        rows = query(conn, mapping.build_inventory_count_query(images_only=images_only))
+    if not rows:
+        raise RuntimeError("source inventory count query returned no row")
+    count = _to_int(rows[0].get("part_count"))
+    if count is None or count < 0:
+        raise RuntimeError(f"source inventory count was unusable: {rows[0].get('part_count')!r}")
+    return count
 
 
 def donor_image_keys() -> dict[str, str]:

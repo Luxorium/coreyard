@@ -57,7 +57,11 @@ def _desired(store, r_numbers: set[str], need_fitment: bool) -> dict:
 
         print(f"  resolving fitment for {len(parts)} part(s) ...")
         with connect() as conn:
-            InterchangeResolver(conn).attach(parts)
+            resolver = InterchangeResolver(conn)
+            for index, part in enumerate(parts, 1):
+                part.fitment = resolver.fitment_for(part)
+                if index % 1000 == 0 or index == len(parts):
+                    print(f"    {index}/{len(parts)}", flush=True)
             _enrich(conn, parts)
     return {p.uid(): render(p, [], store) for p in parts}
 

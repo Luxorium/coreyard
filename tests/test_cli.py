@@ -26,6 +26,7 @@ ENTRY_POINTS = [
     "coreyard.audit.cli",
     "coreyard.sink.shopify_bulk",
     "coreyard.sink.backfill_alt",
+    "coreyard.storefront_counts",
     "coreyard.schedule",
 ]
 
@@ -40,8 +41,8 @@ def sealed_environment():
     Several CLIs load `.env` before building their parser, which is correct — a
     a `YMS_WRITE_ORDERS` in there has to be seen as an argparse default. In a test process
     it is poison: the installation's real settings land in `os.environ` and stay there for
-    every later test, which is how a `STORE_CHARM_PRICES=true` on this machine turned an
-    unrelated price assertion red.
+    every later test, which is how an installation setting on this machine once turned an
+    unrelated assertion red.
     """
     before = dict(os.environ)
     try:

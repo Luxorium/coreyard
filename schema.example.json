@@ -87,7 +87,13 @@
     "                      so if you book through CoreYard the link already exists.",
     "  external_reference  the source system's own order or invoice number, for the tag and",
     "                      the note somebody reconciles the two systems by.",
-    "  status              optional free text, reported but not interpreted.",
+    "  status              optional. 'booked' means the work order exists but is not",
+    "                      invoiced yet -- CoreYard then writes only the wo-<n> reference",
+    "                      tag and holds the 'invoiced' tag, the note and any fulfillment.",
+    "                      Any other value (including none) gets the full treatment, so a",
+    "                      query that reports only invoiced orders needs no status at all.",
+    "                      To report both, UNION a second arm selecting 'booked' for",
+    "                      current-revision orders with no invoice line (see the query).",
     "",
     "Two things to check on your own data. First, pin any line-item join to the order's",
     "CURRENT revision, or superseded rows from closed orders will keep reporting. Second,",
@@ -98,7 +104,7 @@
     "The fulfillment DECISION is not here: which shipping groups an outside app owns is a",
     "storefront policy, and lives in STORE_ORDER_POLICY_FILE."
   ],
-  "order_status": "SELECT DISTINCT o.STOREFRONT_REFERENCE_COLUMN AS order_reference, o.ORDER_NUMBER_COLUMN AS external_reference, 'invoiced' AS status FROM dbo.INVOICE_LINE_TABLE il JOIN dbo.INVOICE_TABLE inv ON inv.INVOICE_ID_COLUMN = il.INVOICE_ID_COLUMN JOIN dbo.WORKORDER_TABLE o ON o.ORDER_ID_COLUMN = il.ORDER_ID_COLUMN AND o.IS_CURRENT_REVISION_FLAG = 1 WHERE o.STOREFRONT_REFERENCE_COLUMN LIKE N'#%'",
+  "order_status": "SELECT DISTINCT o.STOREFRONT_REFERENCE_COLUMN AS order_reference, o.ORDER_NUMBER_COLUMN AS external_reference, 'invoiced' AS status FROM dbo.INVOICE_LINE_TABLE il JOIN dbo.INVOICE_TABLE inv ON inv.INVOICE_ID_COLUMN = il.INVOICE_ID_COLUMN JOIN dbo.WORKORDER_TABLE o ON o.ORDER_ID_COLUMN = il.ORDER_ID_COLUMN AND o.IS_CURRENT_REVISION_FLAG = 1 WHERE o.STOREFRONT_REFERENCE_COLUMN LIKE N'#%' UNION SELECT DISTINCT o.STOREFRONT_REFERENCE_COLUMN AS order_reference, o.ORDER_NUMBER_COLUMN AS external_reference, 'booked' AS status FROM dbo.WORKORDER_TABLE o WHERE o.IS_CURRENT_REVISION_FLAG = 1 AND o.STOREFRONT_REFERENCE_COLUMN LIKE N'#%' AND NOT EXISTS (SELECT 1 FROM dbo.INVOICE_LINE_TABLE il2 WHERE il2.ORDER_ID_COLUMN = o.ORDER_ID_COLUMN)",
   "_part_types": [
     "OPTIONAL. Every part type your system can file a part under, not only the ones you",
     "stock today. `coreyard part-types` reports which of them the renderer has shopper",

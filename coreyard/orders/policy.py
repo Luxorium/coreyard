@@ -103,11 +103,19 @@ class OrderPolicy:
             return self
         return replace(self, fulfillment=fulfillment_from_shipping(shipping))
 
-    def tags_for(self, reference: str) -> list[str]:
-        wanted = [t for t in self.tags if t]
+    def reference_tag_for(self, reference: str) -> list[str]:
+        """Just the tag carrying the source reference, e.g. ``["wo-55123"]``.
+
+        Split out from :meth:`tags_for` because a work order that has been *booked* but not
+        yet *invoiced* should carry this tag — an operator needs to find the order — while
+        the ``invoiced`` tag and the note wait for the invoice they name.
+        """
         if self.reference_tag and reference:
-            wanted.append(self.reference_tag.format(reference=reference))
-        return wanted
+            return [self.reference_tag.format(reference=reference)]
+        return []
+
+    def tags_for(self, reference: str) -> list[str]:
+        return [t for t in self.tags if t] + self.reference_tag_for(reference)
 
     def note_for(self, reference: str) -> str:
         return self.note.format(reference=reference) if self.note else ""

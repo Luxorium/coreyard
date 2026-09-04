@@ -361,6 +361,21 @@ class SourceSchema:
             sql += f"\n  AND {identity} > N'{marker}'"
         return sql + f"\nORDER BY {identity}"
 
+    def build_inventory_count_query(self, images_only: bool = False) -> str:
+        """Count distinct saleable source parts without transferring every identifier.
+
+        This is the public yard-inventory counter, not the storefront eligibility count:
+        the normal source scope still excludes sold, blocked and unpriced rows, while the
+        optional photo predicate is deliberately caller-controlled. ``DISTINCT`` protects
+        an installation whose configured source joins a one-to-many table.
+        """
+        identity = self.select["r_number"]
+        sql = (f"SELECT COUNT_BIG(DISTINCT {identity}) AS part_count\n"
+               f"FROM {self.source}\nWHERE ({self.scope})")
+        if images_only and self.images_filter:
+            sql += f"\n  AND {self.images_filter}"
+        return sql
+
     def build_page_query(
         self, page_size: int, after: Any = None, images_only: bool = False,
     ) -> str:

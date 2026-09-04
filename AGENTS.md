@@ -8,13 +8,13 @@ extraction, SMB/TDS transport, photos (the part folder and, for parts the yard n
 photographed, the donor-vehicle folder behind them), fitment, changed-since deltas
 (`delta.py`), optional catalogue enrichment (`enrich.py`), and the narrowly scoped order
 write. `transform/` holds
-the canonical renderer (`render.py`) plus the SEO engine, tag ownership, weights, pricing,
+the canonical renderer (`render.py`) plus the SEO engine, tag ownership, weights, money formatting,
 CSV framing; `sink/` contains the one Shopify client and the CSV and API
 publishers. `orders/` owns the order pipeline and its transports, `reconcile/` compares the
 store with the yard, `repair/` rewrites output an older renderer produced, and `audit/`
 reports listing quality. `ebay/` is the optional
-listing-portal channel: a portal map, its client, comparable research, guarded writes, and
-`daily.py`, the unattended pass that composes them. `yms/part_types.py` reports every part
+listing-portal channel: a portal map, its client, guarded writes, and `daily.py`, the
+unattended pass that composes them. `yms/part_types.py` reports every part
 type the yard can inventory and where the renderer's wording runs out.
 `overrides.py` carries the reviewed decisions that channel hands back to the renderer. `run_sync.py` orchestrates syncs,
 `state.py` tracks fingerprints, `webhook.py` is the webhook transport, and `schedule.py`
@@ -80,7 +80,7 @@ Read config through `_get` and let the caller load the environment. Name files
 Add regression coverage for identifiers, mappings, fingerprints/state diffs, retirement,
 revival, webhooks, order guards, tag ownership, the listable policy, weight rules,
 reconciliation, repair, order polling, rendered Shopify output, and — for the listing-portal
-channel — cap guards, title validation, comparable selection, price guards, aspect
+channel — cap guards, title validation, exact source-price mapping, aspect
 derivation, and which listing ids a write resolves to. Run one test with, for
 example, `.venv/bin/python -m unittest tests.test_state.Diff.test_summary`.
 
@@ -88,11 +88,11 @@ Anything that talks to Shopify takes a client so a fake can be passed in, and ev
 decision that could empty a catalogue — retirement fractions, reconciliation buckets, repair
 diffs — lives in a pure function that a test can call directly. The same rule covers the
 listing portal: its client is injectable, its planning (`ebay/engines.py`) is pure, and no
-test may reach a portal or a public index.
+test may reach a portal.
 
-CoreYard runs no model and calls no LLM. Titles come from the renderer, comparables from a
-parsed public index, and prices from arithmetic over those comparables — so every command
-is reproducible, and a test that wanted to stub inference would have nothing to stub.
+CoreYard runs no model and calls no LLM. Titles come from the renderer and prices come
+unchanged from the source database, so every command is reproducible and a test that wanted
+to stub inference would have nothing to stub.
 
 ## Commit & Pull Request Guidelines
 
@@ -148,15 +148,11 @@ failed payloads may remain only in the owner-only queue for the bounded retry wi
 - Product/image rendering feeds stored fingerprints. Changing `transform/render.py`,
   `transform/seo.py`, the weight table, the site profile, or image resolution can trigger a
   full rewrite.
-- "Listable" has one definition and two optional halves, both in `yms/inventory.py`:
-  `photos_required` (`STORE_REQUIRE_IMAGES`) and `researched_prices_required`
-  (`STORE_REQUIRE_RESEARCHED_PRICE`, satisfied by an R# carrying a price in
-  `STORE_CATALOG_OVERRIDES_FILE`), on top of the mapping's `scope`. `fetch_parts` and
-  `listable_r_numbers` both apply them, so sync, reconciliation, bulk publishing and the audit
-  cannot disagree; a second condition anywhere lets them publish and archive the same part in
-  turn. Both default to off — an upgrade must not judge an unresearched catalogue unlistable.
-  `researched_r_numbers` returns `None` for "no gate" and a set for "gate on"; collapsing the
-  two unlists everything.
+- "Listable" has one definition in `yms/inventory.py`: the mapping's `scope`, the positive
+  source-price guard on `Part`, and the optional `photos_required` policy
+  (`STORE_REQUIRE_IMAGES`). `fetch_parts` and `listable_r_numbers` both apply it, so sync,
+  reconciliation, bulk publishing and the audit cannot disagree; a second condition anywhere
+  lets them publish and archive the same part in turn.
 - Retirement archives rather than deletes. API sync guards mass retirement with
   `--limit` and `--max-retire-fraction`; the webhook also retires ordered parts.
 - **Anything that narrows a run blocks retirement**: `--limit`, `--r-number`, and any scope
@@ -193,7 +189,7 @@ failed payloads may remain only in the owner-only queue for the bounded retry wi
 - The listing-portal channel has three write surfaces, and they stay three commands:
   saving in the portal changes nothing a shopper sees, pushing makes it live, and delisting
   is irreversible on eBay — a relist mints a new item id and loses the watchers and ranking.
-  The gap between the first two is the review window for researched prices.
+  The gap between the first two is the review window for portal changes.
 - Every portal write is a dry run without `--apply`, and its cap counts listings rather than
   plan entries and refuses *before* the first write, so a refused batch writes nothing.
 - A listing is matched to a part from grid data alone, by the R# in the portal's own title or
@@ -204,9 +200,8 @@ failed payloads may remain only in the owner-only queue for the bounded retry wi
 - `EBAY_PORTAL_USER`/`EBAY_PORTAL_PASSWORD` are a sign-in of last resort, used only when the
   cookie sources yield nothing and only if `portal.json` maps `auth.login_fields`; the client
   re-signs at most once per expired request. Never print, log, or put a password in an error.
-- Researched prices land a penny under a five-dollar grid (`research.PRICE_STEP`), rounding
-  down from comparable evidence and to nearest from the floor. `STORE_PRICE_STEP` puts the
-  catalogue's own charm rounding on the same grid, defaulting to a dollar.
-- Researched titles and prices reach Shopify only as `STORE_CATALOG_OVERRIDES_FILE`, read by
-  the one renderer and keyed by R#. Never patch a product directly from that channel: the
-  value would sit outside the fingerprint and the next sync would revert it.
+- The source database is the only price authority. The renderer and portal daily pass format
+  its positive price to cents without overrides or other merchandising arithmetic.
+- Reviewed titles reach Shopify only as `STORE_CATALOG_OVERRIDES_FILE`, read by the one
+  renderer and keyed by R#. Never put prices in that file or patch a product price directly:
+  the next sync must restore the source amount.

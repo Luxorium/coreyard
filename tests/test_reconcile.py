@@ -167,3 +167,108 @@ class Scan(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ApplyOrder(unittest.TestCase):
+    """A draft must reach its sales channel BEFORE it is made ACTIVE.
+
+    Status and channel publication are separate things in Shopify and only the second makes
+    a URL resolve, so an ACTIVE product on no channel is a 404 to every shopper and to
+    Google. The apply pass used to activate the whole catalogue and only then publish it,
+    which left every product it had touched returning 404 for as long as the activate pass
+    ran — hours, on a full catalogue — and a customer was sent to a part that would not
+    load. Publishing a DRAFT is harmless, so publishing first has no window at all.
+    """
+
+    def _run_apply(self, products, fail_publish=()):
+        import argparse
+        from unittest import mock
+
+        from coreyard.reconcile import cli
+
+        calls: list[tuple[str, str]] = []
+
+        class FakeClient:
+            def mutate(self, document, variables, root):
+                # The only mutation the driver issues itself is the status change.
+                calls.append(("activate", variables["id"].rsplit("/", 1)[-1]))
+                return {}
+
+        class FakePublisher:
+            publications = ["gid://shopify/Publication/1"]
+            retire_status = ARCHIVED
+
+            def __init__(self, store=None):
+                pass
+
+            def publish_to_channels(self, product_id):
+                r_number = product_id.rsplit("/", 1)[-1]
+                calls.append(("publish", r_number))
+                if r_number in fail_publish:
+                    raise RuntimeError("channel unavailable")
+
+        class FakeState:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def load(self):
+                return {}
+
+            def retired_statuses(self):
+                return {}
+
+            def clear_retired(self, r_numbers):
+                pass
+
+            def forget(self, r_numbers):
+                pass
+
+        args = argparse.Namespace(
+            apply=True, dry_run=False, activate=True, no_retire=True,
+            force_retire=False, max_retire_fraction=0.1, repair_state=False,
+        )
+        with mock.patch.object(cli, "load_store", return_value=StoreProfile()), \
+             mock.patch.object(cli, "scan", return_value=products), \
+             mock.patch.object(cli, "SyncState", lambda *a, **k: FakeState()), \
+             mock.patch.object(cli, "publication_names", return_value=["Online Store"]), \
+             mock.patch("coreyard.sink.shopify_api.ShopifyClient", FakeClient), \
+             mock.patch("coreyard.sink.shopify_write.ShopifyPublisher", FakePublisher), \
+             mock.patch("coreyard.yms.inventory.is_configured", return_value=True), \
+             mock.patch("coreyard.yms.inventory.photos_required", return_value=False), \
+             mock.patch("coreyard.yms.inventory.listable_r_numbers",
+                        return_value=set(products)):
+            self.assertEqual(cli.run(args), 0)
+        return calls
+
+    def test_every_publish_happens_before_any_activate(self):
+        products = {r: product(r, DRAFT, False) for r in ("1", "2", "3")}
+        calls = self._run_apply(products)
+
+        self.assertEqual({c[0] for c in calls}, {"publish", "activate"})
+        last_publish = max(i for i, c in enumerate(calls) if c[0] == "publish")
+        first_activate = min(i for i, c in enumerate(calls) if c[0] == "activate")
+        self.assertLess(
+            last_publish, first_activate,
+            "a draft was activated before it reached a sales channel, which is a 404")
+
+    def test_every_activated_draft_is_also_published(self):
+        products = {r: product(r, DRAFT, False) for r in ("1", "2", "3")}
+        calls = self._run_apply(products)
+        published = {r for kind, r in calls if kind == "publish"}
+        activated = {r for kind, r in calls if kind == "activate"}
+        self.assertEqual(activated, {"1", "2", "3"})
+        self.assertEqual(published, activated)
+
+    def test_a_publication_failure_leaves_the_draft_in_its_safe_state(self):
+        products = {r: product(r, DRAFT, False) for r in ("1", "2")}
+        calls = self._run_apply(products, fail_publish={"2"})
+        activated = {r for kind, r in calls if kind == "activate"}
+        self.assertEqual(activated, {"1"})
+
+    def test_a_publication_failure_does_not_revive_an_archived_product(self):
+        products = {"1": product("1", ARCHIVED, False)}
+        calls = self._run_apply(products, fail_publish={"1"})
+        self.assertNotIn(("activate", "1"), calls)

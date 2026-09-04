@@ -20,7 +20,7 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 from coreyard import ops
 from coreyard.config import REPO_ROOT, load_settings
@@ -302,7 +302,7 @@ def cmd_delta(args) -> int:
         if changes.truncated:
             print(f"  NOTE: more than {len(changes.listable) + len(changes.left_scope)} rows "
                   f"changed; this is no longer a delta. Publishing what was read, but NOT "
-                  f"retiring — run a full sync to resynchronise.")
+                  f"retiring and NOT advancing the cursor — run a full sync to resynchronise.")
 
         photos = _make_part_resolver(args.image_base_url)
         resolver = photos.resolve
@@ -403,12 +403,54 @@ def cmd_delta(args) -> int:
         state.record_channel(CHANNEL, banked)
         state.forget(retired)
         state.forget_channel(CHANNEL, retired)
-        if changes.cursor:
+        hold = _cursor_hold_reason(changes)
+        if hold:
+            print(f"Cursor NOT advanced: {hold}.")
+        else:
             state.set_cursor(CURSOR_NAME, changes.cursor.isoformat())
             print(f"Cursor advanced to {changes.cursor.isoformat()}.")
 
+        _refresh_source_inventory_count(publisher)
         _summarise(diff, published_ok, revived, retired, todo, args)
     return 0
+
+
+def _cursor_hold_reason(changes) -> str:
+    """Why this delta must not advance its cursor, or "" if it may.
+
+    The delta query pages on R# (``ORDER BY {identity}``), not on ``modified_at``. So a read
+    that hit the row cap saw an arbitrary slice of what changed, not the oldest part of it,
+    and a row past the cap can carry any timestamp at all. Advancing the cursor over rows
+    that were never read puts them permanently behind it: the next run's
+    ``WHERE modified_at > cursor`` no longer selects them, and only a full sync would ever
+    find them again. Retirement is suppressed on a truncated read for the same reason —
+    what the run did not see, it cannot reason about.
+    """
+    if changes.truncated:
+        return "the read was truncated, so rows that changed in this window are still unread"
+    if not changes.cursor:
+        return "the read reported no cursor"
+    return ""
+
+
+def _refresh_source_inventory_count(publisher) -> Optional[int]:
+    """Refresh the homepage's exact source-inventory count after an API sync.
+
+    This ignores the storefront-only image gate on purpose: Shopify supplies its own
+    live listed count, while this number answers how many in-stock parts the source database holds.
+    The identifier-only query is the cheap reconciliation path and is suitable for delta
+    runs. A counter failure is reported but does not invalidate product work already done.
+    """
+    from coreyard.yms.inventory import source_inventory_count
+
+    try:
+        count = source_inventory_count(images_only=False)
+        publisher.publish_source_inventory_count(count)
+    except Exception as exc:  # noqa: BLE001 - best-effort external status update
+        print(f"  (could not refresh storefront inventory count: {exc})")
+        return None
+    print(f"Storefront inventory count refreshed: {count:,} in-stock part(s).")
+    return count
 
 
 def _partial_view(args) -> str:
@@ -739,6 +781,8 @@ def cmd_sync(args) -> int:
 
                 state.set_cursor(CURSOR_NAME, baseline.isoformat())
 
+        if publisher is not None and not args.dry_run:
+            _refresh_source_inventory_count(publisher)
         _summarise(diff, published_ok, revived, retired, todo, args)
     return 0
 

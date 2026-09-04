@@ -1,18 +1,15 @@
-"""Per-part merchandising decisions supplied by an external catalogue workflow.
+"""Reviewed per-part title decisions keyed by CoreYard's stable R#.
 
-These are deliberate title and price decisions keyed by CoreYard's stable R#, not a
-second renderer.  The canonical renderer consumes them before it creates the one
-``RenderedProduct`` fingerprinted and serialized by both Shopify sinks, so a sync cannot
-silently revert a researched price or disagree with the stored fingerprint.
+Titles still pass through the canonical renderer, so both Shopify sinks publish and
+fingerprint the same decision. Prices are deliberately absent: the source database is the
+only authority for a part's price.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Optional
 
 
 class OverrideError(ValueError):
@@ -22,7 +19,6 @@ class OverrideError(ValueError):
 @dataclass(frozen=True)
 class PartOverride:
     title: str = ""
-    price: Optional[Decimal] = None
 
 
 @dataclass(frozen=True)
@@ -58,27 +54,15 @@ def load(path: str | Path | None) -> CatalogOverrides:
         key = str(raw_key).strip()
         if not key:
             raise OverrideError("catalog override contains an empty R#")
-        if not isinstance(raw, dict) or set(raw) - {"title", "price"}:
-            raise OverrideError(f"override {key!r} may contain only title and price")
+        if not isinstance(raw, dict) or set(raw) - {"title"}:
+            raise OverrideError(f"override {key!r} may contain only title")
         title = raw.get("title", "")
         if not isinstance(title, str):
             raise OverrideError(f"override {key!r} title must be text")
         title = " ".join(title.split())
         if len(title) > 255:
             raise OverrideError(f"override {key!r} title exceeds Shopify's 255 characters")
-        price = raw.get("price")
-        if price in (None, ""):
-            amount = None
-        else:
-            try:
-                amount = Decimal(str(price))
-            except InvalidOperation as exc:
-                raise OverrideError(f"override {key!r} price is not money") from exc
-            if not amount.is_finite() or amount <= 0:
-                raise OverrideError(f"override {key!r} price must be positive")
-            amount = amount.quantize(Decimal("0.01"))
-        if not title and amount is None:
-            raise OverrideError(f"override {key!r} changes neither title nor price")
-        parts[key] = PartOverride(title=title, price=amount)
+        if not title:
+            raise OverrideError(f"override {key!r} title must not be empty")
+        parts[key] = PartOverride(title=title)
     return CatalogOverrides(parts)
-

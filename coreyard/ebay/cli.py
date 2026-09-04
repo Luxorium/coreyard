@@ -4,16 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from collections import Counter
-from decimal import Decimal
 from pathlib import Path
 
 from coreyard.config import REPO_ROOT, _get, load_env
 from coreyard.ebay.client import PortalClient
 from coreyard.ebay.portal import load as load_portal
-from coreyard.ebay import engines, link
+from coreyard.ebay import link
 from coreyard.ebay.util import TITLE_MAX as EBAY_TITLE_MAX
 from coreyard.ebay.util import groups_by_interchange, truthy
 from coreyard.transform.pricing import money_str, parse_money
@@ -107,13 +105,12 @@ def details(args) -> int:
 
 
 def apply_plans(args) -> int:
-    """Dry-run or save reviewed generic title/price plans in the portal."""
+    """Dry-run or save a reviewed title plan in the portal."""
     from coreyard.ebay import workflow
 
     title_plan = _read_json(args.titles) if args.titles else []
-    price_changes = _read_json(args.prices) if args.prices else []
-    if not title_plan and not price_changes:
-        raise SystemExit("pass --titles and/or --prices")
+    if not title_plan:
+        raise SystemExit("pass --titles")
     client = None
     if args.apply:
         load_env()
@@ -124,18 +121,12 @@ def apply_plans(args) -> int:
             client, title_plan, tab=args.tab, dry_run=not args.apply,
             cap=args.cap, force=args.yes_i_mean_it,
         )
-        price_results = workflow.apply_prices(
-            client, price_changes, tab=args.tab, dry_run=not args.apply,
-            cap=args.cap, force=args.yes_i_mean_it,
-            also_starting_price=args.also_starting_price,
-        )
     except workflow.ApplyGuard as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 1
-    errors = [item for item in title_results + price_results
+    errors = [item for item in title_results
               if str(item["status"]).startswith("ERROR")]
-    print(f"Titles: {sum(item['n'] for item in title_results)} listings; "
-          f"prices: {sum(item['n'] for item in price_results)} listings.")
+    print(f"Titles: {sum(item['n'] for item in title_results)} listings.")
     print("Dry run: nothing written." if not args.apply else
           "Saved in the portal only; nothing pushed live to eBay.")
     return 1 if errors else 0
@@ -199,91 +190,6 @@ def marketplace_titles(args) -> int:
     for name, number in dropped.most_common():
         print(f"  budget dropped {name} on {number} listing(s)")
     print(f"  -> {args.out}\n  -> {decisions_path}\n  -> {held_path}")
-    return 0
-
-
-def part_comps(args) -> int:
-    """Research comparables for one part type, whatever that part type is.
-
-    Every stage here is per-part-type on purpose: the portal's grid will not serve a whole
-    tab (see PortalClient.iter_listings), and a filtered read returns its whole result set.
-    So the unit of work is a part type, and the scheduled job walks them.
-    """
-    from coreyard.config import load_store
-    from coreyard.ebay import comps as research
-    from coreyard.ebay.index import fetch
-    from coreyard.yms.db import connect
-    from coreyard.yms.inventory import fetch_parts_by_r_number
-    from coreyard.yms.interchange import InterchangeResolver
-    import requests
-
-    load_env()
-    portal = load_portal(args.portal)
-    client = PortalClient(portal)
-    listings = list(client.iter_listings(tab=args.tab, rows=args.rows,
-                                         part_type=args.part_type))
-    if not listings:
-        print(f"No {args.tab} listings for part type {args.part_type}.")
-        return 0
-    detail_path = Path(args.details)
-    cached = _read_json(detail_path) if detail_path.is_file() else {}
-    todo = [str(r["listing_id"]) for r in listings
-            if str(r["listing_id"]) not in cached]
-    print(f"{len(listings)} listings; {len(todo)} edit forms to read for their R#")
-    for number, listing_id in enumerate(todo, 1):
-        cached[listing_id] = client.listing_detail(listing_id, tab=args.tab)
-        if number % 10 == 0:
-            _write_json(detail_path, cached)
-            print(f"  {number}/{len(todo)}", flush=True)
-    if todo:
-        _write_json(detail_path, cached)
-
-    wanted = sorted({str((cached.get(str(r["listing_id"])) or {}).get("r_number") or "").strip()
-                     for r in listings} - {""})
-    parts = fetch_parts_by_r_number(wanted)
-    if parts:
-        with connect() as conn:
-            InterchangeResolver(conn).attach(list(parts.values()))
-    print(f"{len(wanted)} distinct R#, {len(parts)} matched in the yard")
-
-    store = load_store()
-    pages = Path(args.pages)
-    pages.mkdir(parents=True, exist_ok=True)
-    out = Path(args.out)
-    done = _read_json(out) if out.is_file() and not args.no_resume else {}
-    session = requests.Session()
-    todo_parts = [r for r in wanted if r in parts and r not in done]
-    print(f"{len(todo_parts)} parts to research")
-    for number, r_number in enumerate(todo_parts, 1):
-        item = parts[r_number]
-        query = research.query_for(item, store)
-        page = pages / f"{re.sub(r'[^A-Za-z0-9._-]', '_', r_number)}.html"
-        try:
-            ok = fetch(query, page, session, delay=args.delay)
-        except Exception as exc:
-            print(f"  {r_number}: {type(exc).__name__}", file=sys.stderr)
-            ok = False
-        if ok:
-            record = research.research_part(item, store, page)
-        else:
-            record = research.Research(r_number=r_number, query=query)
-        if not record.comps and not args.no_retry_thin:
-            broad = research.query_for(item, store, broad=True)
-            if broad and broad != query:
-                second = pages / f"{re.sub(r'[^A-Za-z0-9._-]', '_', r_number)}_2.html"
-                try:
-                    if fetch(broad, second, session, delay=args.delay):
-                        record = research.research_part(item, store, [page, second])
-                        record.query = query
-                except Exception:
-                    pass
-        done[r_number] = record.as_record()
-        if number % 20 == 0 or number == len(todo_parts):
-            _write_json(out, done)
-            print(f"  researched {number}/{len(todo_parts)}", flush=True)
-    _write_json(out, done)
-    with_comps = sum(1 for v in done.values() if v.get("comp_count"))
-    print(f"{len(done)} parts researched, {with_comps} with comparables -> {out}")
     return 0
 
 
@@ -472,126 +378,17 @@ def undo(args) -> int:
     return 0
 
 
-def engine_plan(args) -> int:
-    """Turn current listings plus completed research into guarded write plans."""
-    listings = json.loads(Path(args.listings).read_text(encoding="utf-8"))
-    details_by_id = json.loads(Path(args.details).read_text(encoding="utf-8"))
-    titles = json.loads(Path(args.titles).read_text(encoding="utf-8"))
-    prices = json.loads(Path(args.prices).read_text(encoding="utf-8"))
-    title_plan, title_held = engines.plan_titles(listings, titles)
-    all_title_decisions, _ = engines.title_decisions(listings, titles)
-    price_plan, price_held = engines.plan_prices(
-        listings, prices, min_comps=args.min_comps,
-        max_swing=None if args.no_swing_limit else Decimal(str(args.max_swing)),
-        include_disclosure=args.include_disclosure,
-    )
-    all_price_decisions, _ = engines.price_decisions(
-        listings, prices, min_comps=args.min_comps,
-        max_swing=None if args.no_swing_limit else Decimal(str(args.max_swing)),
-        include_disclosure=args.include_disclosure,
-    )
-    prefix = Path(args.out_prefix)
-    title_path = prefix.with_name(prefix.name + "-titles.json")
-    price_path = prefix.with_name(prefix.name + "-prices.json")
-    override_path = Path(args.overrides_out)
-    post_path = Path(args.post_out)
-    _write_json(title_path, title_plan)
-    _write_json(price_path, price_plan)
-    _write_json(title_path.with_name(title_path.stem + "-held.json"), title_held)
-    _write_json(price_path.with_name(price_path.stem + "-held.json"), price_held)
-    # Merged, not replaced: the renderer reads this file whole, so writing only what this
-    # plan decided would drop every decision made before it — including the nightly pass's
-    # — and the next sync would revert those products to their unreviewed copy.
-    _write_json(override_path, engines.merge_overrides(
-        _read_json(override_path) if override_path.is_file() else {},
-        engines.build_overrides(details_by_id, all_title_decisions,
-                                all_price_decisions),
-    ))
-    post_ready, post_held = engines.post_plan(
-        listings, details_by_id, all_title_decisions, all_price_decisions
-    )
-    _write_json(post_path, post_ready)
-    _write_json(post_path.with_name(post_path.stem + "-held.json"), post_held)
-    print(f"Titles: {sum(len(x['listing_ids']) for x in title_plan)} ready, "
-          f"{sum(len(x['listing_ids']) for x in title_held)} held.")
-    print(f"Prices: {len(price_plan)} ready, {len(price_held)} held.")
-    print(f"Post: {len(post_ready)} ready, {len(post_held)} held.")
-    print(f"  -> {title_path}\n  -> {price_path}\n  -> {override_path}\n  -> {post_path}")
-    return 0
-
-
-def engine_apply(args) -> int:
-    """Dry-run or write reviewed engine title/price plans to the portal."""
-    title_plan = (json.loads(Path(args.titles).read_text(encoding="utf-8"))
-                  if args.titles else [])
-    price_plan = (json.loads(Path(args.prices).read_text(encoding="utf-8"))
-                  if args.prices else [])
-    if not title_plan and not price_plan:
-        raise SystemExit("pass --titles and/or --prices")
-    client = None
-    if args.apply:
-        load_env()
-        client = PortalClient(load_portal(args.portal))
-        client.grid(tab="unlisted", rows=1)
-    title_results = engines.apply_titles(
-        client, title_plan, dry_run=not args.apply, cap=args.cap,
-        force=args.yes_i_mean_it
-    )
-    price_results = engines.apply_prices(
-        client, price_plan, dry_run=not args.apply, cap=args.cap,
-        force=args.yes_i_mean_it
-    )
-    errors = [item for item in title_results + price_results
-              if str(item["status"]).startswith("ERROR")]
-    print(f"Titles: {sum(x['n'] for x in title_results)} listings in "
-          f"{len(title_results)} groups.")
-    print(f"Prices: {sum(x['n'] for x in price_results)} listings in "
-          f"{len(price_results)} price buckets.")
-    if not args.apply:
-        print("Dry run: nothing written. Re-run with --apply after reviewing the plans.")
-    else:
-        print("Saved in the portal only; nothing has been pushed live to eBay.")
-    if errors:
-        print(f"{len(errors)} portal write group(s) failed.")
-    return 1 if errors else 0
-
-
-def engine_research(args) -> int:
-    """Resume condition-aware research from already-collected comparable listings."""
-    from coreyard.ebay import research
-
-    load_env()
-    listings = json.loads(Path(args.listings).read_text(encoding="utf-8"))
-    details_by_id = json.loads(Path(args.details).read_text(encoding="utf-8"))
-    comps = json.loads(Path(args.comps).read_text(encoding="utf-8"))
-    groups = research.group_by_interchange(listings)
-    keys = sorted(groups)
-    if args.only_with_comps:
-        keys = [key for key in keys if (comps.get(key) or {}).get("comp_count")]
-    if args.limit:
-        keys = keys[:args.limit]
-    result = research.price_all(
-        groups, details_by_id, comps, Path(args.out), keys=keys,
-        resume=not args.no_resume,
-    )
-    print(f"{len(result)} current listings researched -> {args.out}")
-    return 0
-
-
 def daily(args) -> int:
-    """One unattended pass: read the tab, title it, price it, save it in the portal.
+    """Read the tab and offer canonical titles plus exact source prices.
 
     Walks part types rather than the tab as a whole, because the portal's grid will not
     serve a whole tab (see ``PortalClient.iter_listings``) but answers a filtered read
     completely. Which types to walk comes from the yard, not from a hand-kept list, so a
     type a worker files a part under tomorrow is walked tomorrow.
     """
-    import requests
-
     from coreyard.config import load_store
     from coreyard.ebay import daily as driver
     from coreyard.ebay import workflow
-    from coreyard.ebay.index import fetch
     from coreyard.yms.db import connect
     from coreyard.yms.interchange import InterchangeResolver
     from coreyard.yms.inventory import fetch_parts
@@ -647,34 +444,8 @@ def daily(args) -> int:
         with connect() as conn:
             InterchangeResolver(conn).attach(list(resolved.values()))
 
-    research: dict[str, dict] = {}
-    research_path = Path(args.out_prefix + "-research.json")
-    if not args.no_prices:
-        if research_path.is_file() and not args.no_resume:
-            research = _read_json(research_path)
-        session = requests.Session()
-        pages = Path(args.pages)
-        pages.mkdir(parents=True, exist_ok=True)
-
-        def fetcher(query: str, destination: Path) -> bool:
-            try:
-                return fetch(query, destination, session, delay=args.delay)
-            except Exception:
-                return False
-
-        wanted = {str(part.r_number).strip(): part for part in resolved.values()}
-        print(f"researching comparables for {len(wanted)} part(s)")
-        research = driver.research_parts(
-            wanted.values(), store, pages, fetcher, done=research,
-            checkpoint=lambda records: _write_json(research_path, records),
-            log=print,
-        )
-        print(f"  -> {research_path}")
-
     result = driver.plan(
-        rows, catalogue, store, research or None, details=details,
-        title_limit=args.title_limit, min_comps=args.min_comps,
-        max_swing=None if args.no_swing_limit else Decimal(str(args.max_swing)),
+        rows, catalogue, store, details=details, title_limit=args.title_limit,
     )
     print(result.summary())
 
@@ -712,11 +483,8 @@ def daily(args) -> int:
               file=sys.stderr)
         return 1
     if args.apply and resolved:
-        # Written only after the portal actually took the values, and never on a dry run:
-        # this file is read by the canonical Shopify renderer where an installation
-        # configures it, so writing it for decisions the portal never received would
-        # publish to Shopify what eBay was never told — the exact drift between the two
-        # storefronts that routing overrides through the one renderer exists to prevent.
+        # The renderer consumes reviewed titles from this file. Price is deliberately not
+        # represented here; both channels read it from the source database.
         overrides_path = Path(args.overrides_out)
         prior = _read_json(overrides_path) if overrides_path.is_file() else {}
         _write_json(overrides_path, driver.overrides_for(result, resolved, prior))
@@ -730,25 +498,15 @@ def daily(args) -> int:
 def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="ebay_action", required=True)
     command = sub.add_parser(
-        "daily", help="unattended pass: title, price and save the tab in the portal")
+        "daily", help="offer canonical titles and source prices to the portal")
     command.add_argument("--tab", choices=TABS, default="unlisted")
     command.add_argument("--part-type", help="walk only this part type")
     command.add_argument("--rows", type=int, default=1000, help="portal page size")
     command.add_argument("--limit", type=int, help="stop after this many listings")
-    command.add_argument("--no-prices", action="store_true",
-                         help="plan titles only; skip the comparable research")
-    command.add_argument("--min-comps", type=int, default=3,
-                         help="comparables a price needs before it may be written")
-    command.add_argument("--max-swing", type=float, default=1.5)
-    command.add_argument("--no-swing-limit", action="store_true")
     command.add_argument("--title-limit", type=int, default=EBAY_TITLE_MAX)
-    command.add_argument("--delay", type=float, default=1.4,
-                         help="seconds between public index requests")
-    command.add_argument("--pages", default=str(REPO_ROOT / "out" / "ebay-comp-pages"))
     command.add_argument("--details",
                          default=str(REPO_ROOT / "out" / "ebay-details.json"),
                          help="edit-form cache, read if present and never fetched")
-    command.add_argument("--no-resume", action="store_true")
     command.add_argument("--out-prefix", default=str(REPO_ROOT / "out" / "ebay-daily"))
     command.add_argument("--overrides-out",
                          default=str(REPO_ROOT / "out" / "catalog-overrides.json"))
@@ -777,12 +535,10 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     command.set_defaults(func=details)
 
 
-    command = sub.add_parser("apply", help="save reviewed title/price plans in the portal")
+    command = sub.add_parser("apply", help="save a reviewed title plan in the portal")
     command.add_argument("--titles")
-    command.add_argument("--prices")
     command.add_argument("--tab", choices=TABS, default="unlisted")
     command.add_argument("--portal")
-    command.add_argument("--also-starting-price", action="store_true")
     command.add_argument("--apply", action="store_true")
     command.add_argument("--cap", type=int, default=DEFAULT_CAP)
     command.add_argument("--yes-i-mean-it", action="store_true")
@@ -808,22 +564,6 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
         command.add_argument("--out",
                              default=str(REPO_ROOT / "out" / "ebay-engine-titles.json"))
         command.set_defaults(func=marketplace_titles)
-
-    command = sub.add_parser("comps",
-                             help="research comparables for one part type (any type)")
-    command.add_argument("--part-type", required=True,
-                         help="the yard's part-type code, e.g. 166")
-    command.add_argument("--tab", choices=TABS, default="unlisted")
-    command.add_argument("--rows", type=int, default=2000)
-    command.add_argument("--portal")
-    command.add_argument("--details",
-                         default=str(REPO_ROOT / "out" / "ebay-details.json"))
-    command.add_argument("--pages", default=str(REPO_ROOT / "out" / "ebay-comp-pages"))
-    command.add_argument("--delay", type=float, default=1.4)
-    command.add_argument("--no-retry-thin", action="store_true")
-    command.add_argument("--no-resume", action="store_true")
-    command.add_argument("--out", default=str(REPO_ROOT / "out" / "ebay-comps.json"))
-    command.set_defaults(func=part_comps)
 
     command = sub.add_parser("aspects", help="derive and save eBay item specifics")
     command.add_argument("--part-type", required=True)
@@ -875,42 +615,6 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     command.add_argument("--yes-i-mean-it", action="store_true")
     command.set_defaults(func=undo)
 
-    command = sub.add_parser("engine-plan", help="build guarded engine title/price plans")
-    command.add_argument("--listings", default=str(REPO_ROOT / "out" / "ebay-engines.json"))
-    command.add_argument("--details", default=str(REPO_ROOT / "out" / "ebay-engine-details.json"))
-    command.add_argument("--titles", required=True, help="accepted SEO title proposals")
-    command.add_argument("--prices", required=True, help="completed price research")
-    command.add_argument("--min-comps", type=int, default=1)
-    command.add_argument("--max-swing", type=float, default=1.5)
-    command.add_argument("--no-swing-limit", action="store_true")
-    command.add_argument("--include-disclosure", action="store_true",
-                         help="include condition-caveat engines (unsafe until disclosed)")
-    command.add_argument("--out-prefix", default=str(REPO_ROOT / "out" / "ebay-engine-plan"))
-    command.add_argument("--overrides-out",
-                         default=str(REPO_ROOT / "out" / "engine-catalog-overrides.json"))
-    command.add_argument("--post-out",
-                         default=str(REPO_ROOT / "out" / "ebay-engine-ready.json"))
-    command.set_defaults(func=engine_plan)
-
-    command = sub.add_parser("engine-apply", help="write engine plans to the portal")
-    command.add_argument("--titles")
-    command.add_argument("--prices")
-    command.add_argument("--portal", help="portal map JSON (default: EBAY_PORTAL_FILE)")
-    command.add_argument("--apply", action="store_true", help="write; omit for dry run")
-    command.add_argument("--cap", type=int, default=25)
-    command.add_argument("--yes-i-mean-it", action="store_true")
-    command.set_defaults(func=engine_apply)
-
-    command = sub.add_parser("engine-research",
-                             help="resume engine pricing from collected comparables")
-    command.add_argument("--listings", default=str(REPO_ROOT / "out" / "ebay-engines.json"))
-    command.add_argument("--details", default=str(REPO_ROOT / "out" / "ebay-engine-details.json"))
-    command.add_argument("--comps", required=True, help="collected comparable JSON")
-    command.add_argument("--limit", type=int)
-    command.add_argument("--only-with-comps", action="store_true")
-    command.add_argument("--no-resume", action="store_true")
-    command.add_argument("--out", default=str(REPO_ROOT / "out" / "ebay-engine-prices.json"))
-    command.set_defaults(func=engine_research)
     return ap
 
 

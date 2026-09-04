@@ -194,9 +194,41 @@ def check_publishing() -> list[Result]:
         else:
             out.append((WARN, "publications",
                         "STORE_PUBLICATIONS unset — new products reach no sales channel"))
+        out.extend(check_unpublished(publisher.client))
     except Exception as exc:
         out.append((WARN, "publishing", f"{type(exc).__name__}: {str(exc)[:110]}"))
     return out
+
+
+# One product-search count, not a page of the catalogue, so this can run on every doctor.
+# Shopify caps the count at 10,000 and says so in `precision`; "at least 10,000" is still
+# exactly the alarm worth raising.
+_UNPUBLISHED = """query($q:String){ productsCount(query:$q){ count precision } }"""
+
+
+def check_unpublished(client) -> list[Result]:
+    """ACTIVE products that reached no sales channel — a 404 wearing a green status.
+
+    This is the failure that looks like success everywhere else: the product exists, is
+    ACTIVE, has stock, a price and photographs, and every count in every report includes it.
+    Only a shopper finds out, and only by being sent a link that does not load. It went
+    unnoticed across 12,900 products because the one check that could see it lived behind
+    `status --deep`, which pages the whole store and so is never run casually. A count is
+    cheap enough to run every time.
+    """
+    try:
+        result = client.graphql(
+            _UNPUBLISHED, {"q": "status:active AND published_status:unpublished"})
+        node = result.get("productsCount") or {}
+        count = int(node.get("count") or 0)
+        at_least = str(node.get("precision") or "") == "AT_LEAST"
+    except Exception as exc:
+        return [(WARN, "unpublished", f"{type(exc).__name__}: {str(exc)[:110]}")]
+    if not count:
+        return [(OK, "unpublished", "no ACTIVE product is missing its sales channel")]
+    return [(FAIL, "unpublished",
+             f"{'at least ' if at_least else ''}{count} ACTIVE product(s) are on no sales "
+             f"channel and return 404 — run `bin/coreyard reconcile --apply`")]
 
 
 # ----------------------------------------------------------------- liveness --

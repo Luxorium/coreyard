@@ -41,8 +41,8 @@ notes/
 # Browser network captures: these carry live session cookies.
 *.har
 
-# Operational tracking for one installation: live catalogue counts, researched
-# prices, asking values and portal listing ids. Same rule as notes/ — useful
+# Operational tracking for one installation: live catalogue counts, asking values and
+# portal listing ids. Same rule as notes/ — useful
 # beside the code, never in the tree. This repository is public and none of it
 # is generic.
 /CHECKLIST.TXT

@@ -64,6 +64,7 @@ _PART_TYPE = {
     "air cleaner": "Air Cleaner Intake Filter Box",
     "sun visor": "Sun Visor",
     "coolant reservoir": "Coolant Overflow Reservoir Tank",
+    "radiators": "Radiator",
     "engine assembly": "Engine Motor Assembly",
     "glove box": "Glove Box Compartment",
     "trans shift assy": "Transmission Gear Shifter Assembly",
@@ -78,7 +79,7 @@ _PART_TYPE = {
 # shouts them. These are ordinary words that happen to be short, and shouting them
 # leaves "Center CAP" and "SUN Visor" in customer-facing titles.
 _NOT_ACRONYM = {
-    "VAN", "CAB", "BUS", "WGN", "TRK", "PUP",
+    "VAN", "CAB", "CAR", "BUS", "WGN", "TRK", "PUP",
     "CAP", "SUN", "BOX", "PAN", "ARM", "FAN", "BAR", "KIT", "SET", "LID",
     "ROD", "PIN", "NUT", "OIL", "GAS", "AIR", "HUB", "TOP", "JAR", "MOD",
     "BAG", "KEY", "CAM", "TIE", "RIM", "JACK",
@@ -103,7 +104,8 @@ _ABBREV = {
     "ext": "Extension", "mtd": "Mounted", "int": "Interior", "dr": "Door",
     "susp": "Suspension", "crossm": "Crossmember", "trans": "Transmission",
     "eng": "Engine", "misc": "Miscellaneous", "elec": "Electrical",
-    "fr": "Front", "rr": "Rear", "temp": "Temperature", "spkr": "Speaker",
+    "fr": "Front", "rr": "Rear", "qtr": "Quarter",
+    "temp": "Temperature", "spkr": "Speaker",
 }
 
 # Short all-caps tokens that really are acronyms a shopper types, so a residue check must
@@ -259,11 +261,35 @@ def _vehicle_label(make: Optional[str], model: Optional[str]) -> str:
     return " ".join(x for x in (make, model) if x)
 
 
+def model_without_make(make: Optional[str], model: Optional[str]) -> Optional[str]:
+    """A model suitable for a table column that already has a separate make.
+
+    Interchange data sometimes stores ``Lexus ES350`` or ``Lincoln & Town Car`` in the
+    model column.  ``_vehicle_label`` prevents that from doubling a title, but a structured
+    row has separate make and model cells and therefore needs the prefix removed explicitly.
+    A shorter first word also covers ``Mercedes-Benz`` / ``Mercedes 450``.
+    """
+    cleaned_make = clean_make(make)
+    cleaned_model = clean_model(model)
+    if not (cleaned_make and cleaned_model):
+        return cleaned_model
+    prefixes = [cleaned_make, re.split(r"[^A-Za-z0-9]+", cleaned_make, maxsplit=1)[0]]
+    for prefix in prefixes:
+        if not prefix:
+            continue
+        match = re.match(rf"^{re.escape(prefix)}(?:\b|(?=[^A-Za-z0-9]))",
+                         cleaned_model, flags=re.I)
+        if match:
+            remainder = cleaned_model[match.end():].lstrip(" &/-")
+            return remainder or None
+    return cleaned_model
+
+
 def _model_labels(part: Part) -> list[str]:
     """Deduped 'Make Model' labels from fitment (falls back to the part's own vehicle)."""
     labels: list[str] = []
     seen: set[str] = set()
-    for f in part.fitment:
+    for f in display_fitments(part):
         lab = _vehicle_label(clean_make(f.make), clean_model(f.model))
         if lab and lab.lower() not in seen:
             seen.add(lab.lower())
@@ -282,17 +308,63 @@ def _model_labels(part: Part) -> list[str]:
     return labels
 
 
-# The yard database marks an open-ended interchange run with a placeholder year rather
-# than a null: one that began before the catalogue did is stamped 1940, and one still in
-# production is stamped 2030. Printed literally they reach the customer as "1940 thru
-# 2030 …", which reads as a broken listing to anyone who knows the parts.
-_SENTINEL_START = 1940
-_SENTINEL_END = 2027
+# Some interchange catalogues mark an open-ended run with a placeholder year rather than a
+# null. This installation has both 1940 and 1950 start markers and a 2030 end marker. Treat
+# any pre-1951 start and any year beyond the next model year as an unknown boundary. The
+# latter is deliberately relative to today so this fix does not itself go stale in 2027.
+_SENTINEL_START = 1950
 
 
-def _plausible_end(year: int) -> int:
-    """Model years run a year ahead of the calendar; past that it is a marker, not a year."""
-    return min(year, date.today().year + 1)
+def display_fitments(part: Part) -> list:
+    """Catalogue rows credible enough to show to a shopper.
+
+    A missing make together with placeholder-only years identifies the corrupt/truncated
+    cross-reference rows seen in the live catalogue (for example ``1950 CX-`` and ``2030
+    Mazda CX-``). Omit those from every customer-facing output, but retain model-only rows
+    that carry a credible year span: some catalogues genuinely do not provide a make map.
+    """
+    rows = list(part.fitment or [])
+    return [
+        f for f in rows
+        if clean_make(getattr(f, "make", None)) or fitment_year_span(f) != (None, None)
+    ]
+
+
+def fitment_year_span(entry) -> tuple[Optional[int], Optional[int]]:
+    """A display-safe year span for one Fitment or Application row.
+
+    Unknown open boundaries collapse to the boundary that is known. An open-ended current
+    run is capped at the next model year, matching the title policy, while a row made only
+    of placeholder years renders no year at all.
+    """
+    maximum = date.today().year + 1
+    raw_start = getattr(entry, "year_start", None)
+    raw_end = getattr(entry, "year_end", None)
+    start = (int(raw_start) if raw_start and _SENTINEL_START < int(raw_start) <= maximum
+             else None)
+    if raw_end and _SENTINEL_START < int(raw_end) <= maximum:
+        end = int(raw_end)
+    elif start and raw_end and int(raw_end) > maximum:
+        end = maximum
+    else:
+        end = None
+    if start:
+        return start, max(start, end or start)
+    if end:
+        return end, end
+    return None, None
+
+
+def fitment_year_label(entry) -> str:
+    """A compact, placeholder-free year label for one fitment/application row."""
+    return _year_label(*fitment_year_span(entry))
+
+
+def application_label(application) -> str:
+    """A qualifier label whose year prefix cannot expose catalogue sentinels."""
+    years = fitment_year_label(application)
+    note = str(getattr(application, "note", "") or "").strip()
+    return f"{years} — {note}" if years and note else years or note
 
 
 def _year_span(part: Part) -> tuple[Optional[int], Optional[int]]:
@@ -302,15 +374,19 @@ def _year_span(part: Part) -> tuple[Optional[int], Optional[int]]:
     # not these. ``_model_labels`` already drops such rows, so counting their years made
     # the two halves of one title disagree with each other — "1960-2008 Volvo 70 Series
     # 60 80 XC90", where every model it names comes from a row starting in 2001.
-    rows = [f for f in part.fitment if clean_make(f.make)] or list(part.fitment)
-    starts = [f.year_start for f in rows
-              if f.year_start and f.year_start > _SENTINEL_START]
-    ends = [f.year_end for f in rows
-            if f.year_end and f.year_end < _SENTINEL_END]
+    rows = display_fitments(part)
+    maximum = date.today().year + 1
+    starts = [int(f.year_start) for f in rows
+              if f.year_start and _SENTINEL_START < int(f.year_start) <= maximum]
+    # A real catalogue endpoint is better evidence than another row's open-ended marker.
+    # Only cap an open run at the next model year when no row supplies a concrete endpoint.
+    ends = [int(f.year_end) for f in rows
+            if f.year_end and _SENTINEL_START < int(f.year_end) <= maximum]
+    has_open_end = any(f.year_end and int(f.year_end) > maximum for f in rows)
     if starts:
-        return min(starts), _plausible_end(max(ends or starts))
+        return min(starts), max(ends or ([maximum] if has_open_end else starts))
     if ends:
-        return min(ends), _plausible_end(max(ends))
+        return min(ends), max(ends)
     # Every row was a placeholder — the part's own vehicle is the only real year left.
     return part.year, part.year
 
@@ -810,10 +886,25 @@ def build_title(part: Part, store: "StoreProfile | CatalogProfile | None" = None
 
 
 def meta_title(part: Part, store: "StoreProfile | CatalogProfile | None" = None) -> str:
+    """A short search title that never sacrifices the name of the part.
+
+    A blind 60-character cut used to turn ``Door Window Regulator`` into ``Door`` and
+    ``Engine Motor Assembly`` into ``Engine Motor``. Vehicle context is useful metadata,
+    but an incomplete part name is actively misleading, so optional context is dropped in
+    priority order before truncation becomes the last resort.
+    """
     labels = [c for c in (seo_clean(l) for l in _model_labels(part)) if c]
-    bits = (_year_tokens(*_year_span(part)), labels[0] if labels else "",
-            title_side(part, store), _title_part_type(part, store))
-    return _cap(" ".join(x for x in bits if x), META_TITLE_MAX)
+    segments = [
+        ("years", _year_tokens(*_year_span(part)), 4),
+        ("models", labels[0] if labels else "", 3),
+        ("side", title_side(part, store), 2),
+        ("part_type", _title_part_type(part, store), 1),
+    ]
+    title, _dropped = compose_title(
+        [(name, text, rank) for name, text, rank in segments if text],
+        META_TITLE_MAX,
+    )
+    return title
 
 
 def reviewed_meta_title(title: str) -> str:
@@ -822,21 +913,47 @@ def reviewed_meta_title(title: str) -> str:
 
 
 def meta_description(part: Part, store: Optional[StoreProfile] = None) -> str:
+    """Build complete sentences within Shopify's 160-character metadata budget."""
     store = store or StoreProfile()
     policy = _policy(store)
     pt = expand_part_type(part.part_type, store)
     labels = _model_labels(part)
-    fit = ", ".join(labels[:3]) + (" and more" if len(labels) > 3 else "")
     years = _year_tokens(*_year_span(part))
-    stock = f" Stock #{part.stock_number}." if part.stock_number else ""
-    # What the site is willing to claim about availability and condition, not what CoreYard
-    # assumes: not every yard tests every part, and saying so for them would be a lie the
-    # seller never told.
-    where = f" {policy.availability_text(store.origin())}"
-    warranty = f" {store.warranty}." if store.warranty else ""
-    lead = " ".join(x for x in ("Used OEM", side_phrase(part.side), pt) if x)
-    txt = f"{lead} for {years} {fit}." + where + warranty + stock
-    return _cap(txt, META_DESC_MAX)
+    subject = " ".join(x for x in ("Used OEM", side_phrase(part.side), pt) if x)
+
+    # Prefer the richest fitment sentence that fits whole. Dropping extra applications is
+    # better than publishing a snippet that ends in half a vehicle or half a policy claim.
+    lead = ""
+    for count in range(min(3, len(labels)), -1, -1):
+        fit = ", ".join(labels[:count])
+        if count and len(labels) > count:
+            fit += " and more"
+        target = " ".join(x for x in (years, fit) if x)
+        candidate = f"{subject} for {target}." if target else f"{subject}."
+        if len(candidate) <= META_DESC_MAX:
+            lead = candidate
+            break
+    if not lead:
+        # A site-supplied part type can itself exceed the budget. Keep a word-boundary cut
+        # as the final fallback, but still finish it as a sentence.
+        lead = _cap(subject, META_DESC_MAX - 1).rstrip(". ") + "."
+
+    extras = [policy.availability_text(store.origin())]
+    if store.warranty:
+        extras.append(str(store.warranty).strip().rstrip(".") + ".")
+    if part.stock_number:
+        extras.append(f"Stock #{part.stock_number}.")
+    description = lead
+    for extra in extras:
+        sentence = str(extra or "").strip()
+        if not sentence:
+            continue
+        if sentence[-1] not in ".!?":
+            sentence += "."
+        candidate = f"{description} {sentence}"
+        if len(candidate) <= META_DESC_MAX:
+            description = candidate
+    return description
 
 
 def _lead_html(policy: CatalogProfile, part_type: str, origin: str) -> str:
@@ -862,6 +979,9 @@ def build_body_html(part: Part, store: Optional[StoreProfile] = None) -> str:
     pt = expand_part_type(part.part_type, store)
     origin = store.origin()
     lines = [_lead_html(policy, pt, origin)]
+    notice = policy.part_type_notice(pt)
+    if notice:
+        lines.append(f"<p><strong>Safety disclosure:</strong> {html.escape(notice)}</p>")
     if part.uses_donor_photos and policy.donor_photo_note:
         # Above everything else about the part: a shopper who scrolls no further has still
         # been told what they are looking at.
@@ -870,13 +990,17 @@ def build_body_html(part: Part, store: Optional[StoreProfile] = None) -> str:
     if _looks_like_prose(part.description):
         lines.append(f"<p>{html.escape(part.description)}</p>")
 
-    if part.fitment:
+    shown_fitments = display_fitments(part)
+    if shown_fitments:
         heading = "Fits"
         if part.interchange_number:
             heading += f" Interchange #{part.interchange_number}"
         lines.append(f"<p><strong>{html.escape(heading)}:</strong></p><ul>")
-        for f in part.fitment[:40]:
-            veh = " ".join(x for x in (f.year_label(), _vehicle_label(clean_make(f.make), clean_model(f.model))) if x)
+        for f in shown_fitments[:40]:
+            veh = " ".join(x for x in (
+                fitment_year_label(f),
+                _vehicle_label(clean_make(f.make), clean_model(f.model)),
+            ) if x)
             # The catalogue qualifies most applications (engine, drivetrain, body, emissions,
             # production date). Those decide whether a part actually fits, so show them.
             quals = f.qualifiers() if hasattr(f, "qualifiers") else []
@@ -886,7 +1010,7 @@ def build_body_html(part: Part, store: Optional[StoreProfile] = None) -> str:
             lines.append(f"  <li>{html.escape(veh)}")
             lines.append("    <ul>")
             for a in quals[:8]:
-                lines.append(f"      <li>{html.escape(a.label())}</li>")
+                lines.append(f"      <li>{html.escape(application_label(a))}</li>")
             lines.append("    </ul>")
             lines.append("  </li>")
         lines.append("</ul>")
@@ -940,9 +1064,19 @@ def image_alt(part: Part, index: int = 1,
     and leaves the listing unreadable to a screen reader. Numbering keeps each photo on a
     product distinct.
     """
-    # Screen readers announce alt text in full, so keep it to roughly one sentence
-    # rather than the whole multi-model title.
-    base = _cap(build_title(part, store), 125) or expand_part_type(part.part_type, store)
+    # Alt describes the photographed object, not every vehicle the interchange catalogue
+    # says it fits. Reusing the SEO title made a screen reader announce a long compatibility
+    # string before it reached the words naming the part.
+    pt = expand_part_type(part.part_type, store)
+    side = title_side(part, store)
+    vehicle = " ".join(x for x in (
+        str(part.year) if part.year else "",
+        _vehicle_label(clean_make(part.make), clean_model(part.model)),
+    ) if x).strip()
+    base = " ".join(x for x in ("Used OEM", side, pt) if x)
+    if vehicle:
+        base += f" from {vehicle}"
+    base = _cap(base, 125) or "Used auto part"
     if part.uses_donor_photos:
         # Alt text describes the image, and this image is of a car, not of the part.
         label = donor_label(part)
@@ -964,14 +1098,16 @@ def build_tags(part: Part, store: Optional[StoreProfile] = None, max_tags: int =
             seen.add(t.lower())
             tags.append(t)
 
-    for f in part.fitment or []:
+    shown_fitments = display_fitments(part)
+    for f in shown_fitments:
         mk, veh = clean_make(f.make), _vehicle_label(clean_make(f.make), clean_model(f.model))
         add(mk)
         add(veh)
-        if f.year_start:
-            for y in range(f.year_start, (f.year_end or f.year_start) + 1):
+        year_start, year_end = fitment_year_span(f)
+        if year_start:
+            for y in range(year_start, (year_end or year_start) + 1):
                 add(f"{y} {veh}".strip())
-    if not part.fitment:
+    if not shown_fitments:
         # No fitment rows, so the part's own vehicle is all there is. Route it through
         # _vehicle_label like the fitment branch above: joining make and model directly
         # doubles a make the model already carries, which is how 180 parts ended up
@@ -979,7 +1115,7 @@ def build_tags(part: Part, store: Optional[StoreProfile] = None, max_tags: int =
         mk = clean_make(part.make)
         add(mk)
         add(" ".join(str(x) for x in (part.year, _vehicle_label(mk, clean_model(part.model))) if x))
-    for f in part.fitment or []:
+    for f in shown_fitments:
         for a in getattr(f, "applications", None) or []:
             note = getattr(a, "note", "") or ""
             for m in _DISPLACEMENT.finditer(note):

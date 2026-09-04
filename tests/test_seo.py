@@ -192,6 +192,14 @@ class PartSpecFromNotes(unittest.TestCase):
                  description="4.2L (VIN S, 8th digit),6 cyl")
         self.assertIn("6 Cylinder", seo.build_title(p))
 
+    def test_a_raw_storefront_description_loses_only_broken_legacy_punctuation(self):
+        from coreyard.yms.inventory import row_to_part
+        p = row_to_part({
+            "r_number": "91", "part_type": "Anti-lock Brake Pts", "price": "40.00",
+            "ecom_desc": "pump only),4 WHEEL ABS",
+        })
+        self.assertEqual(p.description, "pump only, 4 WHEEL ABS")
+
 
 class QualifierSafety(unittest.TestCase):
     def test_conflicting_engine_sizes_never_reach_the_title(self):
@@ -231,7 +239,9 @@ class Findability(unittest.TestCase):
     def test_photos_get_distinct_alt_text(self):
         p = part()
         first, second = seo.image_alt(p, 1), seo.image_alt(p, 2)
-        self.assertEqual(first, seo.build_title(p))
+        self.assertIn(seo.expand_part_type(p.part_type), first)
+        self.assertIn("from 2008 Ford F-150", first)
+        self.assertNotEqual(first, seo.build_title(p))
         self.assertTrue(second.endswith("photo 2"))
         self.assertNotEqual(first, second)
 
@@ -263,14 +273,28 @@ class AltLength(unittest.TestCase):
             self.assertLessEqual(len(seo.image_alt(p, i)), 140)
         self.assertFalse(seo.image_alt(p, 1).endswith(" "))
 
+    def test_alt_describes_the_part_not_the_whole_fitment_title(self):
+        fit = [Fitment(make="GMC", model="Acadia", year_start=2008, year_end=2011),
+               Fitment(make="Buick", model="Enclave", year_start=2009, year_end=2011)]
+        alt = seo.image_alt(part(fitment=fit, year=2010, make="GMC", model="Acadia",
+                                 part_type="Alternator", side=None), 2)
+        self.assertIn("Used OEM Alternator Generator from 2010 GMC Acadia", alt)
+        self.assertIn("photo 2", alt)
+        self.assertNotIn("Buick", alt)
+
 
 class PlaceholderYears(unittest.TestCase):
-    """The yard marks open-ended runs with 1940 / 2030 instead of nulls."""
+    """The yard marks open-ended runs with 1940/1950 and 2030 instead of nulls."""
 
     def test_placeholder_start_year_is_not_advertised(self):
         fit = [Fitment(make="Volvo", model="70 Series", year_start=1940, year_end=2011),
                Fitment(make="Volvo", model="70 Series", year_start=1999, year_end=2011)]
         self.assertEqual(seo._year_span(part(fitment=fit)), (1999, 2011))
+
+    def test_the_yards_1950_placeholder_is_not_advertised(self):
+        fit = [Fitment(make="Mazda", model="3", year_start=1950, year_end=1950),
+               Fitment(make="Mazda", model="3", year_start=2014, year_end=2023)]
+        self.assertEqual(seo._year_span(part(fitment=fit)), (2014, 2023))
 
     def test_placeholder_end_year_is_not_advertised(self):
         fit = [Fitment(make="Mazda", model="3", year_start=1975, year_end=2030),
@@ -298,6 +322,31 @@ class PlaceholderYears(unittest.TestCase):
         self.assertNotIn("1940", title)
         self.assertNotIn("2030", title)
 
+    def test_no_placeholder_year_survives_body_or_tags(self):
+        bad = Fitment(
+            make="Mazda", model="3", year_start=1950, year_end=2030,
+            applications=[Application(1950, 1950, "naturally aspirated"),
+                          Application(2030, 2030, "2.5L")],
+        )
+        p = part(fitment=[bad], year=2018, make="Mazda", model="3")
+        body = seo.build_body_html(p)
+        tags = seo.build_tags(p)
+        for sentinel in ("1940", "1950", "2030"):
+            self.assertNotIn(sentinel, body)
+            self.assertFalse(any(sentinel in tag for tag in tags))
+
+    def test_make_less_artifacts_are_omitted_when_normal_rows_exist(self):
+        fit = [Fitment(make="Mazda", model="3", year_start=2014, year_end=2023),
+               Fitment(make=None, model="CX-", year_start=1950, year_end=1950),
+               Fitment(make=None, model="Mazda CX-", year_start=2030, year_end=2030)]
+        p = part(fitment=fit)
+        self.assertEqual([f.model for f in seo.display_fitments(p)], ["3"])
+        self.assertNotIn("CX-", seo.build_body_html(p))
+
+    def test_real_model_only_fitment_is_not_lost(self):
+        fit = [Fitment(make=None, model="Legacy", year_start=2015, year_end=2019)]
+        self.assertEqual(seo.display_fitments(part(fitment=fit)), fit)
+
 
 class VehicleLabels(unittest.TestCase):
     def test_shorter_make_inside_the_model_is_not_repeated(self):
@@ -308,6 +357,11 @@ class VehicleLabels(unittest.TestCase):
 
     def test_a_model_that_merely_starts_with_a_letter_run_is_kept_whole(self):
         self.assertEqual(seo._vehicle_label("Ford", "E150 Van"), "Ford E150 Van")
+
+    def test_a_structured_model_drops_the_make_its_own_column_already_has(self):
+        self.assertEqual(seo.model_without_make("Lexus", "Lexus ES350"), "ES350")
+        self.assertEqual(seo.model_without_make("Lincoln", "Lincoln & Town CAR"),
+                         "Town Car")
 
     def test_bare_make_is_dropped_when_a_specific_model_covers_it(self):
         fit = [Fitment(make="Volvo", model=None, year_start=2001, year_end=2008),
@@ -331,6 +385,7 @@ class ShortWordCasing(unittest.TestCase):
     def test_yard_shorthand_expands_to_shopper_wording(self):
         self.assertEqual(seo.expand_part_type("chassis cont mod"), "Chassis Control Module")
         self.assertEqual(seo.expand_part_type("center cap"), "Wheel Center Cap")
+        self.assertEqual(seo.expand_part_type("radiators"), "Radiator")
 
 
 class TagsWithoutFitment(unittest.TestCase):
@@ -366,6 +421,12 @@ class TagsWithoutFitment(unittest.TestCase):
         tags = seo.build_tags(part(fitment=[], make="DODGE TRUCK",
                                    model="DODGE 1500 PICKUP"), STORE)
         self.assertIn("Dodge", tags)
+
+    def test_corrupt_only_fitment_falls_back_to_the_donor_vehicle_tag(self):
+        bad = Fitment(make=None, model="CX-", year_start=1950, year_end=1950)
+        tags = seo.build_tags(part(fitment=[bad], year=2018, make="Mazda", model="3"),
+                              STORE)
+        self.assertIn("2018 Mazda 3", tags)
 
 
 if __name__ == "__main__":
@@ -483,3 +544,27 @@ class WhatATightTitleGivesUpFirst(unittest.TestCase):
     def test_the_part_type_always_survives(self):
         title, _ = seo.fit_title(self._crowded(), STORE, limit=80, compact=True)
         self.assertIn("Mirror", title)
+
+
+class MetadataBudgets(unittest.TestCase):
+    def test_meta_title_drops_vehicle_context_before_cutting_the_part_name(self):
+        crowded = part(
+            part_type="Anti-lock Brake Pts", side=None,
+            fitment=[Fitment(make="General Motors", model="A Very Long Vehicle Model",
+                             year_start=2008, year_end=2020)],
+        )
+        title = seo.meta_title(crowded)
+        self.assertLessEqual(len(title), seo.META_TITLE_MAX)
+        self.assertIn("ABS Anti Lock Brake Pump Control Module", title)
+
+    def test_meta_description_adds_only_complete_sentences(self):
+        crowded = part(
+            stock_number="123456", part_type="Anti-lock Brake Pts", side="Right",
+            fitment=[Fitment(make="General Motors", model=f"Long Vehicle Model {n}",
+                             year_start=2008, year_end=2020) for n in range(4)],
+        )
+        description = seo.meta_description(crowded, STORE)
+        self.assertLessEqual(len(description), seo.META_DESC_MAX)
+        self.assertTrue(description.endswith("."), description)
+        self.assertIn("ABS Anti Lock Brake Pump Control Module", description)
+        self.assertNotRegex(description, r"\b(?:Test|90-day|Stock)\.$")

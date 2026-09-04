@@ -148,6 +148,10 @@ class DonorFrameUploadedOnce(unittest.TestCase):
         def list_vehicle_images(self, key):
             return [f"{key}_01.jpg", f"{key}_02.jpg"]
 
+        def list_vehicle_manifest(self, key):
+            return [(name, f"{name}|100|2026-01-01")
+                    for name in self.list_vehicle_images(key)]
+
         def fetch_vehicle(self, key, dest):
             self.fetched.append(key)
             made = []
@@ -212,6 +216,19 @@ class DonorFrameUploadedOnce(unittest.TestCase):
         self.assertEqual([{"id": "gid://File/1"}, {"id": "gid://File/2"}], files)
         self.assertEqual("gid://File/1", self.state.donor_file_id("15", "15_01.jpg"))
 
+    def test_a_same_name_replacement_gets_a_new_file_id(self):
+        self.pub._staged_files(self._part(), lambda i: f"alt {i}")
+        original = self.state.donor_file_id("15", "15_01.jpg")
+        self.images.list_vehicle_manifest = lambda key: [
+            (f"{key}_01.jpg", "changed stamp"),
+            (f"{key}_02.jpg", f"{key}_02.jpg|100|2026-01-01"),
+        ]
+
+        files = self.pub._staged_files(self._part(), lambda i: f"alt {i}")
+
+        self.assertNotEqual(original, files[0]["id"])
+        self.assertEqual("changed stamp", self.state.donor_file("15", "15_01.jpg")[1])
+
     def test_the_next_part_off_that_donor_uploads_nothing(self):
         self.pub._staged_files(self._part(), lambda i: f"alt {i}")
         before = self.client.created
@@ -219,6 +236,54 @@ class DonorFrameUploadedOnce(unittest.TestCase):
         self.assertEqual(before, self.client.created, "re-uploaded a known donor frame")
         self.assertEqual([{"id": "gid://File/1"}, {"id": "gid://File/2"}], files)
         self.assertEqual(1, len(self.images.fetched), "re-downloaded a known donor frame")
+
+    def test_two_workers_off_one_donor_upload_it_once(self):
+        """`bulk --workers N` gives each thread its own publisher and its own state
+        connection (sqlite binds a connection to the thread that opened it), so the "is this
+        frame already uploaded?" read and the upload it guards are atomic only if the donor
+        itself is locked. Without that lock both threads see the frames missing and both
+        stage them, and fileCreate does not deduplicate — the loser's copies are orphaned in
+        the file library. The sleep widens the window so a regression fails reliably.
+        """
+        import pathlib
+        import threading
+        import time
+        from coreyard.state import SyncState
+
+        db = pathlib.Path(self._tmp.name) / "s.sqlite3"
+        images, client = self.Images(), self.Client()
+        inner = client.graphql
+
+        def slow(query, variables=None):
+            if "stagedUploadsCreate" in query:
+                time.sleep(0.2)
+            return inner(query, variables)
+
+        client.graphql = slow
+        errors = []
+
+        def worker():
+            try:
+                state = SyncState(db)
+                try:
+                    publisher = self._publisher(images, client, state)
+                    publisher._staged_files(self._part(), lambda i: f"alt {i}")
+                finally:
+                    state.close()
+            except Exception as exc:          # pragma: no cover - reported below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        self.assertEqual([], errors)
+        self.assertEqual(2, client.created,
+                         "the donor's two frames were uploaded more than once")
+        self.assertEqual(1, len(images.fetched),
+                         "the donor folder was fetched by both workers")
 
     def test_without_a_file_map_it_still_publishes(self):
         # An installation that passes no map is slower, not broken.

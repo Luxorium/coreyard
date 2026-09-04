@@ -82,8 +82,7 @@ whose columns are named after `Part` fields and set `COREYARD_SOURCE=tabular:<pa
 | Reconciliation against the live store, with retirement guards | **working, unit-tested** |
 | Catalog repair (titles, tags, SEO, weights) against the renderer | **working, unit-tested** |
 | Generic catalog audit with site-configurable thresholds | **working, unit-tested** |
-| Guarded listing-portal title/price planning with shared Shopify overrides | **working, unit-tested** |
-| Researched-price gate on what may be listed | **working, unit-tested**, off by default |
+| Guarded listing-portal titles and source-price synchronization | **working, unit-tested** |
 
 Known gaps: a part's *variant-level* media assignment is not managed — photos attach to the
 product, not to a specific variant, which is fine while every part is a single-variant product.
@@ -123,7 +122,7 @@ coreyard/
     seo.py                   the title/meta/description/tag engine the renderer drives
     tags.py                  tag ownership: keep ours current, preserve everyone else's
     weights.py               shipping weight from a site-supplied rules table
-    pricing.py               optional storefront-only charm pricing
+    pricing.py               exact money parsing and formatting
     shopify_product.py       RenderedProduct -> Shopify CSV rows
     shopify_csv.py           Shopify product-CSV writer
   sink/
@@ -334,7 +333,7 @@ them:
 | `STORE_WEIGHT_RULES_FILE` | your weight table | packed shipping weight per part type (`coreyard/transform/weights.py`) |
 | `STORE_SHIPPING_POLICY_FILE` | your shipping policy | how each part ships, and the tag that says so (`coreyard/transform/shipping.py`) |
 | `STORE_ORDER_POLICY_FILE` | your order policy | order tagging; fulfillment rules are derived from the shipping policy (`coreyard/orders/policy.py`) |
-| `STORE_CATALOG_OVERRIDES_FILE` | reviewed catalogue decisions | per-R# SEO title and researched price overrides used by the canonical renderer |
+| `STORE_CATALOG_OVERRIDES_FILE` | reviewed catalogue decisions | per-R# SEO title overrides used by the canonical renderer |
 
 Check all four against their schemas at any time, with no database, store or credentials:
 
@@ -349,11 +348,12 @@ against the backend's schemas, without either application importing the other.
 Catalogue overrides use a small versioned JSON object keyed by the stable R#:
 
 ```json
-{"version": 1, "parts": {"51": {"title": "Reviewed title", "price": "899.99"}}}
+{"version": 1, "parts": {"51": {"title": "Reviewed title"}}}
 ```
 
 They are not an out-of-band Shopify patch. The canonical renderer reads them, both sinks
-serialize the same result, and the fingerprint changes when a reviewed title or price does.
+serialize the same result, and the fingerprint changes when a reviewed title does. Prices
+are never accepted in this file; they come directly from the source database.
 
 Without a weight table, products publish with no weight and every carrier-calculated rate is
 quoted for an empty box, so supplying one is worth the hour it takes.
@@ -369,14 +369,8 @@ These policy switches live in `.env` rather than in a file:
   `images_filter` expression in `schema.json`, and it applies to sync, reconciliation, bulk
   publishing and the audit at once, so those four cannot disagree about what is listable.
   Off by default, so upgrading never silently changes which parts you list.
-* `STORE_REQUIRE_RESEARCHED_PRICE=true` publishes only parts carrying a reviewed price in
-  `STORE_CATALOG_OVERRIDES_FILE` — the other half of "listable", read in the same place and by
-  the same four consumers. Also off by default: an install that has researched nothing must not
-  have its whole catalogue judged unlistable by an upgrade.
 * `STORE_DONOR_PHOTO_LIMIT=6` caps how many of a donor vehicle's frames an unphotographed part
-  inherits (see below). `STORE_PRICE_STEP=5` puts charm pricing on a five-dollar grid, so every
-  price reads as a considered number ($64.99, $14.99) rather than a converted one ($67.99,
-  $12.99). It defaults to a dollar, so no existing install's prices move on upgrade.
+  inherits (see below).
 * `STORE_PUBLICATIONS=Online Store` puts activated products on a sales channel. A product's
   status and its channel publication are different things in Shopify and only the second
   makes its URL resolve — an ACTIVE product on no channel is a 404 to shoppers and to Google.
@@ -445,16 +439,16 @@ bin/coreyard reconcile           # plan only
 bin/coreyard audit catalog       # read-only listing-quality report
 ```
 
-### Listing-portal engine workflow
+### Listing-portal workflow
 
 The optional `ebay` command manages a configured listing portal without hardcoding that
 portal's protocol. Copy `portal.example.json` to an ignored local file, fill in its routes,
 fields, statuses and action IDs, then point `EBAY_PORTAL_FILE` at it. Authentication may come
 from an explicit cookie header or an existing local Firefox session; cached cookies and all
-research checkpoints stay under ignored, owner-only local paths.
+portal checkpoints stay under ignored, owner-only local paths.
 
-A borrowed browser session is shorter-lived than the runs that use it — an overnight research
-pass will outlast it, and dying two thirds of the way through costs the night. Setting
+A borrowed browser session is shorter-lived than the runs that use it — an overnight
+maintenance pass can outlast it. Setting
 `EBAY_PORTAL_USER`/`EBAY_PORTAL_PASSWORD` and mapping `auth.login_fields` in `portal.json`
 lets CoreYard establish a session of its own. It is a fallback of last resort, consulted only
 when every cookie source has come up empty, and the client re-signs at most once per expired
@@ -466,39 +460,14 @@ bin/coreyard ebay pull --tab unlisted --part-type engine \
   --out out/ebay-engines.json
 bin/coreyard ebay details out/ebay-engines.json \
   --out out/ebay-engine-details.json
-bin/coreyard ebay comps --part-type 300 --out out/ebay-engine-comps.json
-bin/coreyard ebay engine-research --comps out/ebay-engine-comps.json
-bin/coreyard ebay engine-plan \
-  --titles out/ebay-engine-titles.json \
-  --prices out/ebay-engine-prices.json
-bin/coreyard ebay engine-apply \
-  --titles out/ebay-engine-plan-titles.json \
-  --prices out/ebay-engine-plan-prices.json       # dry run
+bin/coreyard ebay titles out/ebay-engines.json \
+  --details out/ebay-engine-details.json
+bin/coreyard ebay apply --titles out/ebay-engine-titles.json   # dry run
 ```
 
-`engine-plan` holds back missing evidence, unsafe price swings, and condition-sensitive
-listings unless the operator explicitly reviews the relevant guard. `engine-apply --apply`
-saves reviewed values in the portal only; it never lists or pushes them live. The same plan
-writes `out/engine-catalog-overrides.json`. Configure that file as
-`STORE_CATALOG_OVERRIDES_FILE`, then use `sync catalog` for titles and `sync inventory` for
-prices so matching Shopify products receive the same reviewed values through the one
-renderer.
-
-Nothing in this channel is generated by a model — CoreYard runs no model and calls no LLM
-anywhere. Titles come from the same renderer that publishes to Shopify, comparables are
-parsed from a public listing index (`coreyard/ebay/index.py`, and `COMPS_INDEX_URL` names
-it so the source is replaceable), and research prices each unit by arithmetic over those
-comparables — a median anchor
-adjusted by named percentages for mileage, grade, test status, a stated defect and time in
-inventory, then floored and capped. Each price carries those adjustments as its reasoning,
-and a listing with no usable comparable is held rather than guessed at.
-
-Every published price lands a penny under the same five-dollar grid, including one the floor
-supplied — a floor is a business minimum, not a shopper-facing number, and `$12.50` beside
-`$64.99` reads like two different shops. A price derived from comparables rounds *down*,
-because the market cleared there and rounding past it invents evidence; a floored one has no
-evidence to respect, so it rounds to nearest and is nudged up a step rather than landing under
-the floor.
+Title plans are optional reviewed inputs. Prices are not: Shopify and the portal receive the
+exact positive price on the matched source part. There is no price override file or
+second pricing rule in CoreYard.
 
 Item specifics are a separate pass, because eBay ranks on aspect *match* and buyers filter
 on it:
@@ -511,28 +480,12 @@ bin/coreyard ebay aspects --part-type engine --apply
 Values are validated against eBay's own category metadata (`EBAY_ASPECTS_FILE`); anything
 not derivable with confidence is left unset, and `--apply` refuses without that metadata.
 
-Every part type runs the same path. `titles` proposes SEO titles from the canonical
-renderer, `comps` researches comparables for one part type — any part type — and `apply`
-saves the result:
-
-```bash
-bin/coreyard ebay titles out/ebay-listings.json
-bin/coreyard ebay comps --part-type 560 --out out/ebay-comps.json
-bin/coreyard ebay apply --prices out/ebay-price-plan.json     # dry run
-```
-
-There is one comparable engine, not one per part type. What differs between types is a
-`comps.Rule`: whether the spec is identity or detail, whether a stated size must agree,
-which words describe a different market, and which attributes split the type into products
-that do not price against each other (alloy against steel, halogen against HID). Adding a
-type with unusual matching adds a rule, never a module.
-
 `daily` is the whole chain as one unattended pass, walking the part types the yard extract
 reports rather than a hand-kept list:
 
 ```bash
-bin/coreyard ebay daily              # dry run
-bin/coreyard ebay daily --apply      # ...and save it in the portal
+bin/coreyard ebay daily              # titles + exact source prices; dry run
+bin/coreyard ebay daily --apply      # save them in the portal
 ```
 
 It stops at the portal and never calls submit: an unattended job is exactly the thing that
@@ -970,6 +923,7 @@ scheduler to do it:
 | every 5 min | `coreyard --lock sync --timeout 4m sync delta` | closes the window where a part sold at the counter stays buyable online |
 | hourly | `coreyard --lock sync --timeout 45m sync` | the full extract |
 | daily | `coreyard --lock sync --timeout 45m sync --deep` | the only run that asks the store what it actually holds |
+| every 1 min | `coreyard --lock counts counts --apply` | refreshes the exact source-inventory count shown by the theme; edits no products |
 
 The delta job shares the full sync's lock on purpose: if a full run is in progress it already
 supersedes the catch-up, so the tick is skipped rather than raced.
@@ -978,6 +932,12 @@ Whatever schedules them, the jobs should invoke `bin/coreyard`. The old `python 
 coreyard.<module>` entry points still work and are still tested, but the launcher is the
 surface `coreyard --help` and the CLI's own tests both walk — so a renamed entry point breaks
 a test rather than a production job.
+
+`coreyard counts` is dry-run by default. It uses one `COUNT_BIG(DISTINCT ...)` query over the
+configured saleable source scope and intentionally ignores the storefront-only photo gate;
+`coreyard counts --apply` stores that result and its observation time as shop
+metafields. Shopify Liquid supplies the separate listed-online count from the `all` collection
+on each page render. The source database and its credentials are never exposed to a browser.
 
 ## Data model → Shopify mapping
 
@@ -992,7 +952,7 @@ two.
 | SEO title / description | `coreyard/transform/seo.py`, under the site's profile |
 | Type / Tags | expanded part type; year/make/model/interchange/spec terms/profile tags |
 | Variant SKU | R# (`r_number`; unique and never reused) |
-| Variant Price | price, charm-rounded when the site asks, on the `STORE_PRICE_STEP` grid (parts with no positive price are skipped) |
+| Variant Price | exact source price, formatted to cents (parts with no positive price are skipped) |
 | Variant Inventory Qty / Policy | quantity / `deny` (unique parts don't oversell) |
 | Shipping weight | the site's weight table by part type, or a source weight if the yard records one |
 | Shipping tag | the site's shipping policy, classified by part type during publish |
@@ -1001,10 +961,9 @@ two.
 | Alt text | generated per photo, and covered by the fingerprint |
 
 Listing scope comes from your mapping's `scope` predicate — typically priced, in stock,
-and not blocked from online sale — plus `STORE_REQUIRE_IMAGES` and
-`STORE_REQUIRE_RESEARCHED_PRICE` if you set them. That one definition is shared by sync,
-reconciliation, bulk publishing and the audit, so they cannot drift into publishing and
-archiving the same part in turn.
+and not blocked from online sale — plus `STORE_REQUIRE_IMAGES` if you set it. That one
+definition is shared by sync, reconciliation, bulk publishing and the audit, so they cannot
+drift into publishing and archiving the same part in turn.
 Identifier mapping is intentionally explicit — these are the source system's own column
 names, which you supply in local configuration (see "Schema mapping"):
 
@@ -1023,8 +982,8 @@ python scripts/check_neutrality.py
 The suite is offline by design — no database, no network, no Shopify, no `.env` — and
 anything that needs the live server belongs in `scripts/` or behind a CLI flag. It covers the
 canonical renderer and fingerprint sensitivity, tag ownership, shipping classification,
-structured metafields and their staleness, weight rules, the listable policy and its
-researched-price half, the donor-photo fallback and the two resolvers agreeing on how an
+structured metafields and their staleness, weight rules, the listable photo policy, the
+donor-photo fallback and the two resolvers agreeing on how an
 unchanged photo is spelled, external config validation, reconciliation and its retirement
 guards, catalog repair, order polling and normalization, the order lifecycle policy, the
 Shopify client, retirement and revival, listing-to-part resolution, and the extract mapping.

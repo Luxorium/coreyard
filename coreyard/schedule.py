@@ -66,15 +66,17 @@ def command_for(task: str) -> str:
     longer quietly unprotected against a slow run being lapped by the next tick.
     """
     exe = launcher()
-    lock = f"--lock {LOCK.stem.lstrip('.')}"
+    first_word = (task.strip().split() or [LOCK.stem.lstrip('.')])[0]
+    lock_name = re.sub(r"[^A-Za-z0-9_-]", "-", first_word) or LOCK.stem.lstrip('.')
+    lock = f"--lock {lock_name}"
     if exe.name == "coreyard":
         base = f"{exe} {lock} {task}"
     else:                                   # no launcher yet: call the module directly
         base = f"{exe} -m coreyard {lock} {task}"
-    # Belt and braces where it is available: flock(1) also covers the moment before the
-    # interpreter has started and taken the lock itself.
-    if shutil.which("flock"):
-        return f"flock -n {LOCK} {base}"
+    # Do not wrap this in flock(1) as well. A second open of the same lock file conflicts
+    # with the descriptor held by the outer flock process, so the CLI sees its own wrapper
+    # and skips every scheduled run. The in-process lock is portable and is the one surface
+    # used by both cron and systemd.
     return base
 
 
@@ -190,13 +192,43 @@ def _cron_schedule(seconds: int) -> str:
     return "0 3 * * *"
 
 
+def _task_name(task: str) -> str:
+    first_word = (task.strip().split() or [DEFAULT_TASK])[0]
+    return re.sub(r"[^A-Za-z0-9_-]", "-", first_word) or DEFAULT_TASK
+
+
+def _managed_cron_line(line: str, task: str | None = None) -> bool:
+    """Whether ``line`` belongs to CoreYard, optionally to one particular task.
+
+    Cron can run the cheap counter beside a catalog sync. A generic ``coreyard-sync``
+    substring used to make installing either one erase the other. New entries carry a
+    task-specific marker; the command signature also recognizes and replaces the generic
+    entry emitted by the previous generator.
+    """
+    legacy_double_lock = (
+        f"flock -n {LOCK}" in line
+        and f"--lock {LOCK.stem.lstrip('.')}" in line
+    )
+    if task is None:
+        return NAME in line or legacy_double_lock
+    task_name = _task_name(task)
+    marker = f"{NAME}:{task_name}"
+    command = f"--lock {task_name} {task.strip()}"
+    return marker in line or (NAME in line and command in line) or (
+        legacy_double_lock and task.strip() in line
+    )
+
+
 def install_cron(task: str, seconds: int, dry_run: bool) -> int:
-    marker = f"# {NAME} (managed by coreyard.schedule)"
-    entry = f"{_cron_schedule(seconds)} cd {REPO_ROOT} && {command_for(task)} >> {LOG} 2>&1"
+    task_name = _task_name(task)
+    marker_name = f"{NAME}:{task_name}"
+    marker = f"# {marker_name} (managed by coreyard.schedule)"
+    entry = (f"{_cron_schedule(seconds)} cd {REPO_ROOT} && {command_for(task)} "
+             f">> {LOG} 2>&1 # {marker_name}")
     if dry_run:
         print(f"--- would add to crontab ---\n{marker}\n{entry}")
         return 0
-    lines = [ln for ln in _crontab_lines() if NAME not in ln]
+    lines = [ln for ln in _crontab_lines() if not _managed_cron_line(ln, task)]
     lines += [marker, entry]
     _write_crontab(lines)
     print(f"  added cron entry: {entry}")
@@ -235,7 +267,7 @@ def do_uninstall(args) -> int:
             removed = True
     if shutil.which("crontab"):
         lines = _crontab_lines()
-        kept = [ln for ln in lines if NAME not in ln]
+        kept = [ln for ln in lines if not _managed_cron_line(ln)]
         if len(kept) != len(lines):
             _write_crontab(kept)
             print("  removed cron entry")

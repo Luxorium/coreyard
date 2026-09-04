@@ -4,8 +4,8 @@ from decimal import Decimal
 from pathlib import Path
 
 from coreyard.ebay.client import PortalClient, PortalError, SessionExpired
-from coreyard.ebay.engines import (ApplyGuard, build_overrides, plan_prices,
-                                   plan_titles, title_decisions)
+from coreyard.ebay.engines import (ApplyGuard, build_title_overrides, plan_titles,
+                                   title_decisions)
 from coreyard.ebay.portal import PortalConfigError, load
 from coreyard.config import REPO_ROOT
 
@@ -106,33 +106,16 @@ class EnginePlanning(unittest.TestCase):
         self.assertEqual(len(title_decisions(rows, proposals)[0]), 1)
         self.assertEqual(plan_titles(rows, proposals)[0], [])
 
-    def test_price_planner_holds_condition_disclosures(self):
-        research = [{"listing_id": "1", "suggested_price": 249.99,
-                     "confidence": "high", "comp_count": 5,
-                     "needs_disclosure": True}]
-        ready, held = plan_prices(LISTINGS[:1], research)
-        self.assertFalse(ready)
-        self.assertIn("disclosed", held[0]["reason"])
-
-    def test_price_planner_keeps_safe_researched_price(self):
-        research = [{"listing_id": "1", "suggested_price": 249.99,
-                     "confidence": "medium", "comp_count": 3}]
-        ready, held = plan_prices(LISTINGS[:1], research)
-        self.assertFalse(held)
-        self.assertEqual(ready[0]["new_price"], "249.99")
-
-    def test_shopify_override_is_keyed_by_r_number_not_listing_id(self):
-        value = build_overrides(
+    def test_title_override_is_keyed_by_r_number_not_listing_id(self):
+        value = build_title_overrides(
             {"1": {"r_number": "42"}},
             [{"listing_ids": ["1"], "new_title": "SEO Engine"}],
-            [{"listing_id": "1", "new_price": "249.99"}],
         )
-        self.assertEqual(value["parts"]["42"],
-                         {"title": "SEO Engine", "price": "249.99"})
+        self.assertEqual(value["parts"]["42"], {"title": "SEO Engine"})
 
     def test_missing_r_number_refuses_shopify_override(self):
         with self.assertRaises(ApplyGuard):
-            build_overrides({}, [{"listing_ids": ["1"], "new_title": "SEO"}], [])
+            build_title_overrides({}, [{"listing_ids": ["1"], "new_title": "SEO"}])
 
 
 if __name__ == "__main__":

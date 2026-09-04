@@ -172,9 +172,7 @@ def check_overrides(path, result: Result):
         return None
     if path:
         titled = sum(bool(item.title) for item in overrides.parts.values())
-        priced = sum(item.price is not None for item in overrides.parts.values())
-        result.note(f"catalog overrides: {len(overrides.parts)} R#s, "
-                    f"{titled} title(s), {priced} price(s)")
+        result.note(f"catalog overrides: {len(overrides.parts)} R#s, {titled} title(s)")
     return overrides
 
 

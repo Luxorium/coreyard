@@ -8,7 +8,7 @@ valid server session survives closing the browser tab.
 
 Borrowing the browser's session was originally the whole design, on the grounds that it
 needs no password on disk.  It does not survive an unattended run that outlives the
-session, though, which is what a multi-hour research pass is, so ``sign_in`` will
+session, though, which is what a multi-hour maintenance pass is, so ``sign_in`` will
 establish one from ``EBAY_PORTAL_USER``/``EBAY_PORTAL_PASSWORD`` when they are set.  Those
 are read through ``config._get`` like every other setting and belong in the gitignored
 ``.env``; the form's own field names are portal vocabulary and live in ``portal.json``.
@@ -309,4 +309,3 @@ def get_cookies(portal: PortalMap) -> dict[str, str]:
     except OSError:
         pass
     return jar
-

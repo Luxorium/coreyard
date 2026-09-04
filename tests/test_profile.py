@@ -97,6 +97,15 @@ class SitePolicy(unittest.TestCase):
         store = with_profile(CatalogProfile(title_max_models=1))
         self.assertEqual(store.catalog.title_max_models, 1)
 
+    def test_a_site_can_add_an_exact_part_type_disclosure(self):
+        policy = CatalogProfile(part_type_notices={"air bag": "Qualified installation."})
+        store = with_profile(policy)
+        body = seo.build_body_html(part(part_type="AIR BAG"), store)
+        self.assertIn("Safety disclosure:", body)
+        self.assertIn("Qualified installation.", body)
+        self.assertNotIn("Safety disclosure:",
+                         seo.build_body_html(part(part_type="Air Bag Sensor"), store))
+
     def test_profile_text_cannot_inject_markup(self):
         """A profile supplies words; the renderer owns the HTML."""
         store = with_profile(CatalogProfile(
@@ -149,6 +158,10 @@ class Loading(unittest.TestCase):
         profile = load(self._write({"tags": ["A", "B"], "preserved_tag_prefixes": ["x-"]}))
         self.assertEqual(profile.tags, ("A", "B"))
         self.assertEqual(profile.preserved_tag_prefixes, ("x-",))
+
+    def test_part_type_notices_are_normalized_for_exact_matching(self):
+        profile = load(self._write({"part_type_notices": {" AIR BAG ": " Be careful. "}}))
+        self.assertEqual(profile.part_type_notice("Air Bag"), "Be careful.")
 
 
 class NoEnvironmentLeak(unittest.TestCase):

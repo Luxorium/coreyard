@@ -83,6 +83,44 @@ class TagsAndNote(unittest.TestCase):
         self.assertTrue(decision.empty)
 
 
+class Booked(unittest.TestCase):
+    """A work order that exists but has not been invoiced yet."""
+
+    BOOKED = SourceOrder(order_reference="#1042", external_reference="2078", status="booked")
+
+    def test_only_the_reference_tag_is_added(self):
+        decision = decide(order(lines=[("ship:freight-299",)]), self.BOOKED, POLICY)
+        self.assertEqual(decision.add_tags, ["wo-2078"])
+
+    def test_the_invoiced_tag_the_note_and_fulfillment_all_wait(self):
+        decision = decide(order(lines=[("ship:freight-299",)]), self.BOOKED, POLICY)
+        self.assertEqual(decision.note, "")
+        self.assertEqual(decision.fulfill, [])
+
+    def test_the_reference_tag_is_not_re_added_once_present(self):
+        decision = decide(order(tags=["wo-2078"], lines=[("ship:freight-299",)]),
+                          self.BOOKED, POLICY)
+        self.assertTrue(decision.empty)
+
+    def test_a_later_invoiced_row_still_adds_the_invoiced_tag_and_note(self):
+        """The wo- tag is already on from the booked pass; the invoice adds the rest."""
+        invoiced = SourceOrder(order_reference="#1042", external_reference="2078",
+                               status="invoiced")
+        decision = decide(order(tags=["wo-2078"], lines=[("ship:freight-299",)]),
+                          invoiced, POLICY)
+        self.assertEqual(decision.add_tags, ["invoiced"])
+        self.assertIn("Source work order 2078 invoiced", decision.note)
+
+    def test_status_is_matched_case_and_space_insensitively(self):
+        spaced = SourceOrder(order_reference="#1042", external_reference="2078",
+                             status="  Booked ")
+        self.assertEqual(decide(order(), spaced, POLICY).add_tags, ["wo-2078"])
+
+    def test_a_policy_with_no_reference_tag_writes_nothing_for_a_booked_order(self):
+        decision = decide(order(), self.BOOKED, DEFAULT_POLICY)
+        self.assertTrue(decision.empty)
+
+
 class Fulfillment(unittest.TestCase):
     def test_an_order_nothing_else_will_close_is_fulfilled(self):
         decision = decide(order(lines=[("ship:freight-299",)]), SOURCE, POLICY)
@@ -205,8 +243,13 @@ class PolicyLoading(unittest.TestCase):
                             "notify_customer": False},
         }))
         self.assertEqual(policy.tags_for("55123"), ["invoiced", "wo-55123"])
+        self.assertEqual(policy.reference_tag_for("55123"), ["wo-55123"])
         self.assertTrue(policy.fulfillment.enabled)
         self.assertTrue(policy.fulfillment.defers(["ship:parcel"]))
+
+    def test_reference_tag_for_is_empty_without_a_reference_tag_or_a_reference(self):
+        self.assertEqual(DEFAULT_POLICY.reference_tag_for("55123"), [])
+        self.assertEqual(OrderPolicy(reference_tag="wo-{reference}").reference_tag_for(""), [])
 
     def test_an_unknown_key_is_an_error(self):
         with self.assertRaises(OrderPolicyError):

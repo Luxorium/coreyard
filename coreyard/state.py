@@ -187,6 +187,7 @@ class SyncState:
             " donor_key TEXT NOT NULL,"
             " filename TEXT NOT NULL,"
             " file_id TEXT NOT NULL,"
+            " source_stamp TEXT NOT NULL DEFAULT '',"
             " uploaded_at TEXT NOT NULL DEFAULT '',"
             " PRIMARY KEY (donor_key, filename))"
         )
@@ -220,6 +221,13 @@ class SyncState:
             # part needs its media re-uploaded.
             self.conn.execute(
                 "ALTER TABLE parts ADD COLUMN image_fingerprint TEXT NOT NULL DEFAULT ''"
+            )
+        donor_columns = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(donor_media)")
+        }
+        if "source_stamp" not in donor_columns:
+            self.conn.execute(
+                "ALTER TABLE donor_media ADD COLUMN source_stamp TEXT NOT NULL DEFAULT ''"
             )
         self.conn.commit()
 
@@ -411,13 +419,19 @@ class SyncState:
 
     def donor_file_id(self, donor_key: str, filename: str) -> str:
         """The Shopify file already created for this donor frame, or "" if there is none."""
+        return self.donor_file(donor_key, filename)[0]
+
+    def donor_file(self, donor_key: str, filename: str) -> tuple[str, str]:
+        """The Shopify file id and source-manifest stamp for one donor frame."""
         row = self.conn.execute(
-            "SELECT file_id FROM donor_media WHERE donor_key = ? AND filename = ?",
+            "SELECT file_id, source_stamp FROM donor_media"
+            " WHERE donor_key = ? AND filename = ?",
             (str(donor_key), str(filename)),
         ).fetchone()
-        return row[0] if row else ""
+        return (str(row[0]), str(row[1])) if row else ("", "")
 
-    def record_donor_file(self, donor_key: str, filename: str, file_id: str) -> None:
+    def record_donor_file(self, donor_key: str, filename: str, file_id: str,
+                          source_stamp: str = "") -> None:
         """Remember a donor frame's Shopify file, so no other part re-uploads it.
 
         Written only after the upload returned an id, for the same reason a channel row is
@@ -428,11 +442,13 @@ class SyncState:
             return
         with self.conn:
             self.conn.execute(
-                "INSERT INTO donor_media (donor_key, filename, file_id, uploaded_at)"
-                " VALUES (?, ?, ?, ?)"
+                "INSERT INTO donor_media"
+                " (donor_key, filename, file_id, source_stamp, uploaded_at)"
+                " VALUES (?, ?, ?, ?, ?)"
                 " ON CONFLICT(donor_key, filename) DO UPDATE SET"
-                "   file_id = excluded.file_id, uploaded_at = excluded.uploaded_at",
-                (str(donor_key), str(filename), str(file_id),
+                "   file_id = excluded.file_id, source_stamp = excluded.source_stamp,"
+                "   uploaded_at = excluded.uploaded_at",
+                (str(donor_key), str(filename), str(file_id), str(source_stamp),
                  datetime.now(timezone.utc).isoformat()),
             )
 

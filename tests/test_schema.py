@@ -53,6 +53,14 @@ class ScopedQuery(unittest.TestCase):
         self.assertIn("SELECT TOP 25", sql)
         self.assertIn("AND i.HasPhotos = 1", sql)
 
+    def test_inventory_count_is_distinct_scoped_and_optionally_photo_gated(self):
+        sql = MAPPING.build_inventory_count_query()
+        self.assertIn("COUNT_BIG(DISTINCT i.PartId) AS part_count", sql)
+        self.assertIn("WHERE (i.Price > 0 AND i.Qty > 0)", sql)
+        self.assertNotIn("i.HasPhotos = 1", sql)
+        self.assertIn("i.HasPhotos = 1",
+                      MAPPING.build_inventory_count_query(images_only=True))
+
     def test_required_fields_are_enforced(self):
         with self.assertRaises(SchemaError):
             SourceSchema.from_dict({"select": {"r_number": "x"}, "source": "t", "scope": "1=1"})

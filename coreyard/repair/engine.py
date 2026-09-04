@@ -186,15 +186,17 @@ def plan(
                         store.shipping.owned_prefixes)
 
             if "metafields" in wanted_fields:
-                live = {k: (t, v) for k, t, v in current.metafields}
+                live_metafields = {k: (t, v) for k, t, v in current.metafields}
                 wanted = {m.key: (m.type, m.value) for m in product.metafields}
                 # Only additions and corrections. Removing a metafield whose value vanished
                 # is the publisher's job during a normal upsert, where it knows the value
                 # really is gone rather than merely unasked-for here.
-                differing = {k: v for k, v in wanted.items() if live.get(k) != v}
+                differing = {
+                    k: v for k, v in wanted.items() if live_metafields.get(k) != v
+                }
                 if differing:
                     change.fields["metafields"] = (
-                        {k: live.get(k) for k in differing}, differing)
+                        {k: live_metafields.get(k) for k in differing}, differing)
 
         if "weight" in wanted_fields and current.inventory_item_id:
             wanted = (product.weight if product is not None

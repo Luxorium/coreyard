@@ -132,6 +132,7 @@ class FakeClient:
 
     def __init__(self, fail_on=None):
         self.calls = []
+        self.variables = {}
         self.fail_on = fail_on
 
     def _maybe_fail(self, name):
@@ -147,6 +148,7 @@ class FakeClient:
 
     def mutate(self, query, variables, name):
         self.calls.append(name)
+        self.variables[name] = variables
         self._maybe_fail(name)
         if name == "productSet":
             return {"product": {"id": "gid://Product/1"}}
@@ -191,7 +193,7 @@ class FailureSafeRefresh(unittest.TestCase):
         publisher = self._publisher(client, staged)
         with self.assertRaises(RuntimeError):
             publisher.publish(self._part(), refresh_images=True)
-        self.assertNotIn("fileDelete", client.calls,
+        self.assertNotIn("fileUpdate", client.calls,
                          "the product would have been left with no photographs")
 
     def test_a_failed_upsert_does_not_delete_the_live_photos(self):
@@ -204,19 +206,35 @@ class FailureSafeRefresh(unittest.TestCase):
         publisher._upsert = boom
         with self.assertRaises(RuntimeError):
             publisher.publish(self._part(), refresh_images=True)
-        self.assertNotIn("fileDelete", client.calls)
+        self.assertNotIn("fileUpdate", client.calls)
 
     def test_a_successful_refresh_removes_the_superseded_media_afterwards(self):
         client = FakeClient()
         publisher = self._publisher(client, lambda part, alt_for: [{"originalSource": "x"}])
         publisher.publish(self._part(), refresh_images=True)
-        self.assertIn("fileDelete", client.calls)
+        self.assertIn("fileUpdate", client.calls)
+        self.assertNotIn("fileDelete", client.calls)
+        self.assertEqual(
+            client.variables["fileUpdate"]["files"],
+            [{"id": "gid://File/old", "referencesToRemove": ["gid://Product/1"]}],
+        )
 
     def test_nothing_stageable_keeps_the_existing_photos(self):
         """Better a stale photograph than none."""
         client = FakeClient()
         publisher = self._publisher(client, lambda part, alt_for: [])
         publisher.publish(self._part(), refresh_images=True)
+        self.assertNotIn("fileUpdate", client.calls)
+
+    def test_a_retained_shared_file_is_not_detached_or_globally_deleted(self):
+        client = FakeClient()
+        publisher = self._publisher(
+            client,
+            lambda part, alt_for: [{"id": "gid://File/old"},
+                                   {"id": "gid://File/new"}],
+        )
+        publisher.publish(self._part(), refresh_images=True)
+        self.assertNotIn("fileUpdate", client.calls)
         self.assertNotIn("fileDelete", client.calls)
 
 

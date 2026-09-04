@@ -1,8 +1,8 @@
 """The catalogue of every part type this yard can inventory, and what it covers.
 
 Two workers add parts all day, and nothing stops them filing one under a type nobody has
-listed before.  Every per-type command in the listing-portal channel — comparables, item
-specifics, a preflight re-read — takes a part-type code from an operator, which is fine
+listed before. Every per-type command in the listing-portal channel — item specifics, a
+title pass, a preflight re-read — takes a part-type code from an operator, which is fine
 while a person is driving and useless for a job that has to keep up on its own.  So the
 set of types has to come from somewhere.
 
