@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, NamedTuple
 
 from coreyard.config import REPO_ROOT, StoreProfile, load_store
 from coreyard.models import Part
@@ -42,18 +43,61 @@ _PAGE = """query($cursor:String){
     pageInfo{ hasNextPage endCursor }
     nodes{ id handle media(first:10){
       pageInfo{ hasNextPage endCursor }
-      nodes{ ... on MediaImage { id alt } }
+      nodes{ ... on MediaImage { id alt image{ url } } }
     } }
   } }"""
 
 _MEDIA_PAGE = """query($id:ID!,$cursor:String){
   product(id:$id){ media(first:100, after:$cursor){
     pageInfo{ hasNextPage endCursor }
-    nodes{ ... on MediaImage { id alt } }
+    nodes{ ... on MediaImage { id alt image{ url } } }
   } } }"""
 
 _FILE_UPDATE = """mutation($files:[FileUpdateInput!]!){
   fileUpdate(files:$files){ files{ id } userErrors{ field message } } }"""
+
+
+class Photo(NamedTuple):
+    """One published photograph: what it is, where it sits, and what it currently says."""
+
+    media_id: str
+    index: int
+    alt: str
+    filename: str
+
+
+def _filename(media: dict[str, Any]) -> str:
+    """The uploaded filename behind a MediaImage, or '' when the store did not give one."""
+    url = ((media.get("image") or {}).get("url") or "").split("?")[0]
+    return url.rsplit("/", 1)[-1] if url else ""
+
+
+def _shows_donor(filename: str, r_number: str, fallback: bool) -> bool:
+    """Whether the photograph on the store is of the donor vehicle rather than the part.
+
+    Decided from the filename, not from the source system: CoreYard names a part's own photo
+    ``<R#>_NN.jpg`` and a donor frame ``<donor-key>_NN.jpg``, so a stem that is not this
+    part's R# means the picture is of a car. ``snippets/photo-source.liquid`` in the
+    storefront reads exactly this rule, and the two have to agree — the gallery caption and
+    the alt text are describing the same image.
+
+    Asking the source instead was wrong whenever the two had drifted apart. 87 parts have
+    since been photographed individually on the share but are still published carrying their
+    donor's frames, and for those the resolver says "own photos" while the store is showing
+    a car. That disagreement is what put 228 shared donor files beyond repair: 1,146 products
+    referenced them, most asking for a donor description and a handful asking for a part
+    description of the very same file. A Cadillac XT4 blower motor was left announcing "Used
+    OEM AC Air Conditioning Compressor from 2019 Chevrolet Malibu" because the compressor off
+    that Malibu is one of the parts that has drifted.
+
+    Until those parts are republished the donor photograph is what a shopper actually sees,
+    so the donor description is the true one. Shopify appends its own suffix to a filename it
+    has seen before (``2872_01_4bd8da44-....jpg``), which is why only the leading segment is
+    read. With no filename to go on, the source's opinion stands.
+    """
+    if not filename:
+        return fallback
+    return filename.split("_")[0] != str(r_number)
 
 
 def _iter_products(client: ShopifyClient, max_pages: int | None = None) -> Iterator[dict[str, Any]]:
@@ -104,8 +148,8 @@ def _completed(path: Path) -> set[str]:
 
 def _plan(client: ShopifyClient, store: StoreProfile, done: set[str], overwrite: bool,
           max_pages: int | None = None,
-          limit: int | None = None) -> tuple[dict[str, list[tuple[str, int, str]]], dict[str, int]]:
-    """Map R# -> [(media_id, photo_index, current_alt)] for photos needing alt text.
+          limit: int | None = None) -> tuple[dict[str, list[Photo]], dict[str, int]]:
+    """Map R# -> [Photo] for the photos needing alt text.
 
     Stops as soon as ``limit`` products have been collected — otherwise a small run still
     pays for a full walk of the catalogue.
@@ -114,7 +158,7 @@ def _plan(client: ShopifyClient, store: StoreProfile, done: set[str], overwrite:
     whose description is wrong from one that merely already has a description. Without it a
     repair run rewrote every photo in the catalogue to the string it already held.
     """
-    todo: dict[str, list[tuple[str, int, str]]] = {}
+    todo: dict[str, list[Photo]] = {}
     stats = {"products": 0, "ours": 0, "skipped_done": 0, "photos": 0, "already_set": 0}
     for node in _iter_products(client, max_pages):
         stats["products"] += 1
@@ -127,7 +171,7 @@ def _plan(client: ShopifyClient, store: StoreProfile, done: set[str], overwrite:
         if r_number in done:
             stats["skipped_done"] += 1
             continue
-        wanted: list[tuple[str, int, str]] = []
+        wanted: list[Photo] = []
         for index, media in enumerate(_iter_media(client, node), start=1):
             if not media.get("id"):
                 continue
@@ -136,7 +180,8 @@ def _plan(client: ShopifyClient, store: StoreProfile, done: set[str], overwrite:
                 stats["already_set"] += 1
                 if not overwrite:
                     continue
-            wanted.append((media["id"], index, media.get("alt") or ""))
+            wanted.append(Photo(media["id"], index, media.get("alt") or "",
+                                _filename(media)))
         if wanted:
             todo[r_number] = wanted
             if limit and len(todo) >= limit:
@@ -173,7 +218,7 @@ def _parts_for(r_numbers: set[str]) -> dict[str, Part]:
 
 
 def _updates_for(
-    todo: dict[str, list[tuple[str, int, str]]],
+    todo: dict[str, list[Photo]],
     parts: dict[str, Part],
     store: StoreProfile,
 ) -> tuple[list[dict[str, str]], list[set[str]], dict[str, set[str]], int]:
@@ -199,9 +244,16 @@ def _updates_for(
         part = parts.get(r_number)
         if part is None:
             continue
-        for media_id, index, existing in media:
-            update = {"id": media_id, "alt": seo.image_alt(part, index, store)}
-            current.setdefault(media_id, existing)
+        for photo in media:
+            media_id = photo.media_id
+            # Describe the photograph the store is actually serving, which is not always the
+            # one the source system thinks this part has. See _shows_donor.
+            subject = part
+            shows_donor = _shows_donor(photo.filename, r_number, part.uses_donor_photos)
+            if shows_donor != part.uses_donor_photos:
+                subject = replace(part, uses_donor_photos=shows_donor)
+            update = {"id": media_id, "alt": seo.image_alt(subject, photo.index, store)}
+            current.setdefault(media_id, photo.alt)
             prior = by_media.get(media_id)
             if media_id in conflicts:
                 conflicts[media_id].add(r_number)

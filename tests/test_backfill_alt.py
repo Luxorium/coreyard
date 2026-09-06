@@ -10,7 +10,8 @@ from unittest.mock import patch
 from coreyard.config import StoreProfile
 from coreyard.models import Part
 from coreyard.sink import backfill_alt
-from coreyard.sink.backfill_alt import _completed, _iter_media, _parts_for, _updates_for
+from coreyard.sink.backfill_alt import (Photo, _completed, _iter_media, _parts_for,
+                                        _shows_donor, _updates_for)
 from coreyard.transform import seo
 
 
@@ -39,8 +40,8 @@ class PartLoading(unittest.TestCase):
                     uses_donor_photos=True)
             for r, part_type in (("10", "Alternator"), ("20", "Wiper Motor"))
         }
-        todo = {"10": [("gid://File/shared", 1, "")],
-                "20": [("gid://File/shared", 1, "")]}
+        todo = {"10": [Photo("gid://File/shared", 1, "", "88_01.jpg")],
+                "20": [Photo("gid://File/shared", 1, "", "88_01.jpg")]}
 
         updates, owners, conflicts, unchanged = _updates_for(todo, parts, StoreProfile())
 
@@ -59,8 +60,8 @@ class PartLoading(unittest.TestCase):
             for r, part_type in (("50931", "Blower Motor"), ("50930", "AC Compressor"))
         }
         stale = "Used OEM AC Compressor from 2019 Chevrolet Malibu"
-        todo = {"50931": [("gid://File/shared", 1, stale)],
-                "50930": [("gid://File/shared", 1, stale)]}
+        todo = {"50931": [Photo("gid://File/shared", 1, stale, "2872_01.jpg")],
+                "50930": [Photo("gid://File/shared", 1, stale, "2872_01.jpg")]}
 
         updates, owners, conflicts, unchanged = _updates_for(todo, parts, StoreProfile())
 
@@ -73,7 +74,8 @@ class PartLoading(unittest.TestCase):
         part = Part(r_number="10", part_type="Alternator", price=Decimal("40"),
                     year=2014, make="Subaru", model="Legacy")
         correct = seo.image_alt(part, 1, StoreProfile())
-        todo = {"10": [("gid://File/a", 1, correct), ("gid://File/b", 2, "something else")]}
+        todo = {"10": [Photo("gid://File/a", 1, correct, "10_01.jpg"),
+                       Photo("gid://File/b", 2, "something else", "10_02.jpg")]}
 
         updates, owners, conflicts, unchanged = _updates_for(todo, {"10": part}, StoreProfile())
 
@@ -90,8 +92,8 @@ class PartLoading(unittest.TestCase):
                        year=2014, make="Subaru", model="Legacy"),
         }
         settled = seo.image_alt(parts["10"], 1, StoreProfile())
-        todo = {"10": [("gid://File/shared", 1, settled)],
-                "20": [("gid://File/shared", 1, settled)]}
+        todo = {"10": [Photo("gid://File/shared", 1, settled, "10_01.jpg")],
+                "20": [Photo("gid://File/shared", 1, settled, "20_01.jpg")]}
 
         updates, owners, conflicts, unchanged = _updates_for(todo, parts, StoreProfile())
 
@@ -146,7 +148,7 @@ class ResumeLog(unittest.TestCase):
             return {"fileUpdate": {"userErrors": errors}}
 
     def test_a_product_is_not_complete_when_any_of_its_photo_batches_fails(self):
-        todo = {"20": [(f"m{i}", i, "") for i in range(1, 31)]}
+        todo = {"20": [Photo(f"m{i}", i, "", "20_%02d.jpg" % i) for i in range(1, 31)]}
         stats = {
             "products": 1,
             "ours": 1,
@@ -182,6 +184,41 @@ class ResumeLog(unittest.TestCase):
 
             self.assertEqual(result, 1)
             self.assertNotIn("20", _completed(log))
+
+
+class WhosePhotographIsIt(unittest.TestCase):
+    """The filename on the store decides, because that is the picture being served."""
+
+    def test_a_donor_stem_wins_over_the_source_saying_own_photos(self):
+        self.assertTrue(_shows_donor("2872_01_4bd8da44-ba6a.jpg", "50943", fallback=False))
+
+    def test_the_parts_own_stem_is_its_own_photo(self):
+        self.assertFalse(_shows_donor("50943_01.jpg", "50943", fallback=True))
+
+    def test_no_filename_leaves_the_source_to_decide(self):
+        self.assertTrue(_shows_donor("", "50943", fallback=True))
+        self.assertFalse(_shows_donor("", "50943", fallback=False))
+
+    def test_a_drifted_part_no_longer_conflicts_with_its_donors_other_parts(self):
+        """R#50943 says it has its own photos; the store is still serving the donor shoot."""
+        common = dict(price=Decimal("40"), year=2019, make="Chevrolet", model="Malibu",
+                      stock_number="261667")
+        parts = {
+            "50931": Part(r_number="50931", part_type="Blower Motor",
+                          uses_donor_photos=True, **common),
+            "50943": Part(r_number="50943", part_type="AC Compressor",
+                          uses_donor_photos=False, **common),
+        }
+        stale = "Used OEM AC Air Conditioning Compressor from 2019 Chevrolet Malibu"
+        todo = {r: [Photo("gid://File/donor2872", 1, stale, "2872_01_4bd8da44.jpg")]
+                for r in parts}
+
+        updates, owners, conflicts, unchanged = _updates_for(todo, parts, StoreProfile())
+
+        self.assertEqual(conflicts, {})
+        self.assertEqual(len(updates), 1)
+        self.assertIn("Donor vehicle 2019 Chevrolet Malibu", updates[0]["alt"])
+        self.assertEqual(owners, [{"50931", "50943"}])
 
 
 if __name__ == "__main__":
