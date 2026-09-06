@@ -4,6 +4,14 @@ Photos published before alt text was generated carry ``alt: ""`` — invisible t
 search and unreadable to a screen reader. This walks the store, works out the alt each
 photo should have, and writes it with ``fileUpdate``.
 
+``--overwrite`` also repairs alt text that is set but wrong. A donor-vehicle photograph is
+one global file shared by every part pulled from that car, so whichever part was published
+first named the file after itself: a blower motor's listing carried "Used OEM AC Air
+Conditioning Compressor from 2019 Chevrolet Malibu" because the compressor off the same
+Malibu was uploaded first. The generated alt says "Donor vehicle ..." for those, which is
+one description the shared file can honestly hold. Photos already reading as generated are
+left untouched, so a repair run writes only what is actually wrong.
+
 Note ``productCreateMedia``/``productUpdateMedia`` no longer exist in current Admin API
 versions; ``fileUpdate`` is the supported way to change a media file's alt, and it takes a
 batch, so updates go up 25 at a time rather than one call per photo.
@@ -96,13 +104,17 @@ def _completed(path: Path) -> set[str]:
 
 def _plan(client: ShopifyClient, store: StoreProfile, done: set[str], overwrite: bool,
           max_pages: int | None = None,
-          limit: int | None = None) -> tuple[dict[str, list[tuple[str, int]]], dict[str, int]]:
-    """Map R# -> [(media_id, photo_index)] for photos still needing alt text.
+          limit: int | None = None) -> tuple[dict[str, list[tuple[str, int, str]]], dict[str, int]]:
+    """Map R# -> [(media_id, photo_index, current_alt)] for photos needing alt text.
 
     Stops as soon as ``limit`` products have been collected — otherwise a small run still
     pays for a full walk of the catalogue.
+
+    The alt already on the file is carried along so that ``--overwrite`` can tell a photo
+    whose description is wrong from one that merely already has a description. Without it a
+    repair run rewrote every photo in the catalogue to the string it already held.
     """
-    todo: dict[str, list[tuple[str, int]]] = {}
+    todo: dict[str, list[tuple[str, int, str]]] = {}
     stats = {"products": 0, "ours": 0, "skipped_done": 0, "photos": 0, "already_set": 0}
     for node in _iter_products(client, max_pages):
         stats["products"] += 1
@@ -115,7 +127,7 @@ def _plan(client: ShopifyClient, store: StoreProfile, done: set[str], overwrite:
         if r_number in done:
             stats["skipped_done"] += 1
             continue
-        wanted: list[tuple[str, int]] = []
+        wanted: list[tuple[str, int, str]] = []
         for index, media in enumerate(_iter_media(client, node), start=1):
             if not media.get("id"):
                 continue
@@ -124,7 +136,7 @@ def _plan(client: ShopifyClient, store: StoreProfile, done: set[str], overwrite:
                 stats["already_set"] += 1
                 if not overwrite:
                     continue
-            wanted.append((media["id"], index))
+            wanted.append((media["id"], index, media.get("alt") or ""))
         if wanted:
             todo[r_number] = wanted
             if limit and len(todo) >= limit:
@@ -161,26 +173,35 @@ def _parts_for(r_numbers: set[str]) -> dict[str, Part]:
 
 
 def _updates_for(
-    todo: dict[str, list[tuple[str, int]]],
+    todo: dict[str, list[tuple[str, int, str]]],
     parts: dict[str, Part],
     store: StoreProfile,
-) -> tuple[list[dict[str, str]], list[set[str]], dict[str, set[str]]]:
+) -> tuple[list[dict[str, str]], list[set[str]], dict[str, set[str]], int]:
     """Deduplicate global Shopify files and refuse conflicting descriptions.
 
     A donor image is one global file referenced by several products. Sending one update per
     product creates a last-write-wins race; one file must have one donor-vehicle alt instead.
     If supposedly shared media resolve to different facts, skip the unsafe update and make
     the collision visible rather than choosing whichever product happened to be scanned last.
+
+    A photo whose alt already reads exactly as generated is dropped last, after the conflict
+    check rather than before it: the alt on a shared file is one string, so skipping an owner
+    early would hide a disagreement between two products about what that one file depicts and
+    let the other owner's description win unchallenged. Everything surviving that check and
+    still matching is simply already correct, and rewriting it would spend a catalogue-wide
+    run of writes to store the strings that are there.
     """
     by_media: dict[str, dict[str, str]] = {}
     owners: dict[str, set[str]] = {}
     conflicts: dict[str, set[str]] = {}
+    current: dict[str, str] = {}
     for r_number, media in todo.items():
         part = parts.get(r_number)
         if part is None:
             continue
-        for media_id, index in media:
+        for media_id, index, existing in media:
             update = {"id": media_id, "alt": seo.image_alt(part, index, store)}
+            current.setdefault(media_id, existing)
             prior = by_media.get(media_id)
             if media_id in conflicts:
                 conflicts[media_id].add(r_number)
@@ -195,9 +216,15 @@ def _updates_for(
     for media_id in conflicts:
         by_media.pop(media_id, None)
         owners.pop(media_id, None)
+    unchanged = 0
+    for media_id in list(by_media):
+        if by_media[media_id]["alt"] == current.get(media_id, ""):
+            unchanged += 1
+            by_media.pop(media_id)
+            owners.pop(media_id, None)
     media_ids = list(by_media)
     return ([by_media[media_id] for media_id in media_ids],
-            [owners[media_id] for media_id in media_ids], conflicts)
+            [owners[media_id] for media_id in media_ids], conflicts, unchanged)
 
 
 def _record(log, payload: dict[str, Any]) -> None:
@@ -209,7 +236,9 @@ def _record(log, payload: dict[str, Any]) -> None:
 def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """Populate a parser with the alt-text backfill flags."""
     ap.add_argument("--dry-run", action="store_true", help="report only; write nothing")
-    ap.add_argument("--overwrite", action="store_true", help="replace alt text that is already set")
+    ap.add_argument("--overwrite", action="store_true",
+                    help="re-examine alt text that is already set, and correct it where it "
+                         "no longer describes the photo")
     ap.add_argument("--limit", type=int, default=None, help="max products to update")
     ap.add_argument("--log", type=Path, default=DEFAULT_LOG)
     ap.add_argument("--no-resume", action="store_true")
@@ -242,8 +271,10 @@ def run(args) -> int:
         print(f"  {len(missing)} product(s) have no matching source part; skipping "
               f"(e.g. {missing[:5]})")
 
-    updates, owners_by_update, conflicts = _updates_for(todo, parts, store)
+    updates, owners_by_update, conflicts, unchanged = _updates_for(todo, parts, store)
     conflict_products = set().union(*conflicts.values()) if conflicts else set()
+    if unchanged:
+        print(f"  {unchanged} photo(s) already carry exactly the generated alt; leaving them alone")
     if conflicts:
         sample = [(media_id, sorted(owners))
                   for media_id, owners in list(conflicts.items())[:5]]
@@ -251,7 +282,8 @@ def run(args) -> int:
               f"text; skipped them (e.g. {sample})")
 
     if not updates:
-        print("No updatable photos matched a live part.")
+        print("Every photo that matched a live part already reads correctly."
+              if unchanged else "No updatable photos matched a live part.")
         return 1 if conflicts else 0
 
     if args.dry_run:
