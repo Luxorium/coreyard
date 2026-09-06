@@ -84,6 +84,41 @@ class Metafield:
         return f"{self.namespace}.{self.key}"
 
 
+def _row_note(entry) -> str:
+    """The Notes cell for one fitment row: which versions of this vehicle it fits.
+
+    A row whose applications all cover its whole span needs the qualifier text alone —
+    ``Application.label()`` would prefix a year span the row's own ``years`` column has
+    already stated.
+
+    A *split* row must keep those years. "2008-2017 Chevrolet Equinox — 3.6L; 3.0L" is how
+    a shopper with a 2011 comes to order the 3.6L starter: the catalogue gives the 3.0L to
+    10-12 only, and the summary had flattened three separate runs into one list of engines
+    that looked like alternatives. The years belong wherever the restriction is stated, so
+    here the cell reads "2008-2009 — 3.6L; 2010-2012 — 3.0L; 2013-2017 — 3.6L".
+
+    Dedupe on the whole label rather than the note, since the same qualifier recurring in a
+    different year run is a different fact.
+    """
+    dated = seo.year_specific(entry)
+    labels: list[str] = []
+    seen: set[str] = set()
+    for application in seo.application_rows(entry):
+        text = (seo.application_label(application) if dated
+                else " ".join(str(application.note or "").split()))
+        key = text.casefold()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        labels.append(text)
+    shown = labels[:seo.APPLICATION_MAX]
+    if len(labels) > len(shown):
+        # Never let the cap read as the whole list: a dropped run is a year band the shopper
+        # would take to be excluded, which is the failure this column exists to prevent.
+        shown.append(f"+{len(labels) - len(shown)} more")
+    return "; ".join(shown)
+
+
 def fitment_rows(part: Part, store: Optional[StoreProfile] = None) -> list[dict]:
     """Every vehicle this part fits, as structured rows rather than a printed sentence.
 
@@ -103,24 +138,11 @@ def fitment_rows(part: Part, store: Optional[StoreProfile] = None) -> list[dict]
         label = seo._vehicle_label(make, model)
         if not label:
             continue
-        notes: list[str] = []
-        seen_notes: set[str] = set()
-        for application in entry.qualifiers():
-            note = " ".join(str(application.note or "").split())
-            key = note.casefold()
-            if not note or key in seen_notes:
-                continue
-            seen_notes.add(key)
-            notes.append(note)
-            if len(notes) == 4:
-                break
         rows.append({
             "years": seo.fitment_year_label(entry),
             "make": make or "",
             "model": model or "",
-            # The qualifier text only. `Application.label()` prefixes its own year span,
-            # which the row's own `years` column already states.
-            "note": "; ".join(notes),
+            "note": _row_note(entry),
             "label": label,
         })
     if rows:
@@ -291,7 +313,9 @@ def render(
     # is a real trade — but the two storefronts were publishing the same part under two
     # different-looking titles, and the site chose the spanned form for both. One title, both
     # channels, which is the whole point of a single renderer.
-    title = override.title or seo.build_title(part, store, compact=True)
+    # A reviewed title stands, but still collects the facts it predates (grade, mileage).
+    title = (seo.extend_override_title(override.title, part, store) if override.title
+             else seo.build_title(part, store, compact=True))
     weight = resolve_weight(part, store, product_type)
     # Classified here, not by a later pass over the catalogue: a product that is live and
     # sellable before anything has said how it ships is a product that can be bought with

@@ -5,7 +5,9 @@ what lets an interrupted run simply resume — and it must not delete tags anoth
 while it is fixing CoreYard's own.
 """
 
+import threading
 import unittest
+from unittest.mock import patch
 from dataclasses import replace
 from decimal import Decimal
 
@@ -238,3 +240,58 @@ class Scan(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ParallelApply(unittest.TestCase):
+    """``--workers N`` is a throughput setting, not a change of behaviour.
+
+    A whole-catalogue title repair is one API round trip per product, so it is bound by
+    latency rather than by the store's query budget. Applying several at once is the only
+    way a 27,000-product repair finishes in an evening — but every product must still be
+    written exactly once, and a refusal must still be reported rather than swallowed.
+    """
+
+    class Change:
+        def __init__(self, r_number):
+            self.r_number = r_number
+
+    def _run(self, count, workers, failing=()):
+        from coreyard.repair import cli
+
+        applied, lock = [], threading.Lock()
+        seen_clients = set()
+
+        def fake_apply(client, change):
+            with lock:
+                applied.append(change.r_number)
+                seen_clients.add(id(client))
+            if change.r_number in failing:
+                raise RuntimeError("portal refused")
+
+        todo = [self.Change(str(n)) for n in range(count)]
+        reported = []
+        with patch.object(cli.engine, "apply", fake_apply), \
+             patch.object(cli, "_thread_client", lambda: object()):
+            cli._apply_parallel(todo, workers,
+                                lambda i, c, e: reported.append((i, c.r_number, e)))
+        return applied, reported, seen_clients
+
+    def test_every_product_is_written_exactly_once(self):
+        applied, _, _ = self._run(50, workers=4)
+        self.assertEqual(sorted(applied, key=int), [str(n) for n in range(50)])
+
+    def test_results_are_reported_in_submission_order(self):
+        # The progress counter and the "first five failures" print both depend on it.
+        _, reported, _ = self._run(20, workers=4)
+        self.assertEqual([r[0] for r in reported], list(range(1, 21)))
+        self.assertEqual([r[1] for r in reported], [str(n) for n in range(20)])
+
+    def test_a_refusal_is_reported_and_does_not_stop_the_rest(self):
+        applied, reported, _ = self._run(20, workers=4, failing={"7", "13"})
+        self.assertEqual(len(applied), 20)
+        failed = [r[1] for r in reported if r[2] is not None]
+        self.assertEqual(sorted(failed, key=int), ["7", "13"])
+
+    def test_one_worker_still_writes_everything(self):
+        applied, _, _ = self._run(5, workers=1)
+        self.assertEqual(applied, ["0", "1", "2", "3", "4"])

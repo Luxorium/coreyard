@@ -288,6 +288,16 @@ class Selection(unittest.TestCase):
         self.assertEqual(run_sync._photo_refreshes(
             diff, sync_args(["photos"]), {"1"}), {"1"})
 
+    def test_untracked_donor_listing_establishes_its_complete_media_baseline(self):
+        diff = DiffResult(added=["1", "2"])
+        parts = [part("1", uses_donor_photos=True), part("2")]
+        for scope in ([], ["photos"], ["--delta"]):
+            self.assertEqual(run_sync._photo_refreshes(
+                diff, sync_args(scope), {"1", "2"}, parts), {"1"})
+        for scope in ("catalog", "inventory"):
+            self.assertEqual(run_sync._photo_refreshes(
+                diff, sync_args([scope]), {"1", "2"}, parts), set())
+
     def test_catalog_publish_does_not_mark_skipped_media_as_current(self):
         with tempfile.TemporaryDirectory() as directory:
             with SyncState(Path(directory) / "state.sqlite3") as state:

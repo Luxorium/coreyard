@@ -226,6 +226,48 @@ class FailureSafeRefresh(unittest.TestCase):
         publisher.publish(self._part(), refresh_images=True)
         self.assertNotIn("fileUpdate", client.calls)
 
+    def test_media_the_upsert_already_removed_is_not_a_failure(self):
+        """``productSet(files=...)`` replaces the media set, so the follow-up detach finds
+        the old ids gone. That is this step's goal already met — it must not raise, or a
+        donor part refreshed on every delta tick never checkpoints and the shared sync
+        lock stays wedged (the 2026-09 starvation)."""
+
+        class GoneClient(FakeClient):
+            def mutate(self, query, variables, name):
+                self.calls.append(name)
+                self.variables[name] = variables
+                if name == "fileUpdate":
+                    raise RuntimeError(
+                        'fileUpdate: [{"field": ["files"], "message": '
+                        '"File ids [\\"gid://File/old\\"] do not exist."}]')
+                if name == "productSet":
+                    return {"product": {"id": "gid://Product/1"}}
+                return {}
+
+        client = GoneClient()
+        publisher = self._publisher(client, lambda part, alt_for: [{"originalSource": "x"}])
+        publisher.publish(self._part(), refresh_images=True)
+        self.assertIn("fileUpdate", client.calls)
+
+    def test_a_real_detach_refusal_still_raises(self):
+        """Only "does not exist" is tolerated; any other userError is a real problem."""
+
+        class RefusingClient(FakeClient):
+            def mutate(self, query, variables, name):
+                self.calls.append(name)
+                self.variables[name] = variables
+                if name == "fileUpdate":
+                    raise RuntimeError(
+                        'fileUpdate: [{"message": "Access denied for fileUpdate."}]')
+                if name == "productSet":
+                    return {"product": {"id": "gid://Product/1"}}
+                return {}
+
+        client = RefusingClient()
+        publisher = self._publisher(client, lambda part, alt_for: [{"originalSource": "x"}])
+        with self.assertRaises(RuntimeError):
+            publisher.publish(self._part(), refresh_images=True)
+
     def test_a_retained_shared_file_is_not_detached_or_globally_deleted(self):
         client = FakeClient()
         publisher = self._publisher(

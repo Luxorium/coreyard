@@ -13,6 +13,7 @@ from typing import Iterable, Optional
 from coreyard.config import StoreProfile
 from coreyard.ebay import engines, link, titles
 from coreyard.models import Part
+from coreyard.ebay.pricing import PricePolicy, quote
 from coreyard.transform.pricing import money_str, parse_money
 
 
@@ -39,7 +40,8 @@ class Plan:
 
 
 def source_price_decisions(
-    rows: list[dict], resolved: dict[str, Part]
+    rows: list[dict], resolved: dict[str, Part], *, store=None, policy=None,
+    freight_policies=None,
 ) -> tuple[list[dict], list[dict]]:
     """Return portal price changes using the exact source amount for each part."""
     current = {str(row["listing_id"]): row for row in rows}
@@ -55,7 +57,12 @@ def source_price_decisions(
                 "reason": "source system has no positive price",
             })
             continue
-        source_price = money_str(part.price)
+        try:
+            source_price = quote(part, store or StoreProfile(), row.get("shipping_mode"),
+                                 policy or PricePolicy(), freight_policies)["new_price"]
+        except ValueError as exc:
+            held.append({"listing_id": str(listing_id), "reason": str(exc)})
+            continue
         old = parse_money(row.get("price"))
         old_price = money_str(old) if old is not None else ""
         if old_price != source_price:
@@ -75,6 +82,7 @@ def plan(
     *,
     details: Optional[dict[str, dict]] = None,
     title_limit: int = 80,
+    price_policy: PricePolicy | None = None,
 ) -> Plan:
     """Plan canonical titles and exact source prices for a portal tab. Pure."""
     catalogue = list(parts)
@@ -93,7 +101,8 @@ def plan(
     result.titles = titles.group_for_portal(accepted)
     result.held.extend({**item, "stage": "title"} for item in held)
 
-    result.prices, price_held = source_price_decisions(rows, resolved)
+    result.prices, price_held = source_price_decisions(
+        rows, resolved, store=store, policy=price_policy)
     result.held.extend({**item, "stage": "price"} for item in price_held)
     return result
 

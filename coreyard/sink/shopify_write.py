@@ -434,12 +434,24 @@ class ShopifyPublisher:
         product_id = self._upsert(rendered, part.quantity, product_id, files, status,
                                   existing_tags)
         if stale_media:
-            self.client.mutate(
-                _REMOVE_FILE_REFERENCES,
-                {"files": [{"id": media_id, "referencesToRemove": [product_id]}
-                           for media_id in stale_media]},
-                "fileUpdate",
-            )
+            try:
+                self.client.mutate(
+                    _REMOVE_FILE_REFERENCES,
+                    {"files": [{"id": media_id, "referencesToRemove": [product_id]}
+                               for media_id in stale_media]},
+                    "fileUpdate",
+                )
+            except RuntimeError as exc:
+                # ``productSet``'s ``files`` set has replace semantics, so the upsert above
+                # has *already* detached every superseded media from this product. This
+                # follow-up then finds those ids gone — "File ids [...] do not exist" — which
+                # is exactly the state this call exists to reach, not a failure to retry.
+                # A donor part re-published on every delta tick (run_sync._photo_refreshes)
+                # would otherwise raise here forever and never checkpoint, holding the shared
+                # sync lock open. Any *other* refusal still raises: a shared donor file left
+                # attached to the wrong product is the real problem this step guards against.
+                if "not exist" not in str(exc):
+                    raise
         # Only a product that is meant to be visible is put on a channel: publishing a DRAFT
         # would make the holding state for "not ready yet" mean nothing.
         if (status or self.status) == "ACTIVE":

@@ -1,5 +1,31 @@
 # Repository Guidelines
 
+## Agent Workflow
+
+These instructions apply to Codex using GPT-6 Astra (`gpt-6-astra`) and to other coding
+agents. Select the model in Codex configuration; this file does not select it. Keep the
+configured reasoning effort unless the user requests a change. `CLAUDE.md` supplements
+this file with operational context; this section owns the shared working conventions.
+
+Treat requests to change or fix something as instructions to implement and verify it.
+Carry authorized work through to completion, making routine choices from repository and
+conversation context. Incorporate follow-up corrections and questions while continuing
+the original task unless the user replaces it. Preserve unrelated working-tree edits.
+
+Follow explicit user instructions over repository or skill guidance, within system and
+developer constraints. Reuse authorization already given for the same action and scope.
+If a missing decision blocks work, complete independent preparation first, then explain
+the concrete decision needed. When a file causes a pause, link it and quote the relevant
+instruction. The publishing, database, and portal safeguards below still apply.
+
+Use concise progress updates and report the outcome, verification, and any remaining
+blocker plainly. Batch independent read-only checks when useful; use subagents only when
+the user or governing session instructions request them. For documentation-only edits,
+review the diff, check references, and run the neutrality check and `git diff --check`.
+For code or behavior changes, run the full offline unit suite and those same checks.
+Repeat or broaden checks only for a change, failure, or unresolved concern. Add tests
+when they establish meaningful behavior, including the regression coverage below.
+
 ## Project Structure & Module Organization
 
 `coreyard/` implements the source-system-to-Shopify pipeline. `models.py`, `config.py` and
@@ -169,7 +195,8 @@ failed payloads may remain only in the owner-only queue for the bounded retry wi
   are namespaced (`run_sync._DONOR_PREFIX`) because the two folders share a key space, and
   both resolvers go through `run_sync._photo_view` so the full and delta paths spell an
   unchanged photo identically. Resolver and publisher must trim to the same
-  `images.donor_photo_limit`, or the part republishes forever.
+  `images.donor_photo_limit`, or the part republishes forever. A configured limit of zero
+  selects all donor frames in both paths.
 - Donor frames are uploaded once and referenced by every part off that donor
   (`state.donor_media`, written only after `fileCreate` returned an id). The body note and the
   alt text say the picture is of the car, not the part: that is a fact about the data, so it
@@ -192,6 +219,10 @@ failed payloads may remain only in the owner-only queue for the bounded retry wi
   The gap between the first two is the review window for portal changes.
 - Every portal write is a dry run without `--apply`, and its cap counts listings rather than
   plan entries and refuses *before* the first write, so a refused batch writes nothing.
+- `ebay auto-titles` owns the bounded unlisted-title queue. It uses the shared renderer's
+  80-character budget, rechecks live unlisted membership before saving, and records success
+  only after read-back verification. It never changes prices, exports Shopify overrides,
+  or submits listings. Its checkpoint is private generated state in `out/`.
 - A listing is matched to a part from grid data alone, by the R# in the portal's own title or
   by (donor stock number, part-type code), then — inside a candidate set only — by the grid's
   interchange number and by the side the title names. Each refuses rather than guesses: a
@@ -200,8 +231,14 @@ failed payloads may remain only in the owner-only queue for the bounded retry wi
 - `EBAY_PORTAL_USER`/`EBAY_PORTAL_PASSWORD` are a sign-in of last resort, used only when the
   cookie sources yield nothing and only if `portal.json` maps `auth.login_fields`; the client
   re-signs at most once per expired request. Never print, log, or put a password in an error.
-- The source database is the only price authority. The renderer and portal daily pass format
-  its positive price to cents without overrides or other merchandising arithmetic.
+- The source database is the base-price authority. Shopify uses its unchanged positive
+  price. eBay's optional configured markup and included shipping are computed only in
+  `ebay/pricing.py`: markup applies to the part, then free-shipping listings add the
+  configured Shopify rate. Pickup and freight do not include shipping in the item price;
+  freight selects the mapped shipping policy. Never mark up an already-marked-up price.
+- `ebay auto-prices --apply --revise-listed` may revise existing live listings through
+  the guarded push surface after price/policy read-back. It never lists unlisted inventory.
+  Failed or interrupted revisions retain private pending state for retry.
 - Reviewed titles reach Shopify only as `STORE_CATALOG_OVERRIDES_FILE`, read by the one
   renderer and keyed by R#. Never put prices in that file or patch a product price directly:
   the next sync must restore the source amount.

@@ -6,6 +6,7 @@ from datetime import date
 from decimal import Decimal
 
 from coreyard.config import StoreProfile
+from coreyard.profile import CatalogProfile
 from coreyard.models import Part
 from coreyard.yms.interchange import Application, Fitment, parse_application
 from coreyard.transform import seo
@@ -143,6 +144,25 @@ class Qualifiers(unittest.TestCase):
                        applications=[Application(2008, 2011, "")])]
         body = seo.build_body_html(part(fitment=fit), STORE)
         self.assertIn("<li>2008-2011 GMC Acadia</li>", body)
+
+    def test_an_unrestricted_year_run_is_listed_beside_the_qualified_ones(self):
+        """Only qualified applications used to be listed, so the year run that fits
+        *without* a restriction vanished — and its owner read the remaining bullets as a
+        list of requirements none of which mentions their car."""
+        fit = [Fitment(make="Chevrolet", model="Impala", year_start=2012, year_end=2019,
+                       applications=[Application(2012, 2013, ""),
+                                     Application(2014, 2016, "VIN W (4th digit, Limited)"),
+                                     Application(2017, 2019, "3.6L")])]
+        text = re.sub(r"<[^>]+>", "", seo.build_body_html(part(fitment=fit), STORE))
+        self.assertIn("2012-2013", text)
+        self.assertIn("2017-2019 — 3.6L", text)
+
+    def test_a_long_application_list_says_how_many_it_left_out(self):
+        fit = [Fitment(make="Ford", model="F-150", year_start=2000, year_end=2011,
+                       applications=[Application(2000 + n, 2000 + n, f"{n}.0L")
+                                     for n in range(12)])]
+        text = re.sub(r"<[^>]+>", "", seo.build_body_html(part(fitment=fit), STORE))
+        self.assertIn("and 4 more year/option variants", text)
 
     def test_engine_and_drivetrain_become_tags(self):
         fit = [Fitment(make="Mitsubishi", model="Pickup", year_start=1983, year_end=1985,
@@ -568,3 +588,309 @@ class MetadataBudgets(unittest.TestCase):
         self.assertTrue(description.endswith("."), description)
         self.assertIn("ABS Anti Lock Brake Pump Control Module", description)
         self.assertNotRegex(description, r"\b(?:Test|90-day|Stock)\.$")
+
+
+class SpendingTheWholeTitleBudget(unittest.TestCase):
+    """``title_max_models = 0`` names vehicles until the characters run out.
+
+    A capped title spends characters on the phrase "and 17 more", which names no vehicle
+    and carries no search term. Those suppressed names are the long-tail queries a salvage
+    listing wins on ("2009 Saturn Outlook ABS pump"), so a site with Shopify's 255
+    characters to spend should be spending them on the names themselves.
+    """
+
+    MODELS = (("GMC", "Acadia"), ("Saturn", "Outlook"), ("Buick", "Enclave"),
+              ("Chevrolet", "Traverse"), ("Chevrolet", "Malibu"), ("Buick", "Lacrosse"),
+              ("Saturn", "Aura"), ("Pontiac", "G6"))
+
+    def _wide(self):
+        apps = [Application(year_start=2008, year_end=2011, note="")]
+        return part(
+            part_type="Anti-lock Brake Pts", side=None,
+            fitment=[Fitment(year_start=2008, year_end=2011, make=make, model=model,
+                             applications=apps) for make, model in self.MODELS],
+        )
+
+    def _store(self, cap):
+        return StoreProfile(vendor="Test Yard", city="Testville, TX",
+                            catalog=CatalogProfile(title_max_models=cap))
+
+    def test_a_capped_title_hides_vehicles_behind_a_count(self):
+        title = seo.build_title(self._wide(), self._store(4), compact=True)
+        self.assertIn("and 4 more", title)
+        self.assertNotIn("Pontiac G6", title)
+
+    def test_an_uncapped_title_names_them_instead(self):
+        title = seo.build_title(self._wide(), self._store(0), compact=True)
+        self.assertNotIn("more", title)
+        for make, model in self.MODELS:
+            self.assertIn(model, title, title)
+
+    def test_an_uncapped_title_still_respects_shopifys_limit(self):
+        title = seo.build_title(self._wide(), self._store(0), compact=True)
+        self.assertLessEqual(len(title), seo.TITLE_MAX)
+
+    def test_the_marketplace_budget_still_binds_when_the_model_cap_is_lifted(self):
+        # Lifting the cap is a Shopify decision; it must not push an 80-character
+        # marketplace title over its own budget.
+        title, dropped = seo.fit_title(self._wide(), self._store(0), limit=80,
+                                       compact=True)
+        self.assertLessEqual(len(title), 80)
+        self.assertNotIn("truncated", dropped, title)
+        self.assertIn("Module", title)
+
+    def test_lifting_the_cap_leaves_a_single_vehicle_title_untouched(self):
+        self.assertEqual(seo.build_title(part(), self._store(0)),
+                         seo.build_title(part(), self._store(4)))
+
+
+class AQualifierIsNeverLeftOnAConnector(unittest.TestCase):
+    """A qualifier filtered down to "and" is not a qualifier any more.
+
+    Title qualifiers are filtered against the words the title has already used. When a
+    catalogue note qualifies a switch "w/ mirror and lock" and the part type already says
+    both Mirror and Lock, every meaningful word goes and the connector is left holding the
+    end of the title: "Front Door Window Master Switch Mirror And".
+    """
+
+    def _switch(self, note):
+        return part(
+            part_type="Front Door Switch", side="Left", make="Cadillac", model="CTS",
+            fitment=[Fitment(year_start=2003, year_end=2007, make="Cadillac", model="CTS",
+                             applications=[Application(year_start=2003, year_end=2007,
+                                                       note=note)])],
+        )
+
+    def test_a_title_never_ends_on_a_connector(self):
+        title = seo.build_title(self._switch("w/ mirror and lock"), STORE, compact=True)
+        self.assertFalse(title.rstrip().lower().endswith(" and"), title)
+        self.assertFalse(title.rstrip().lower().endswith(" with"), title)
+
+    def test_a_surviving_qualifier_word_is_still_carried(self):
+        title = seo.build_title(self._switch("w/ memory and lock"), STORE, compact=True)
+        self.assertIn("Memory", title)
+        self.assertFalse(title.rstrip().lower().endswith(" and"), title)
+
+    def test_the_trim_only_touches_the_ends(self):
+        self.assertEqual(seo._trim_connectors(["and", "Heated", "and", "Memory", "with"]),
+                         ["Heated", "and", "Memory"])
+        self.assertEqual(seo._trim_connectors(["and", "with"]), [])
+
+
+class CatalogueAsidesInAModelName(unittest.TestCase):
+    """The model column annotates itself in brackets, and casing must survive them.
+
+    "SAFARI (GMC)" and "BLAZER/JIMMY (full size)" are the catalogue disambiguating a model
+    name that two makes share. Casing the bracketed token whole upper-cased the bracket and
+    lower-cased the word inside it, so a title carried "gmc" and "full Size" in the middle
+    of otherwise clean vehicle names. Capping the model count hid it; spending the whole
+    title budget puts it on the page.
+    """
+
+    def test_a_bracketed_token_keeps_its_own_casing(self):
+        self.assertEqual(seo._fix_token("(GMC)"), "(GMC)")
+        self.assertEqual(seo._fix_token("(full"), "(Full")
+        self.assertEqual(seo._fix_token("size)"), "Size)")
+
+    def test_length_is_measured_without_the_brackets(self):
+        # "(GT)" is five characters but a three-letter acronym, and the acronym rule is
+        # what keeps a trim from being written "Gt".
+        self.assertEqual(seo._fix_token("(GT)"), "(GT)")
+
+    def test_a_model_name_carrying_its_make_says_it_once(self):
+        grouped = seo.group_model_labels(["GMC Safari gmc", "GMC Sierra 1500"])
+        self.assertEqual(grouped, "GMC Safari Sierra 1500")
+
+    def test_the_make_is_still_said_once_per_group(self):
+        grouped = seo.group_model_labels(
+            ["Chevrolet Silverado 1500", "Chevrolet Silverado 2500", "GMC Sierra 1500"])
+        self.assertEqual(grouped, "Chevrolet Silverado 1500 2500 GMC Sierra 1500")
+
+
+class GradeAndMileageInATitle(unittest.TestCase):
+    """Two facts the yard recorded, stated only where they mean something."""
+
+    PROFILE = dict(title_grade="{grade} Grade",
+                   title_mileage_part_types=("engine assembly", "transmiss,transaxle"),
+                   title_mileage_max=200_000)
+
+    def _store(self, **over):
+        return StoreProfile(vendor="Test Yard", city="Testville, TX",
+                            catalog=CatalogProfile(**{**self.PROFILE, **over}))
+
+    def _engine(self, **kw):
+        base = dict(part_type="ENGINE ASSEMBLY", side=None, make="Nissan", model="Altima",
+                    year=2012, grade="A", mileage=142_684, description="2.5L, VIN A, TESTED")
+        base.update(kw)
+        return part(**base)
+
+    def test_grade_and_mileage_are_both_stated(self):
+        title = seo.build_title(self._engine(), self._store(), compact=True)
+        self.assertIn("A Grade", title)
+        self.assertIn("142K Miles", title)
+        self.assertIn("Tested", title)
+
+    def test_mileage_above_the_ceiling_is_withheld(self):
+        title = seo.build_title(self._engine(mileage=243_191), self._store(), compact=True)
+        self.assertNotIn("Miles", title)
+        self.assertIn("A Grade", title)
+
+    def test_the_ceiling_is_inclusive(self):
+        self.assertEqual(seo.title_mileage(self._engine(mileage=200_000), self._store()),
+                         "200K Miles")
+        self.assertEqual(seo.title_mileage(self._engine(mileage=200_001), self._store()), "")
+
+    def test_thousands_are_floored_never_rounded_up(self):
+        # Rounding up would overstate the odometer, which is the one direction a seller
+        # must not err in.
+        self.assertEqual(seo.title_mileage(self._engine(mileage=142_999), self._store()),
+                         "142K Miles")
+
+    def test_a_part_type_mileage_says_nothing_about_omits_it(self):
+        glass = self._engine(part_type="DOOR GLASS, FRONT", side="Left")
+        title = seo.build_title(glass, self._store(), compact=True)
+        self.assertNotIn("Miles", title)
+
+    def test_a_sub_thousand_reading_is_not_published_as_zero(self):
+        self.assertEqual(seo.title_mileage(self._engine(mileage=400), self._store()), "")
+
+    def test_both_are_off_until_the_site_asks_for_them(self):
+        neutral = StoreProfile(vendor="Test Yard", city="Testville, TX")
+        title = seo.build_title(self._engine(), neutral, compact=True)
+        self.assertNotIn("Grade", title)
+        self.assertNotIn("Miles", title)
+
+    def test_a_title_carrying_neither_is_unchanged_by_the_feature(self):
+        self.assertEqual(seo.build_title(part(), self._store()),
+                         seo.build_title(part(), StoreProfile(vendor="Test Yard",
+                                                              city="Testville, TX")))
+
+    def test_the_marketplace_budget_drops_them_before_the_part_type(self):
+        title, _ = seo.fit_title(self._engine(), self._store(), limit=80, compact=True)
+        self.assertLessEqual(len(title), 80)
+        self.assertIn("Engine", title)
+
+    def test_neither_introduces_a_symbol(self):
+        title = seo.build_title(self._engine(), self._store(), compact=True)
+        self.assertFalse(BANNED_IN_TITLE & set(title), title)
+
+
+class AReviewedTitleKeepsItsFacts(unittest.TestCase):
+    """An override carries facts the database does not hold, so it is extended, not replaced.
+
+    The engine titles reviewed through the listing portal state displacement, VIN code and
+    cylinder configuration for parts whose own note in the yard system is empty — those
+    facts came off the portal's detail page and cannot be rebuilt from the database. They
+    are also deliberately narrower than fitment: one engine variant, not every model the
+    interchange group covers. What they predate is the grade and the donor's mileage, and
+    those are facts about this part rather than about the engine family.
+    """
+
+    TITLE = "2011-2017 Chevrolet Equinox 2.4L VIN K LEA Engine Motor Assembly OEM"
+
+    def _store(self):
+        return StoreProfile(vendor="Test Yard", city="Testville, TX",
+                            catalog=CatalogProfile(
+                                title_grade="{grade} Grade",
+                                title_mileage_part_types=("engine assembly",)))
+
+    def _engine(self, **kw):
+        base = dict(part_type="ENGINE ASSEMBLY", side=None, grade="A", mileage=193_722,
+                    description=None)
+        base.update(kw)
+        return part(**base)
+
+    def test_the_reviewed_wording_is_never_rewritten(self):
+        out = seo.extend_override_title(self.TITLE, self._engine(), self._store())
+        self.assertTrue(out.startswith(self.TITLE), out)
+
+    def test_it_collects_the_facts_it_predates(self):
+        out = seo.extend_override_title(self.TITLE, self._engine(), self._store())
+        self.assertIn("A Grade", out)
+        self.assertIn("193K Miles", out)
+
+    def test_mileage_over_the_ceiling_is_still_withheld(self):
+        out = seo.extend_override_title(self.TITLE, self._engine(mileage=253_889),
+                                        self._store())
+        self.assertNotIn("Miles", out)
+
+    def test_nothing_the_title_already_says_is_repeated(self):
+        already = self.TITLE + " A Grade"
+        out = seo.extend_override_title(already, self._engine(mileage=None), self._store())
+        self.assertEqual(out, already)
+
+    def test_a_reviewed_title_is_not_truncated_for_an_addition(self):
+        long_title = "X" * (seo.TITLE_MAX - 3)
+        out = seo.extend_override_title(long_title, self._engine(), self._store())
+        self.assertEqual(out, long_title)
+
+    def test_a_site_asking_for_neither_leaves_the_title_alone(self):
+        neutral = StoreProfile(vendor="Test Yard", city="Testville, TX")
+        self.assertEqual(seo.extend_override_title(self.TITLE, self._engine(), neutral),
+                         self.TITLE)
+
+
+class AnOptionCodeFromThePartsOwnNote(unittest.TestCase):
+    """"opt LFW" is the manufacturer's code for the drivetrain, and buyers search it bare."""
+
+    def _spec(self, note):
+        return seo.part_spec(part(part_type="ENGINE ASSEMBLY", description=note))
+
+    def test_the_code_is_carried_into_the_spec(self):
+        self.assertIn("Opt LFW", self._spec("3.0L (VIN 5, 8th digit, opt LFW)"))
+        self.assertIn("Opt LZE", self._spec("No Oil Filler 3.5 L VIN K Opt LZE"))
+
+    def test_ordinary_prose_is_not_read_as_a_code(self):
+        self.assertEqual(self._spec("optional equipment included"), [])
+        self.assertEqual(self._spec("opt lfw"), [])
+
+    def test_it_sits_beside_the_other_engine_facts(self):
+        self.assertEqual(self._spec("2.2L (VIN W, 8th digit, opt LE8)"),
+                         ["2.2L", "VIN W", "Opt LE8"])
+
+
+class AVinCodeIsNotAStrayInitial(unittest.TestCase):
+    """"VIN" is a label for the character after it, and that character is one letter.
+
+    The qualifier cleaner drops single letters because a truncated catalogue note reads
+    "Driver s". But in "2.4L (VIN B, 8th digit)" the single letter is the engine code — the
+    most useful character in the phrase — so dropping it left the label naming nothing and
+    published "Modulator Assembly 2.4L VIN 8th Digit" and "Generator Gasoline 1.0L VIN".
+    """
+
+    def phrase(self, text):
+        return seo._title_phrase(seo.seo_clean(text), False)
+
+    def test_the_code_after_vin_survives(self):
+        self.assertEqual(self.phrase("2.4L (VIN B, 8th digit)"), "2.4L VIN B")
+        self.assertEqual(self.phrase("VIN K (8th digit)"), "VIN K")
+
+    def test_a_two_character_code_survives(self):
+        self.assertEqual(self.phrase("VIN FP 7th and 8th digit"), "VIN FP")
+
+    def test_a_numeric_code_survives(self):
+        self.assertEqual(self.phrase("VIN 1 4th digit"), "VIN 1")
+        self.assertEqual(self.phrase("VIN 2 11th digit"), "VIN 2")
+
+    def test_a_label_naming_no_code_is_dropped(self):
+        # A trailing "VIN" says less than no label at all.
+        self.assertEqual(self.phrase("1.0L (VIN, 8th digit)"), "1.0L")
+        self.assertEqual(self.phrase("2.4L VIN 8th digit"), "2.4L")
+
+    def test_the_position_alone_never_reaches_a_title(self):
+        self.assertEqual(self.phrase("4th digit"), "")
+        self.assertEqual(self.phrase("7th and 8th digit"), "")
+
+    def test_an_ordinary_stray_initial_is_still_dropped(self):
+        self.assertEqual(self.phrase("Driver s"), "Driver")
+
+    def test_a_title_never_ends_on_a_bare_vin(self):
+        p = part(
+            part_type="Alternator", side=None, make="Ford", model="Focus",
+            fitment=[Fitment(year_start=2015, year_end=2018, make="Ford", model="Focus",
+                             applications=[Application(year_start=2015, year_end=2018,
+                                                       note="gasoline; 1.0L (VIN, 8th digit)")])],
+        )
+        title = seo.build_title(p, STORE, compact=True)
+        self.assertFalse(title.rstrip().upper().endswith("VIN"), title)
+        self.assertNotIn("Digit", title)

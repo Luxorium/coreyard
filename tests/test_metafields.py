@@ -144,6 +144,58 @@ class StructuredFitment(unittest.TestCase):
         rows = fitment_rows(part(fitment=[repeated]), STORE)
         self.assertEqual(rows[0]["note"], "3.5L, VIN 1; Federal emissions")
 
+    def test_a_split_row_keeps_the_years_each_qualifier_belongs_to(self):
+        """Starter 604-00122: the Equinox took the 3.0L for 2010-2012 only.
+
+        The row's span is the union, so the summary used to read "2008-2017 ... 3.6L; 3.0L"
+        and a 2011 owner had no way to tell which of the two was theirs.
+        """
+        equinox = Fitment(make="CHEVROLET TRUCK", model="EQUINOX",
+                          year_start=2008, year_end=2017,
+                          applications=[Application(2008, 2009, "3.6L"),
+                                        Application(2010, 2012, "3.0L"),
+                                        Application(2013, 2017, "3.6L")])
+        rows = fitment_rows(part(fitment=[equinox]), STORE)
+        self.assertEqual(rows[0]["years"], "2008-2017")
+        self.assertEqual(rows[0]["note"],
+                         "2008-2009 — 3.6L; 2010-2012 — 3.0L; 2013-2017 — 3.6L")
+
+    def test_a_qualifier_repeated_in_another_year_run_is_kept(self):
+        """Deduping on the note alone would delete the 2013-2017 3.6L run entirely."""
+        rows = fitment_rows(part(fitment=[
+            Fitment(make="FORD", model="F-150", year_start=2011, year_end=2016,
+                    applications=[Application(2011, 2012, "3.5L"),
+                                  Application(2015, 2016, "3.5L")])]), STORE)
+        self.assertEqual(rows[0]["note"], "2011-2012 — 3.5L; 2015-2016 — 3.5L")
+
+    def test_an_unrestricted_year_run_is_stated_on_a_split_row(self):
+        """A 2012 Impala fits with no qualifier at all; listing only the qualified runs
+        left every note naming a restriction that owner could not meet."""
+        rows = fitment_rows(part(fitment=[
+            Fitment(make="CHEVROLET", model="IMPALA", year_start=2012, year_end=2019,
+                    applications=[Application(2012, 2013, ""),
+                                  Application(2014, 2016, "VIN W (4th digit, Limited)"),
+                                  Application(2017, 2019, "3.6L")])]), STORE)
+        self.assertTrue(rows[0]["note"].startswith("2012-2013; "))
+
+    def test_a_row_that_is_not_split_states_qualifiers_without_years(self):
+        """The years column already says 2011-2014; repeating it in every note is noise."""
+        rows = fitment_rows(part(fitment=[fitment(notes=("4x4", "California"))]), STORE)
+        self.assertEqual(rows[0]["note"], "4x4; California")
+
+    def test_a_row_with_no_qualifiers_at_all_has_an_empty_note(self):
+        rows = fitment_rows(part(fitment=[fitment(notes=("",))]), STORE)
+        self.assertEqual(rows[0]["note"], "")
+
+    def test_a_truncated_note_says_that_it_was_truncated(self):
+        """A dropped year run reads as an excluded one, so the cut has to be visible."""
+        many = Fitment(make="FORD", model="F-150", year_start=2000, year_end=2011,
+                       applications=[Application(2000 + n, 2000 + n, f"{n}.0L")
+                                     for n in range(12)])
+        note = fitment_rows(part(fitment=[many]), STORE)[0]["note"]
+        self.assertEqual(len(note.split("; ")), 9)
+        self.assertTrue(note.endswith("; +4 more"))
+
     def test_placeholder_years_and_make_less_artifacts_do_not_reach_the_theme(self):
         p = part(fitment=[
             fitment("MAZDA", "3", 2014, 2023),

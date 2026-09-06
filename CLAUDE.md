@@ -1,7 +1,11 @@
 # CLAUDE.md
 
-Guidance for Claude Code when working in this repository. Read `AGENTS.md` first;
-this file adds architecture and operational invariants that are easy to violate.
+Read [AGENTS.md](AGENTS.md), including its Agent Workflow section, for the shared
+contributor and execution conventions used with GPT-6 Astra in Codex and other coding
+agents. This file retains its `CLAUDE.md` name for Claude Code discovery and adds
+architecture and operational invariants. Keep shared workflow guidance in `AGENTS.md`
+to avoid conflicting copies. Model selection belongs in the coding client's
+configuration; CoreYard itself continues to run without an LLM.
 
 ## Project Boundaries
 
@@ -223,6 +227,59 @@ an over-long title gives up instead of counting drops. Counting alone let a trun
 naming four vehicles beat an intact one naming a single vehicle — so the cheaper-looking
 answer was the one that stopped saying what the part is.
 
+**How many vehicles a title names is a character budget, not a count.**
+`profile.title_max_models` is a hard ceiling on vehicle names, and **0 means the only
+ceiling is the destination's own limit** — 255 on Shopify, 80 on the listing portal. The
+CoreYard default stays at 4 because lifting it rewrites every multi-vehicle title a site has
+published, which is an installation's decision rather than something an upgrade does to a
+live catalogue; a yard with a rich fitment catalogue should set 0 in its profile. The names
+a cap suppresses are exactly the long-tail searches a salvage listing wins on, and the
+phrase they were replaced with ("and 17 more") names no vehicle and carries no search term.
+`fit_title` bounds its scan by the labels that exist and by what the budget could hold, so a
+capped site's titles are byte-for-byte unchanged.
+
+Two rules keep an uncapped title readable, and both only became visible once titles stopped
+stopping at four vehicles. A title qualifier is filtered against the words the title has
+already used, and a phrase reduced to a bare connector is dropped rather than left holding
+the end of the line ("Master Switch Mirror And"). And `seo._fix_token` cases a token's
+alphanumeric *core*, because the model column annotates itself in brackets — "SAFARI (GMC)",
+"BLAZER/JIMMY (full size)" — and casing the bracket as if it were a letter published "(gmc)"
+and "full Size" in the middle of otherwise clean vehicle names.
+
+A third rule protects the VIN code. `_title_phrase` drops single letters because a truncated
+catalogue note reads "Driver s" — but in "2.4L (VIN B, 8th digit)" the single letter *is* the
+engine code, the most useful character in the phrase. Dropping it left the label naming
+nothing, which published as "Modulator Assembly 2.4L VIN 8th Digit". So a letter directly
+after "VIN" is kept, `_VIN_POSITION` strips the counter's bookkeeping ("8th digit", "7th and
+8th digit" — `_NOISE_PHRASE` only ever caught a phrase that was *entirely* an ordinal), and
+`_drop_orphan_vin` removes a trailing "VIN" that names no code, because a label pointing at
+nothing says less than no label at all.
+
+**What a title may state about condition is the yard's record, never an inference.**
+`seo.title_condition` reads the part's own note; `seo.title_grade` states the yard's grade
+under the site's own wording (`title_grade`, e.g. "{grade} Grade" -> "A Grade"); and
+`seo.title_mileage` states the donor's odometer. All three default to silent, and the
+mileage one is doubly gated because the source system stamps the donor's mileage on *every*
+part pulled from it — the number exists for a door glass as surely as for the engine, and on
+the glass it is noise. So it is stated only for the part types in
+`title_mileage_part_types`, and only at or below `title_mileage_max`; above that the number
+argues against the part and a seller may reasonably say nothing. Mileage renders in
+thousands ("142K Miles"), floored and never rounded up, because the exact figure needs a
+comma and a comma is one of the symbols `seo_clean` strips — "142,684" would reach a shopper
+as "142 684".
+
+**A reviewed title is extended, never replaced.** `overrides.py` titles win over the
+renderer because they hold facts the database does not: the engine titles reviewed through
+the listing portal state displacement, VIN code and cylinder configuration for parts whose
+note in the yard system is *empty*, read off the portal's detail page. They are also
+deliberately narrower than fitment — one engine variant, not every model the interchange
+group covers, which for a 5.2L V8 is the difference between "1998-2003 Dodge 1500 Van" and
+eleven models across 1992-2003. What they predate is the grade and the donor's mileage, and
+those are facts about *this part* rather than about the engine family, so
+`seo.extend_override_title` appends them to the reviewed wording instead of losing them.
+Nothing already said is repeated, and a title that would overflow the budget is returned
+untouched — a reviewed decision is not worth truncating for an addition.
+
 There are four related publishing workflows, plus three that operate on what is already on
 the store:
 
@@ -308,6 +365,45 @@ The delta path has its own invariants, and they are not the full path's:
 - The delta resolver lists photos per part while the full resolver lists the share once.
   Both must yield identical filenames and order, or a delta run re-fingerprints everything
   it touches.
+
+### Resolving fitment, and not resolving it twice
+
+Fitment is one query per interchange **group**, not per part. `InterchangeResolver` has
+always cached within a run, but this installation has 16,239 distinct groups behind 26,858
+parts — a reuse factor of 1.65 — so that saves about a third and leaves 16,239 round trips
+over the named pipe, near enough an hour, paid again by every command that renders a title.
+
+`yms/fitment_cache.py` keeps those answers between runs (48.9s -> 0.1s measured on 400
+parts). It is sound because the applications table is the catalogue's *reference data*: it
+changes when the catalogue is updated, not when a car arrives or a part sells. Four rules
+make it safe to leave on:
+
+- **The raw catalogue rows are cached, never the parsed fitment.** Parsing is local, cheap
+  and pure — and it is the half of this pipeline that keeps getting *fixed*: a model number
+  read as a year, a make-less row widening a title's years, a qualifier cut where the
+  restriction lives. Caching parsed output would hide the next such fix behind a stale cache
+  until somebody remembered to clear it.
+- **The site's own SQL is fingerprinted.** Edit `interchange_applications` or
+  `interchange_makes` in `schema.json` and every entry is dropped, because the stored rows
+  answered a different question.
+- **Entries expire** (`COREYARD_FITMENT_CACHE_DAYS`, default 30), so a catalogue update is
+  picked up without anyone remembering to act.
+- **A failed query is never stored.** An empty result is — a part number that fits nothing is
+  a real answer — but a transport blip must not be frozen in as "this part fits nothing".
+- **Losing the cache never loses the run.** `get` and `put` swallow every `sqlite3.Error`:
+  a cache that cannot answer is indistinguishable from one with nothing to say, and the
+  caller has a database to fall back on. `summary()` reports a cache that gave up, because a
+  silent cache and a broken one look identical from outside and only one of them is fine.
+
+Every scheduled job on a host like this resolves fitment — a five-minute `sync delta`, the
+listing-portal title and price workers, the hourly sync — so **several processes share this
+file and contention is the normal case**. WAL allows exactly one writer, so `put` commits on
+the spot rather than batching. Holding one transaction across hundreds of round trips is
+what starved a `sync delta` and killed a two-hour repair at part 1,000 of 26,660 with
+"database is locked"; the write is a single small row and the caller has just waited on a
+network query, so committing immediately costs nothing measurable.
+
+The cache is an optimisation, not a record: deleting the file costs one slow run.
 
 ### Scopes and domain fingerprints
 
@@ -407,12 +503,12 @@ entirely.
   it from one listing of each folder and the delta path lists per key, but the choosing, the
   trimming and the spelling are the same code — the delta invariant above now has two folders
   to get identically right instead of one.
-- **A part inherits only the opening frames** (`images.donor_photo_limit`,
+- **A part inherits the configured donor frames** (`images.donor_photo_limit`,
   `STORE_DONOR_PHOTO_LIMIT`, default 6), which are the general views. A donor shoot documents
   a whole car — a median of 16 frames and up to 99 — because it was taken to record a vehicle,
   not to sell one bracket off it. The resolver and the publisher must trim to the same number,
   or the publisher attaches a set the fingerprint did not cover and the part republishes
-  forever.
+  forever. Set `STORE_DONOR_PHOTO_LIMIT=0` to use every available donor frame in both paths.
 - **Each donor frame is uploaded once**, not once per part. Roughly seven parts come off each
   donor, so staging its frames per product would send the same photograph seven times.
   `state.donor_media` maps (donor key, filename) to the Shopify file id that `FileSetInput`
@@ -506,6 +602,13 @@ reaches any of it, and nothing in the Shopify pipeline imports it.
 
 ### Keeping up, unattended
 
+`ebay auto-titles` is the title-only queue worker for frequent scheduling. It scans complete
+part-type grids, resolves identities with the shared linker, and limits fitment work and
+saves to a bounded batch. Source and renderer fingerprints skip verified work; a daily
+recheck catches fitment-only changes. New arrivals precede the backlog and retries rotate.
+The worker rechecks unlisted membership and reads back titles before checkpointing success.
+It neither changes prices nor exports short titles into the Shopify override file.
+
 `ebay daily` is the whole chain as one command, and it is a *driver*: every decision is made
 by the module that already owned it, so nothing in it can be tested only through it. It
 walks part types rather than the tab as a whole, because the grid will not serve a whole tab
@@ -598,9 +701,15 @@ which a person sees what a batch of portal changes says before buyers do.
   (`EBAY_ASPECTS_FILE`). A value that is not derivable with confidence is left unset, and
   `--apply` refuses outright without the metadata: eBay ranks on aspect *match* and buyers
   filter on it, so a wrong aspect is worse than a missing one.
-- A resolved listing's proposed price is the exact positive source price, formatted to
-  cents. Missing and nonpositive source prices are held. There is no override, floor,
-  rounding grid, or second calculation to disagree with the source system.
+- A resolved listing's base price is the positive source price. `ebay/pricing.py` applies
+  the configured marketplace markup, then adds the Shopify rate for free-shipping listings.
+  Pickup adds no shipping; freight selects its mapped large/medium policy and charges
+  shipping separately. Missing prices, unknown shipping and unshippable free-shipping
+  listings are held. Shopify prices remain unchanged. Never compound markup on portal prices.
+- `auto-prices --apply --revise-listed` saves and verifies price/policy changes and uses
+  the guarded push surface for existing listed items only. Pending revision intent is
+  checkpointed before writes so interrupted work can resume. Unlisted items are never
+  submitted by the price worker.
 
 ### Where this channel meets Shopify
 
@@ -646,7 +755,10 @@ defaults to "tag and note only".
 
 ## Change Checklist
 
-Before handoff, run the full unit suite, neutrality check, and `git diff --check`.
+For documentation-only changes, review the diff, check references, and run the neutrality
+check and `git diff --check`. For code or behavior changes, also run the full offline
+unit suite. Once these pass, repeat or broaden checks only for a change, failure, or
+unresolved concern, as described in `AGENTS.md`.
 Explain any schema/config assumptions and any storefront-visible output changes. Call
 out changes that affect handles, fingerprints, retirement, API fields, webhook PII,
 source writes, or tax behavior. Keep `README.md`, `.env.example`, `schema.example.json`,

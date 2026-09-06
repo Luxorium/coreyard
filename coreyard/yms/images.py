@@ -10,6 +10,12 @@ already validated against the server.
 The trailing underscore in the ``{r_number}_*`` mask anchors the match, so R# ``1000``
 does not pick up ``10001_01.jpg`` and R# ``10002`` does not pick up ``100020_01.jpg``.
 
+``delete_inventory_images`` removes specific frames for one R# — for a photo that should
+never have reached the share, such as a snapshot of a person. It only ever deletes names
+the live listing holds whose stem is exactly that R#, backs each up first, and plans
+unless told to apply. The share is the source of truth, so a ``sync --r-number <R#>``
+afterwards is what carries the removal to the store.
+
 A second folder, keyed by the source system's own donor-vehicle identifier, holds photographs
 of the car a part came off. It is read only for parts the yard never photographed
 individually, and every read goes through the same listing, stamping and ordering code as the
@@ -40,11 +46,12 @@ _IMAGE_RE = re.compile(r".+\.(jpg|jpeg|png)$", re.IGNORECASE)
 DONOR_PHOTO_LIMIT = 6
 
 
-def donor_photo_limit() -> int:
-    """How many donor frames one part may inherit. ``STORE_DONOR_PHOTO_LIMIT`` overrides."""
+def donor_photo_limit() -> int | None:
+    """Shared slice bound; zero config selects every donor frame."""
     from coreyard.config import _get
     try:
-        return max(1, int(_get("STORE_DONOR_PHOTO_LIMIT", "") or DONOR_PHOTO_LIMIT))
+        limit = int(_get("STORE_DONOR_PHOTO_LIMIT", "") or DONOR_PHOTO_LIMIT)
+        return None if limit == 0 else max(1, limit)
     except (TypeError, ValueError):
         return DONOR_PHOTO_LIMIT
 
@@ -249,6 +256,72 @@ class SmbImageStore:
             self._run(f'lcd "{dest_dir}"; cd "{subdir}"; {gets}', cwd=str(dest_dir))
         return [dest_dir / n for n in names if (dest_dir / n).exists()]
 
+    # -- deletion --------------------------------------------------------------
+    def resolve_inventory_targets(self, r_number: str, wanted: list[str]) -> list[str]:
+        """Turn ``wanted`` (bare sequence numbers or filenames) into real filenames.
+
+        Every returned name is one the live listing for this R# actually holds and whose
+        stem is exactly ``r_number`` — a caller cannot name a path, a wildcard, or another
+        part's photo. A token that matches nothing raises, because a delete that silently
+        skips a fat-fingered frame is worse than one that stops.
+        """
+        present = self.list_inventory_images(r_number)
+        by_seq: dict[int, str] = {}
+        for name in present:
+            m = re.search(r"_(\d+)\.", name)
+            if m:
+                by_seq[int(m.group(1))] = name
+        chosen: list[str] = []
+        missing: list[str] = []
+        for token in wanted:
+            token = str(token).strip()
+            if token in present:
+                chosen.append(token)
+                continue
+            if token.isdigit() and int(token) in by_seq:
+                chosen.append(by_seq[int(token)])
+                continue
+            missing.append(token)
+        if missing:
+            raise SmbError(
+                f"R#{r_number}: no photo on the share for {missing} "
+                f"(have sequences {sorted(by_seq)})"
+            )
+        # De-duplicate while keeping the share's own order.
+        return [n for n in present if n in set(chosen)]
+
+    def delete_inventory_images(self, r_number: str, wanted: list[str], *,
+                                apply: bool = False,
+                                backup_dir: Path | None = None) -> dict:
+        """Remove specific photos for one R# from the share.
+
+        ``wanted`` is sequence numbers (``"04"``, ``"4"``) or full filenames. Nothing is
+        removed unless ``apply`` is true; the default is a plan. When ``apply`` and
+        ``backup_dir`` are both given, the matched files are downloaded there first, so an
+        accidental removal can be restored with a plain ``put``.
+
+        Returns ``{"r_number", "targets", "backed_up", "deleted", "still_present"}``.
+        """
+        targets = self.resolve_inventory_targets(r_number, wanted)
+        result = {"r_number": r_number, "targets": targets,
+                  "backed_up": [], "deleted": [], "still_present": []}
+        if not apply or not targets:
+            return result
+        if backup_dir is not None:
+            result["backed_up"] = [str(p) for p in
+                                   self._fetch(self.cfg.inventory_subdir, targets, backup_dir)]
+        dels = "; ".join(f'del "{n}"' for n in targets)
+        self._run(f'cd "{self.cfg.inventory_subdir}"; {dels}')
+        after = set(self.list_inventory_images(r_number))
+        result["deleted"] = [n for n in targets if n not in after]
+        result["still_present"] = [n for n in targets if n in after]
+        if result["still_present"]:
+            raise SmbError(
+                f"R#{r_number}: the share still lists {result['still_present']} after delete "
+                f"(the account may lack delete rights on {self._unc()})"
+            )
+        return result
+
 
 def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """Populate a parser with the per-part photo lookup flags."""
@@ -257,13 +330,42 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     ap.add_argument("--fetch", action="store_true",
                     help="also download the photos to out/images/<R#>/")
     ap.add_argument("--dest", type=Path, default=Path("out/images"),
-                    help="where --fetch writes (default out/images)")
+                    help="where --fetch and --delete's backup write (default out/images)")
+    ap.add_argument("--delete", metavar="SEQ", nargs="+", default=None,
+                    help="remove these photos for the single R# given — sequence numbers "
+                         "(04 10 11) or filenames. Plans only unless --apply. The share is "
+                         "the source of truth; run `coreyard sync --r-number <R#>` after to "
+                         "propagate the removal to the store.")
+    ap.add_argument("--apply", action="store_true",
+                    help="with --delete, actually remove the files (a backup is fetched "
+                         "to <dest>/<R#>/ first)")
     ap.set_defaults(func=run)
     return ap
 
 
 def run(args) -> int:
     store = SmbImageStore()
+
+    if args.delete is not None:
+        if len(args.r_numbers) != 1:
+            print("--delete works on exactly one R# at a time", flush=True)
+            return 2
+        r_number = args.r_numbers[0]
+        res = store.delete_inventory_images(
+            r_number, args.delete, apply=args.apply,
+            backup_dir=(args.dest / r_number) if args.apply else None,
+        )
+        verb = "deleting" if args.apply else "would delete"
+        print(f"R#{r_number}: {verb} {len(res['targets'])} photo(s): {res['targets']}")
+        if not args.apply:
+            print("plan only — nothing removed. Re-run with --apply.")
+            return 0
+        if res["backed_up"]:
+            print(f"   backed up {len(res['backed_up'])} file(s) to {args.dest / r_number}/")
+        print(f"   removed from the share: {res['deleted']}")
+        print(f"   now run: coreyard sync --r-number {r_number}")
+        return 0
+
     for r_number in args.r_numbers:
         names = store.list_inventory_images(r_number)
         print(f"R#{r_number}: {len(names)} image(s) -> {names}")

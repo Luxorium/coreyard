@@ -370,7 +370,7 @@ These policy switches live in `.env` rather than in a file:
   publishing and the audit at once, so those four cannot disagree about what is listable.
   Off by default, so upgrading never silently changes which parts you list.
 * `STORE_DONOR_PHOTO_LIMIT=6` caps how many of a donor vehicle's frames an unphotographed part
-  inherits (see below).
+  inherits (see below). Set `0` to use all available donor photos.
 * `STORE_PUBLICATIONS=Online Store` puts activated products on a sales channel. A product's
   status and its channel publication are different things in Shopify and only the second
   makes its URL resolve — an ACTIVE product on no channel is a 404 to shoppers and to Google.
@@ -465,9 +465,22 @@ bin/coreyard ebay titles out/ebay-engines.json \
 bin/coreyard ebay apply --titles out/ebay-engine-titles.json   # dry run
 ```
 
-Title plans are optional reviewed inputs. Prices are not: Shopify and the portal receive the
-exact positive price on the matched source part. There is no price override file or
-second pricing rule in CoreYard.
+Title plans are optional reviewed inputs. Shopify receives the matched source part's
+unchanged positive price. Marketplace pricing can apply `EBAY_PRICE_MARKUP_PERCENT`
+(default `0`). With `EBAY_INCLUDE_SHOPIFY_SHIPPING=true`, free-shipping listings add their
+Shopify shipping rate **after** markup. Pickup adds nothing; freight charges shipping
+through its mapped policy. Prices are always recomputed from the source, never compounded
+from the portal price. No price override file is used.
+
+`ebay auto-prices --apply --revise-listed` saves and verifies bounded price/policy batches,
+then submits revisions for already-listed items through the guarded push surface.
+Unlisted items receive saved prices but are not submitted. The worker rotates part types,
+uses complete shipping-policy-filtered grids, and checkpoints pending revisions.
+Shipping filters and freight-group-to-policy IDs live in private `portal.json` entries
+under `filters`: `shipping_pickup`, `shipping_free`, `shipping_policy`, and
+`freight_policy_by_group`. Structured query placeholders are `{part_type}` and `{policy_id}`;
+the protocol field IDs stay in that map. Unknown shipping policies are excluded.
+The shipping policy field must also be mapped under `fields.shipping_policy`.
 
 Item specifics are a separate pass, because eBay ranks on aspect *match* and buyers filter
 on it:
@@ -487,6 +500,24 @@ reports rather than a hand-kept list:
 bin/coreyard ebay daily              # titles + exact source prices; dry run
 bin/coreyard ebay daily --apply      # save them in the portal
 ```
+
+For continuous title maintenance of the unlisted queue, use:
+
+```bash
+bin/coreyard --lock ebay --timeout 14m ebay auto-titles
+bin/coreyard --lock ebay --timeout 14m ebay auto-titles --apply
+```
+
+This checks at most 100 listings per pass, using the shared renderer with the portal's
+80-character budget. New arrivals take priority over the initial backlog; failed or held
+entries rotate so they cannot block it. Verified titles are skipped until their source
+facts, portal title or renderer changes, with a daily fitment recheck. Saves are restricted
+to listings still in the unlisted tab and are read back before progress is recorded.
+The command changes titles only and does not export Shopify overrides. Its private queue
+state and latest report live in `out/ebay-title-state.json` and `out/ebay-auto-titles.json`.
+`--batch-size` selects the maximum work per pass; exceeding `--cap` refuses before writes.
+A scheduler may invoke it every five minutes with the shared `ebay` lock; overlapping
+ticks skip while the preceding pass finishes.
 
 It stops at the portal and never calls submit: an unattended job is exactly the thing that
 must not close the review window.
@@ -631,6 +662,8 @@ publishes with no images exactly as before, and the extra share listing is skipp
 A part inherits only the opening frames — the general views — because a donor shoot documents
 a whole car (a median of 16 frames, sometimes 99) and was taken to record a vehicle, not to
 sell one bracket off it. `STORE_DONOR_PHOTO_LIMIT` sets how many; the default is 6.
+Set it to `0` to inherit every donor frame. Scheduled full photo scans detect newly added
+frames as well as replacements; parts with their own photos continue to use those.
 
 Each donor frame is uploaded to Shopify **once** and referenced by every part off that donor,
 rather than staged per product — roughly seven parts come off each car, so the naive version

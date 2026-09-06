@@ -255,8 +255,17 @@ def _preflight(client, records: list[dict], *, tab: str, rows: int,
     live = {str(item["listing_id"]): item
             for item in client.iter_listings(tab=tab, rows=rows, part_type=part_type)}
     errors = []
+    if client.portal.filters.get("no_images"):
+        from coreyard.ebay.photos import no_image_listings
+
+        missing_photos = {str(item["listing_id"]) for item in
+                          no_image_listings(client, tab=tab, rows=max(rows, 3000))}
+    else:
+        missing_photos = set()
     for record in records:
         listing_id = str(record["listing_id"])
+        if listing_id in missing_photos:
+            errors.append(f"{listing_id}: no part or donor photos; submission blocked")
         row = live.get(listing_id)
         if row is None:
             errors.append(f"{listing_id}: no longer present on {tab}")
@@ -317,7 +326,13 @@ def delist(args) -> int:
     load_env()
     portal = load_portal(args.portal)
     client = PortalClient(portal)
-    if args.part_type:
+    if getattr(args, "no_images", False):
+        from coreyard.ebay.photos import no_image_listings
+
+        if args.tab != "listed" or args.part_type or args.listings:
+            raise ValueError("--no-images requires the listed tab and no other targets")
+        records = no_image_listings(client, rows=args.rows)
+    elif args.part_type:
         filter_name, filter_value = portal.part_type_filter(args.part_type)
         data = client.grid(tab=args.tab, rows=args.rows,
                            **{filter_name: filter_value})
@@ -349,6 +364,15 @@ def delist(args) -> int:
     except ApplyGuard as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 1
+    if getattr(args, "no_images", False):
+        # Re-read just before ending: photos added since planning protect the item.
+        still_missing = {str(row["listing_id"]) for row in
+                         no_image_listings(client, rows=args.rows)}
+        records = [row for row in records
+                   if str(row["listing_id"]) in still_missing]
+        if not records:
+            print("No reviewed listings still lack photos.")
+            return 0
     message = client.end_listings([item["listing_id"] for item in records], tab=args.tab)
     print(message or f"Ended {len(records)} listings.")
     return 0
@@ -388,6 +412,7 @@ def daily(args) -> int:
     """
     from coreyard.config import load_store
     from coreyard.ebay import daily as driver
+    from coreyard.ebay.pricing import PricePolicy
     from coreyard.ebay import workflow
     from coreyard.yms.db import connect
     from coreyard.yms.interchange import InterchangeResolver
@@ -446,6 +471,7 @@ def daily(args) -> int:
 
     result = driver.plan(
         rows, catalogue, store, details=details, title_limit=args.title_limit,
+        price_policy=PricePolicy.configured(),
     )
     print(result.summary())
 
@@ -497,6 +523,11 @@ def daily(args) -> int:
 
 def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="ebay_action", required=True)
+    from coreyard.ebay import auto_prices, auto_titles
+    auto_prices.add_arguments(sub.add_parser(
+        "auto-prices", help="maintain configured marketplace prices and freight policies"))
+    auto_titles.add_arguments(sub.add_parser(
+        "auto-titles", help="maintain unlisted 80-character titles in verified batches"))
     command = sub.add_parser(
         "daily", help="offer canonical titles and source prices to the portal")
     command.add_argument("--tab", choices=TABS, default="unlisted")
@@ -596,6 +627,8 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
     command = sub.add_parser("delist", help="end explicit live eBay listings")
     command.add_argument("listings", nargs="?", default="")
+    command.add_argument("--no-images", action="store_true",
+                         help="end only live listings matching the no-image filter")
     command.add_argument("--part-type")
     command.add_argument("--tab", choices=TABS, default="listed")
     command.add_argument("--rows", type=int, default=1000)

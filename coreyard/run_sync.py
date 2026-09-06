@@ -331,7 +331,7 @@ def cmd_delta(args) -> int:
 
         if args.dry_run:
             print(f"Dry run: would upsert {len(todo)} product(s) "
-                  f"({len(set(diff.image_changed) & todo_keys)} photo refresh), "
+                  f"({len(_photo_refreshes(diff, args, todo_keys, todo))} photo refresh), "
                   f"revive {len(revivals)}, and retire {len(retire)}.")
             print("Dry run: cursor NOT advanced.")
             return 0
@@ -351,7 +351,7 @@ def cmd_delta(args) -> int:
 
         # A part whose photos moved needs its media rebuilt even when the fingerprint moved
         # for an unrelated reason, so both signals are unioned.
-        needs_photos = set(diff.image_changed) | changes.photo_changed
+        needs_photos = _photo_refreshes(diff, args, todo_keys, todo) | changes.photo_changed
         revived: set[str] = set()
         published_ok: set[str] = set()
         checkpointed: set[str] = set()
@@ -476,7 +476,7 @@ def _selected(diff, args) -> set[str]:
     return set(diff.changed_in(scope))
 
 
-def _photo_refreshes(diff, args, selected: set[str]) -> set[str]:
+def _photo_refreshes(diff, args, selected: set[str], parts=()) -> set[str]:
     """Media work a scoped run owns.
 
     An inventory or catalogue run may touch a part whose photos also moved, but that does
@@ -486,7 +486,13 @@ def _photo_refreshes(diff, args, selected: set[str]) -> set[str]:
     """
     if getattr(args, "scope", None) in {"inventory", "catalog"}:
         return set()
-    return set(diff.image_changed) & selected
+    # Bulk-created donor listings can already have media while lacking sync state.
+    # Establish their complete shared photo set before recording its fingerprint;
+    # otherwise their old limited set would be recorded as current forever.
+    added = set(diff.added)
+    donor_baselines = {p.uid() for p in parts
+                       if p.uid() in added and p.uses_donor_photos}
+    return (set(diff.image_changed) | donor_baselines) & selected
 
 
 def _committable(current, images, previous, previous_images, diff, published_ok):
@@ -639,7 +645,7 @@ def cmd_sync(args) -> int:
             # "as a preview" is not.
             selected = _selected(diff, args)
             upserts = 0 if args.retire_only else len(selected)
-            photo_refreshes = _photo_refreshes(diff, args, selected)
+            photo_refreshes = _photo_refreshes(diff, args, selected, parts)
             print(f"Dry run: would upsert {upserts} product(s) "
                   f"({0 if args.retire_only else len(photo_refreshes)} "
                   f"photo refresh), "
@@ -669,7 +675,7 @@ def cmd_sync(args) -> int:
 
             # Media is torn down and re-uploaded only for parts whose photo set actually
             # moved, and only among the ones this run is touching.
-            needs_photos = _photo_refreshes(diff, args, selected)
+            needs_photos = _photo_refreshes(diff, args, selected, todo)
             if args.retire_only:
                 print(f"Retire-only: skipping {len(todo)} upsert(s).")
                 todo = []

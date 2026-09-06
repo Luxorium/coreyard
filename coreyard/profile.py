@@ -133,7 +133,35 @@ class CatalogProfile:
     # "OEM" is a strong search term but it eats title characters, and some sellers prefer it
     # out of the customer-facing title. It stays in the tags and description either way.
     title_include_oem: bool = False
+
+    # How many vehicles a title may name, or **0 for "as many as the character budget
+    # holds"**. The budget is the destination's: 255 on Shopify, 80 on the listing portal,
+    # so one setting fills a long title and still fits a short one.
+    #
+    # The default is a count rather than the budget because raising it rewrites every
+    # multi-vehicle title a site has published, and that is an installation's decision to
+    # take deliberately, not something an upgrade should do to a live catalogue. A yard
+    # whose fitment catalogue is rich enough to be worth it should set 0: the names it
+    # suppresses are the exact long-tail searches ("2009 Saturn Outlook ABS pump") that a
+    # salvage listing wins on.
     title_max_models: int = 4
+
+    # The condition grade in the *title*, as a template over ``{grade}`` — "{grade} Grade"
+    # renders "A Grade". Empty keeps the grade out of the title; it is published as a
+    # metafield and stated in the description either way. Off by default because a grade
+    # vocabulary is the yard's own (A/B/C, 1/2/3, or words), and a title is the wrong place
+    # to publish a code shoppers at that yard have no key to.
+    title_grade: str = ""
+
+    # Donor mileage in the title, for the part types where mileage is the thing a buyer
+    # judges the part by. An engine's mileage is most of its value; a door glass's is noise,
+    # and the source system records one for both. Source part types, lower-cased; empty
+    # means the mileage never reaches a title.
+    title_mileage_part_types: tuple[str, ...] = ()
+
+    # The mileage at or below which stating it helps. Above it the number argues against the
+    # part, and the yard would rather say nothing than lead with it.
+    title_mileage_max: int = 200_000
 
     # Tags appended to every product, and whether the yard's own name is one of them.
     tags: tuple[str, ...] = ("Used OEM",)
@@ -185,6 +213,8 @@ DEFAULT_PROFILE = CatalogProfile()
 # unknown key is an error the operator sees now rather than a policy that silently never
 # applied.
 _TUPLE_KEYS = {"tags", "preserved_tag_prefixes"}
+# Tuples matched against source data, so they are folded to the case the matcher uses.
+_LOWER_TUPLE_KEYS = {"title_mileage_part_types"}
 
 
 def from_dict(data: Mapping[str, Any]) -> CatalogProfile:
@@ -206,6 +236,8 @@ def from_dict(data: Mapping[str, Any]) -> CatalogProfile:
             kwargs[key] = AuditPolicy.from_dict(value or {})
         elif key in _TUPLE_KEYS:
             kwargs[key] = tuple(str(v).strip() for v in value if str(v).strip())
+        elif key in _LOWER_TUPLE_KEYS:
+            kwargs[key] = tuple(str(v).strip().lower() for v in value if str(v).strip())
         elif key in {"part_types", "part_type_notices"}:
             kwargs[key] = {str(k).strip().lower(): str(v).strip()
                            for k, v in (value or {}).items() if str(k).strip()}

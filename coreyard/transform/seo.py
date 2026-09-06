@@ -117,9 +117,24 @@ _REAL_ACRONYMS = {
 }
 
 
+# A token's own characters, without whatever punctuation the catalogue wrapped it in.
+# The model column annotates itself in parentheses — "SAFARI (GMC)", "BLAZER/JIMMY (full
+# size)" — and casing the raw token upper-cases the bracket and lower-cases the word
+# inside it, so "(GMC)" came out "(gmc)" and stayed that way into the title. Length is
+# measured on the core too, or "(GT)" is five characters and misses the acronym rule.
+_TOKEN_CORE = re.compile(r"^(\W*)(.*?)(\W*)$", re.S)
+
+
 def _fix_token(tok: str) -> str:
     if not tok:
         return tok
+    lead, core, trail = _TOKEN_CORE.match(tok).groups()
+    if not core:
+        return tok
+    return lead + _fix_word(core) + trail
+
+
+def _fix_word(tok: str) -> str:
     if tok.upper() in _NOT_ACRONYM:
         return tok[:1].upper() + tok[1:].lower()
     if any(c.isdigit() for c in tok):     # 1500, F150, CK1500
@@ -285,19 +300,28 @@ def model_without_make(make: Optional[str], model: Optional[str]) -> Optional[st
     return cleaned_model
 
 
-def _model_labels(part: Part) -> list[str]:
-    """Deduped 'Make Model' labels from fitment (falls back to the part's own vehicle)."""
+def _labelled_fitments(part: Part) -> list[tuple[str, list]]:
+    """Deduped 'Make Model' labels, each with the catalogue rows it was built from.
+
+    A title names some of these labels and states one year span beside them. The span has
+    to be measured over the rows behind the labels it actually named, so the two are kept
+    together here rather than derived twice from the part — see :func:`named_year_span`.
+    """
+    grouped: dict[str, list] = {}
     labels: list[str] = []
-    seen: set[str] = set()
     for f in display_fitments(part):
         lab = _vehicle_label(clean_make(f.make), clean_model(f.model))
-        if lab and lab.lower() not in seen:
-            seen.add(lab.lower())
+        if not lab:
+            continue
+        if lab.lower() not in grouped:
+            grouped[lab.lower()] = []
             labels.append(lab)
+        grouped[lab.lower()].append(f)
     if not labels:
+        # No catalogue fitment: the donor vehicle is the only thing this part is known to
+        # fit, and it carries no catalogue row — its year comes off the part itself.
         lab = _vehicle_label(clean_make(part.make), clean_model(part.model))
-        if lab:
-            labels.append(lab)
+        return [(lab, [])] if lab else []
     # A fitment row with no model yields the bare make, which says nothing next to the
     # specific labels beside it — "Volvo, Volvo 70 Series, Volvo 60 Series" spends title
     # space to repeat what the next label already says.
@@ -305,7 +329,12 @@ def _model_labels(part: Part) -> list[str]:
     if specific:
         labels = [l for l in labels
                   if " " in l or not any(s.lower().startswith(l.lower() + " ") for s in specific)]
-    return labels
+    return [(l, grouped[l.lower()]) for l in labels]
+
+
+def _model_labels(part: Part) -> list[str]:
+    """Deduped 'Make Model' labels from fitment (falls back to the part's own vehicle)."""
+    return [label for label, _ in _labelled_fitments(part)]
 
 
 # Some interchange catalogues mark an open-ended run with a placeholder year rather than a
@@ -360,6 +389,13 @@ def fitment_year_label(entry) -> str:
     return _year_label(*fitment_year_span(entry))
 
 
+# How many applications one fitment row lists before the rest are summarised. Across this
+# installation's catalogue 71.6% of split rows have four or fewer and 89.7% eight or fewer,
+# while the longest has 65 — a cap keeps the Impala's five runs whole without letting one
+# row bury the twenty vehicles beneath it.
+APPLICATION_MAX = 8
+
+
 def application_label(application) -> str:
     """A qualifier label whose year prefix cannot expose catalogue sentinels."""
     years = fitment_year_label(application)
@@ -367,14 +403,48 @@ def application_label(application) -> str:
     return f"{years} — {note}" if years and note else years or note
 
 
-def _year_span(part: Part) -> tuple[Optional[int], Optional[int]]:
-    # A row that names no make is a catalogue artifact rather than a vehicle application:
-    # it carries a placeholder span beside a bare or truncated model string ("1960-1970
-    # VOLVO", "1950-1950 CX-"). The sentinels above catch the 1940 and 2030 markers but
-    # not these. ``_model_labels`` already drops such rows, so counting their years made
-    # the two halves of one title disagree with each other — "1960-2008 Volvo 70 Series
-    # 60 80 XC90", where every model it names comes from a row starting in 2001.
-    rows = display_fitments(part)
+def year_specific(entry) -> bool:
+    """Whether one fitment row's applications split its span into narrower runs.
+
+    The merged span is the headline — 2008-2017 Chevrolet Equinox — but underneath it the
+    catalogue frequently assigns different options to different years: the Equinox took the
+    3.6L in 08-09, the 3.0L in 10-12 and the 3.6L again in 13-17. 41.5% of the rows in this
+    installation's catalogue are split this way, so a qualifier stated without its years is
+    a restriction the shopper cannot apply to their own car.
+    """
+    span = fitment_year_span(entry)
+    return any(fitment_year_span(a) != span for a in getattr(entry, "applications", ()))
+
+
+def application_rows(entry) -> list:
+    """The applications worth listing under one fitment row.
+
+    A row whose applications all cover its whole span says everything in its qualifiers, so
+    only those are shown — an application with no qualifier text would add an empty bullet
+    repeating the year span above it.
+
+    A *split* row is different: there the unqualified application is itself the fact. A
+    2012-2013 Impala takes this starter with no restriction at all, while 2014-2016 needs a
+    VIN code and 2017-2019 the 3.6L. Listing only the qualified runs left the 2012 owner
+    reading four restrictions, none of which mentions their year, and concluding it does not
+    fit theirs.
+    """
+    applications = list(getattr(entry, "applications", ()) or [])
+    if year_specific(entry):
+        return [a for a in applications if application_label(a)]
+    return [a for a in applications if getattr(a, "note", "")]
+
+
+def _span_of(rows) -> tuple[Optional[int], Optional[int]]:
+    """The outer year span of some catalogue rows, or ``(None, None)`` for none of them.
+
+    A row that names no make is a catalogue artifact rather than a vehicle application:
+    it carries a placeholder span beside a bare or truncated model string ("1960-1970
+    VOLVO", "1950-1950 CX-"). The sentinels above catch the 1940 and 2030 markers but
+    not these. ``_model_labels`` already drops such rows, so counting their years made
+    the two halves of one title disagree with each other — "1960-2008 Volvo 70 Series
+    60 80 XC90", where every model it names comes from a row starting in 2001.
+    """
     maximum = date.today().year + 1
     starts = [int(f.year_start) for f in rows
               if f.year_start and _SENTINEL_START < int(f.year_start) <= maximum]
@@ -387,8 +457,33 @@ def _year_span(part: Part) -> tuple[Optional[int], Optional[int]]:
         return min(starts), max(ends or ([maximum] if has_open_end else starts))
     if ends:
         return min(ends), max(ends)
+    return None, None
+
+
+def _year_span(part: Part) -> tuple[Optional[int], Optional[int]]:
+    """Every year this part is known to fit, across the whole catalogue entry."""
+    span = _span_of(display_fitments(part))
     # Every row was a placeholder — the part's own vehicle is the only real year left.
-    return part.year, part.year
+    return span if span != (None, None) else (part.year, part.year)
+
+
+def named_year_span(part: Part, rows) -> tuple[Optional[int], Optional[int]]:
+    """The span for a sentence that names exactly ``rows`` and nothing else.
+
+    A title states one span for the list of vehicles beside it, and a shopper reads it as
+    belonging to the first one. Starter 604-00122 fits nineteen vehicles; the widest run
+    among them is the 2012-2020 Impala, and the title had room for four names — so it
+    published "2007-2020 GMC Acadia Buick Enclave Chevrolet Equinox Traverse and 15 more"
+    when the Acadia stops in 2017. That is not a caveat a shopper has to go looking for
+    further down the page, it is a claim about a vehicle the title itself named.
+
+    Measuring the span over the named rows makes the two halves of the title describe the
+    same set of cars. The years it gives up belonged to vehicles the title never named, so
+    nothing a shopper could have searched on is lost; those vehicles keep their own years
+    in the fitment table and the description.
+    """
+    span = _span_of(rows)
+    return span if span != (None, None) else (part.year, part.year)
 
 
 def _year_label(y1: Optional[int], y2: Optional[int]) -> str:
@@ -489,6 +584,27 @@ _DATE_FRAGMENT = re.compile(r"\b(from|thru|through|to)\s+\d{1,2}\s*[/-]\s*\d{2,4
 # search value once separated from their context.
 _NOISE_PHRASE = re.compile(r"^(?:\d+(?:st|nd|rd|th)\s+digit|\d[\d\s]*)$", re.I)
 
+# Words that only join other words. A qualifier is filtered against what the title has
+# already said, and dropping the duplicate half of "w/ mirror and lock" — where the part
+# type already carries both Mirror and Lock — used to leave the bare connector stranded at
+# the end of the title: "Front Door Window Master Switch Mirror And". That reads as a
+# sentence cut off mid-thought, so a phrase is trimmed of connectors at both ends after the
+# filter, and dropped entirely when nothing but connectors is left.
+_CONNECTORS = {
+    "and", "or", "with", "w/", "w", "for", "to", "of", "the", "a", "an",
+    "plus", "from", "in", "on", "by", "&",
+}
+
+
+def _trim_connectors(words: list[str]) -> list[str]:
+    """``words`` with any leading and trailing connector removed."""
+    start, end = 0, len(words)
+    while start < end and words[start].lower().strip(",") in _CONNECTORS:
+        start += 1
+    while end > start and words[end - 1].lower().strip(",") in _CONNECTORS:
+        end -= 1
+    return words[start:end]
+
 # The interchange catalogue is written for a parts counter, and it shows: body styles are
 # abbreviated ("Sdn"), sides are bare letters ("L"), and some notes say what a part does
 # *not* fit ("exc electric vehicle"). All three read badly on a results page, so a title
@@ -504,21 +620,47 @@ _QUALIFIER_EXPAND = {
 _SIDE_LETTER = {"l": "Left", "r": "Right"}
 
 
+# Where in the VIN a character sits is bookkeeping for a parts counter, not something a
+# shopper can act on: "(VIN B, 8th digit)" tells them the code is B. The position survives
+# on its own only when the note has no comma before it, which is why _NOISE_PHRASE alone
+# never caught these — it matches a phrase that is *entirely* an ordinal.
+_VIN_POSITION = re.compile(
+    r"\b\d+(?:st|nd|rd|th)(?:\s+and\s+\d+(?:st|nd|rd|th))*\s+digits?\b", re.I)
+
+
+def _drop_orphan_vin(words: list[str]) -> list[str]:
+    """Remove a "VIN" that ends up naming no code.
+
+    "VIN" is a label for the character after it. Once the position text is gone, a note that
+    never spelled the character out leaves the label pointing at nothing — which published
+    as "Alternator Generator Gasoline 1.0L VIN" and "Modulator Assembly 2.4L VIN 8th Digit".
+    A trailing label says less than no label at all, so it goes; "VIN B" and "VIN FP" keep
+    theirs, because there the label is doing its job.
+    """
+    while words and words[-1].upper().strip(",") == "VIN":
+        words = words[:-1]
+    return words
+
+
 def _title_phrase(phrase: str, has_side: bool) -> str:
     """One catalogue qualifier rewritten for a title, or "" to leave it out."""
     if _QUALIFIER_EXCLUSION.match(phrase):
         return ""
+    phrase = _VIN_POSITION.sub(" ", phrase)
     words = phrase.split()
     if len(words) == 1 and words[0].lower() in _SIDE_LETTER:
         # A lone "L"/"R" is the catalogue's side code. It repeats the side the part already
         # states, and where the part states none it is too cryptic to publish as-is.
         return "" if has_side else _SIDE_LETTER[words[0].lower()]
     out: list[str] = []
-    for word in words:
+    for index, word in enumerate(words):
         lowered = word.lower()
-        if len(word) == 1 and word.isalpha():
+        after_vin = index > 0 and words[index - 1].upper().strip(",") == "VIN"
+        if len(word) == 1 and word.isalpha() and not after_vin:
             # A stray initial is how a truncated catalogue note reads ("Driver s"). It
-            # carries no meaning on a results page, so it is not worth a character.
+            # carries no meaning on a results page, so it is not worth a character — but the
+            # single letter after "VIN" is the engine code, the most useful character in the
+            # phrase, and dropping it is what left the label stranded.
             continue
         if lowered in _QUALIFIER_EXPAND:
             out.append(_QUALIFIER_EXPAND[lowered])
@@ -526,7 +668,7 @@ def _title_phrase(phrase: str, has_side: bool) -> str:
             out.append(word)          # "4x2", "2.4L", "BCM", VIN codes keep their casing
         else:
             out.append(word[:1].upper() + word[1:])
-    return " ".join(out)
+    return " ".join(_drop_orphan_vin(out))
 
 
 
@@ -543,6 +685,14 @@ def _note_phrases(note: str) -> list[str]:
 _DISPLACEMENT_L = re.compile(r"\b(\d\.\d)\s*L\b", re.I)
 _CYLINDERS = re.compile(r"\b(\d{1,2})\s*cyl\b", re.I)
 _VIN_CODE = re.compile(r"\bVIN\s+([A-Z0-9])\b", re.I)
+
+# The manufacturer's option code for a drivetrain, as the note writes it: "(opt LFW)",
+# "Opt LZE", "option LU3". Only the *code* is case-sensitive — it is always upper case in
+# this data, and requiring that is what stops "optional" and ordinary prose from being read
+# as one. A buyer cross-referencing an engine searches the bare code, so it is a fact worth
+# a few characters; the yard records it for only a small share of parts, and a part without
+# one simply says nothing.
+_OPTION_CODE = re.compile(r"\b(?i:opt(?:ion)?)\.?\s*([A-Z][A-Z0-9]{2,4})\b")
 
 # Finish and material, for the part types where it is the thing a buyer is choosing between
 # — a chrome grille and a textured one are not substitutes. Only these exact words are
@@ -616,12 +766,51 @@ def title_condition(part: Part) -> str:
     return " ".join(words[:3])
 
 
+def title_grade(part: Part, store: "StoreProfile | CatalogProfile | None" = None) -> str:
+    """The yard's own condition grade, worded for a title: "A Grade".
+
+    A fact about the record, not a claim about the part: the grade is whatever the yard
+    entered, and the wording around it is the site's (``title_grade``). Sites that grade in
+    a private vocabulary leave the template empty and the grade stays where it already is —
+    a metafield and a line in the description.
+    """
+    policy = _policy(store)
+    grade = str(part.grade or "").strip()
+    if not policy.title_grade or not grade:
+        return ""
+    return seo_clean(policy.title_grade.format(grade=_smart_title(grade)))
+
+
+def title_mileage(part: Part, store: "StoreProfile | CatalogProfile | None" = None) -> str:
+    """Donor mileage for the title, on the part types mileage actually speaks for.
+
+    The source system records the donor's odometer against every part pulled from it, so the
+    number exists for a door glass as much as for the engine. Only the part types named in
+    ``title_mileage_part_types`` state it, and only up to ``title_mileage_max``: above that
+    the number argues against the part, and a seller may reasonably say nothing rather than
+    lead with it. It is published as a metafield either way.
+
+    Rendered in thousands ("142K Miles") because the exact figure needs a comma, and a comma
+    is one of the symbols a title strips — "142,684 Miles" would reach a shopper as
+    "142 684 Miles". Thousands are floored, never rounded up.
+    """
+    policy = _policy(store)
+    if not policy.title_mileage_part_types or not part.mileage:
+        return ""
+    if (part.part_type or "").strip().lower() not in policy.title_mileage_part_types:
+        return ""
+    miles = int(part.mileage)
+    if miles < 1000 or miles > policy.title_mileage_max:
+        return ""
+    return f"{miles // 1000}K Miles"
+
+
 def part_spec(part: Part) -> list[str]:
-    """Spec terms taken from this part's own source note: "3.0L", "6 Cylinder", "VIN C".
+    """Spec terms from this part's own source note: "3.0L", "6 Cylinder", "VIN C", "Opt LFW".
 
     These describe the physical part in hand, so unlike interchange qualifiers they can be
-    stated in the title without ambiguity. Engines are the big win — displacement and VIN
-    code are exactly what a buyer searches for.
+    stated in the title without ambiguity. Engines are the big win — displacement, VIN code
+    and option code are exactly what a buyer cross-referencing an engine searches for.
     """
     text = part.description or ""
     spec: list[str] = []
@@ -634,6 +823,9 @@ def part_spec(part: Part) -> list[str]:
     m = _VIN_CODE.search(text)
     if m:
         spec.append(f"VIN {m.group(1).upper()}")
+    m = _OPTION_CODE.search(text)
+    if m:
+        spec.append(f"Opt {m.group(1).upper()}")
     return spec
 
 
@@ -687,7 +879,8 @@ def title_qualifiers(part: Part, max_phrases: int = 5, max_chars: int = 55) -> l
 # rather than a second title builder somewhere else.
 _TITLE_RANKS = {
     "years": 1, "models": 1, "part_type": 1,
-    "side": 2, "spec": 3, "condition": 3, "qualifiers": 4, "oem": 5, "more_models": 6,
+    "side": 2, "spec": 3, "condition": 3, "grade": 3, "mileage": 3,
+    "qualifiers": 4, "oem": 5, "more_models": 6,
 }
 
 
@@ -705,11 +898,17 @@ def group_model_labels(labels: list[str]) -> str:
     times over.
     """
     groups: dict[str, list[str]] = {}
+    seen: dict[str, set[str]] = {}
     for label in labels:
         make, _, model = label.partition(" ")
         words = groups.setdefault(make, [])
+        # The make itself counts as already said. The catalogue disambiguates a shared
+        # model name by naming the make again inside the model — "SAFARI (GMC)" — which
+        # under a "GMC" heading is the same word twice.
+        used = seen.setdefault(make, {make.lower()})
         for word in model.split():
-            if word not in words:
+            if word.lower() not in used:
+                used.add(word.lower())
                 words.append(word)
     return " ".join(" ".join([make, *models]).strip()
                     for make, models in groups.items()).strip()
@@ -740,14 +939,20 @@ def title_segments(
         max_models = policy.title_max_models
     pt = _title_part_type(part, store)
     side = title_side(part, store)
-    span = _year_span(part)
-    years = _year_label(*span) if compact else _year_tokens(*span)
-    labels = [c for c in (seo_clean(l) for l in _model_labels(part)) if c]
+    named = [(cleaned, rows)
+             for cleaned, rows in ((seo_clean(label), rows)
+                                   for label, rows in _labelled_fitments(part))
+             if cleaned]
+    labels = [cleaned for cleaned, _ in named]
     spec = part_spec(part)
     condition = title_condition(part)
+    grade = title_grade(part, store)
+    mileage = title_mileage(part, store)
     seen = {w.lower() for w in pt.split()}
     seen |= {w.lower() for term in spec for w in term.split()}
     seen |= {w.lower() for w in condition.split()}
+    seen |= {w.lower() for w in grade.split()}
+    seen |= {w.lower() for w in mileage.split()}
     # The side segment already says "Driver Side Left"; a catalogue qualifier that repeats
     # it spends characters on a word the title has used.
     seen |= {w.lower() for w in side.split()}
@@ -756,17 +961,23 @@ def title_segments(
         phrase = _title_phrase(phrase, bool(side))
         if not phrase:
             continue
-        kept = [w for w in phrase.split() if w.lower() not in seen]
+        kept = _trim_connectors([w for w in phrase.split() if w.lower() not in seen])
         if not kept or _NOISE_PHRASE.match(" ".join(kept)):
             continue
         extra.append(" ".join(kept))
         seen |= {w.lower() for w in kept}
     lead = "OEM" if policy.title_include_oem and "oem" not in seen else ""
     models, more_models = "", ""
+    # A cap of zero is "no cap": name every vehicle and let the character budget in
+    # :func:`fit_title` decide how many survive. See ``title_max_models``.
+    shown = named if max_models <= 0 else named[:max_models]
+    # The years describe the vehicles the title names, not the ones it had no room for, so
+    # they are measured here — after the cap — and narrow with it as the budget binds.
+    span = named_year_span(part, [row for _, rows in shown for row in rows])
+    years = _year_label(*span) if compact else _year_tokens(*span)
     if labels:
-        shown = labels[:max_models]
         more = len(labels) - len(shown)
-        models = group_model_labels(shown)
+        models = group_model_labels([cleaned for cleaned, _ in shown])
         # Counted separately from the names themselves because it is worth much less than
         # them: on a tight budget "and 7 more" is characters that name no vehicle and carry
         # no search term, and a buyer looking for an engine would rather have its size.
@@ -776,14 +987,18 @@ def title_segments(
         ordered = [
             ("years", years), ("models", models), ("spec", " ".join(spec)),
             ("more_models", more_models), ("side", side), ("part_type", pt),
-            ("condition", condition), ("qualifiers", " ".join(extra)), ("oem", lead),
+            ("condition", condition), ("qualifiers", " ".join(extra)),
+            # Last, and after the qualifiers: a qualifier is part of what the thing *is*
+            # ("Fuel Pump Assembly", "Master Switch Lock"), so a grade placed before it
+            # splits the part's own name — "Fuel Pump A Grade Assembly".
+            ("grade", grade), ("mileage", mileage), ("oem", lead),
         ]
     else:
         ordered = [
             ("years", years), ("models", models), ("more_models", more_models),
             ("side", side), ("oem", lead),
             ("part_type", pt), ("spec", " ".join(spec)), ("condition", condition),
-            ("qualifiers", " ".join(extra)),
+            ("qualifiers", " ".join(extra)), ("grade", grade), ("mileage", mileage),
         ]
     return [(name, text, _TITLE_RANKS[name]) for name, text in ordered if text]
 
@@ -832,13 +1047,24 @@ def fit_title(part: Part, store: "StoreProfile | CatalogProfile | None" = None,
     spent listing cars the buyer did not search for. So fewer models are tried before any
     segment is dropped, and only then does rank take over.
 
-    At Shopify's 255 characters the first attempt already fits, so nothing here changes what
-    the catalogue publishes.
+    How many vehicles are *offered* to that budget is ``title_max_models``. A positive cap
+    is a hard ceiling on the names a title may carry; **zero means the budget is the only
+    ceiling**, which is what fills Shopify's 255 characters with the vehicles the fitment
+    catalogue actually named rather than four of them and the phrase "and 17 more".
     """
     policy = _policy(store)
-    start = policy.title_max_models if max_models is None else max_models
+    cap = policy.title_max_models if max_models is None else max_models
+    available = len([c for c in (seo_clean(l) for l in _model_labels(part)) if c])
+    # A cap of zero spends the *character* budget instead of a model count, so the scan
+    # starts from every vehicle the catalogue named. Two bounds keep that honest: there is
+    # no point trying more labels than exist, and none in trying more than the budget could
+    # possibly hold — no label joins the title for under about four characters. Both only
+    # remove counts that would have produced a title identical to one still tried, so a
+    # capped site's titles are byte-for-byte what they were.
+    start = available if cap <= 0 else cap
+    start = max(1, min(start, available or 1, max(1, limit // 4)))
     fallback: tuple[str, list[str]] | None = None
-    for count in range(max(start, 1), 0, -1):
+    for count in range(start, 0, -1):
         title, dropped = compose_title(
             title_segments(part, store, count, compact), limit, measure
         )
@@ -885,6 +1111,36 @@ def build_title(part: Part, store: "StoreProfile | CatalogProfile | None" = None
     return fit_title(part, store, max_models, limit, measure, compact)[0]
 
 
+def extend_override_title(title: str, part: Part,
+                          store: "StoreProfile | CatalogProfile | None" = None,
+                          limit: int = TITLE_MAX) -> str:
+    """A reviewed title, plus the per-part facts it predates.
+
+    A reviewed engine title carries facts the yard database does not hold — displacement,
+    VIN code, cylinder configuration — because the part's own note is empty and they were
+    read from the listing portal's detail page. The renderer cannot reconstruct those, so it
+    must not replace such a title. It is also *narrower* on purpose: a reviewed title names
+    the vehicles that took this engine variant, where fitment alone widens to every model
+    the interchange group covers.
+
+    But those titles were written before a title stated the yard's grade or the donor's
+    mileage, and unlike displacement those are facts about *this* part rather than about the
+    engine family — so they are appended rather than lost. Nothing already said is repeated,
+    and a title that will not fit the budget is returned untouched: a reviewed decision is
+    not worth truncating for an addition.
+    """
+    extra = [text for text in (title_grade(part, store), title_mileage(part, store)) if text]
+    if not title or not extra:
+        return title
+    said = {word.lower() for word in title.split()}
+    keep = [text for text in extra
+            if not {word.lower() for word in text.split()} <= said]
+    if not keep:
+        return title
+    extended = " ".join([title.strip(), *keep])
+    return extended if len(extended) <= limit else title
+
+
 def meta_title(part: Part, store: "StoreProfile | CatalogProfile | None" = None) -> str:
     """A short search title that never sacrifices the name of the part.
 
@@ -893,10 +1149,16 @@ def meta_title(part: Part, store: "StoreProfile | CatalogProfile | None" = None)
     but an incomplete part name is actively misleading, so optional context is dropped in
     priority order before truncation becomes the last resort.
     """
-    labels = [c for c in (seo_clean(l) for l in _model_labels(part)) if c]
+    named = [(cleaned, rows)
+             for cleaned, rows in ((seo_clean(label), rows)
+                                   for label, rows in _labelled_fitments(part))
+             if cleaned]
+    # This title has room for one vehicle, so its years are that vehicle's — a search
+    # result reading "2007-2020 GMC Acadia" is the same overstatement as the full title's.
+    span = named_year_span(part, named[0][1]) if named else _year_span(part)
     segments = [
-        ("years", _year_tokens(*_year_span(part)), 4),
-        ("models", labels[0] if labels else "", 3),
+        ("years", _year_tokens(*span), 4),
+        ("models", named[0][0] if named else "", 3),
         ("side", title_side(part, store), 2),
         ("part_type", _title_part_type(part, store), 1),
     ]
@@ -917,8 +1179,8 @@ def meta_description(part: Part, store: Optional[StoreProfile] = None) -> str:
     store = store or StoreProfile()
     policy = _policy(store)
     pt = expand_part_type(part.part_type, store)
-    labels = _model_labels(part)
-    years = _year_tokens(*_year_span(part))
+    named = _labelled_fitments(part)
+    labels = [label for label, _ in named]
     subject = " ".join(x for x in ("Used OEM", side_phrase(part.side), pt) if x)
 
     # Prefer the richest fitment sentence that fits whole. Dropping extra applications is
@@ -928,6 +1190,11 @@ def meta_description(part: Part, store: Optional[StoreProfile] = None) -> str:
         fit = ", ".join(labels[:count])
         if count and len(labels) > count:
             fit += " and more"
+        # As in a title, the span belongs to the vehicles this sentence names. A snippet
+        # that names none of them is describing the part itself, so it keeps the full span.
+        span = (named_year_span(part, [row for _, rows in named[:count] for row in rows])
+                if count else _year_span(part))
+        years = _year_tokens(*span)
         target = " ".join(x for x in (years, fit) if x)
         candidate = f"{subject} for {target}." if target else f"{subject}."
         if len(candidate) <= META_DESC_MAX:
@@ -1003,14 +1270,20 @@ def build_body_html(part: Part, store: Optional[StoreProfile] = None) -> str:
             ) if x)
             # The catalogue qualifies most applications (engine, drivetrain, body, emissions,
             # production date). Those decide whether a part actually fits, so show them.
-            quals = f.qualifiers() if hasattr(f, "qualifiers") else []
+            quals = application_rows(f)
             if not quals:
                 lines.append(f"  <li>{html.escape(veh)}</li>")
                 continue
             lines.append(f"  <li>{html.escape(veh)}")
             lines.append("    <ul>")
-            for a in quals[:8]:
+            for a in quals[:APPLICATION_MAX]:
                 lines.append(f"      <li>{html.escape(application_label(a))}</li>")
+            if len(quals) > APPLICATION_MAX:
+                # Say that the list was cut. A silent cut on a split row is the same defect
+                # this list exists to fix: the year run that was dropped reads as excluded.
+                rest = len(quals) - APPLICATION_MAX
+                lines.append(f"      <li>…and {rest} more year/option variant"
+                             f"{'' if rest == 1 else 's'} — ask us to confirm yours.</li>")
             lines.append("    </ul>")
             lines.append("  </li>")
         lines.append("</ul>")

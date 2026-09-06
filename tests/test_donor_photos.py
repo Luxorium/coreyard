@@ -6,6 +6,7 @@ run re-fingerprints what it touches. Adding a second folder doubles the ways tha
 """
 
 import unittest
+from unittest.mock import patch
 from decimal import Decimal
 
 from coreyard.config import StoreProfile
@@ -77,6 +78,17 @@ class FallsBackToTheDonor(unittest.TestCase):
 
 
 class DonorShootIsTrimmed(unittest.TestCase):
+    @patch.dict("os.environ", {"STORE_DONOR_PHOTO_LIMIT": "0"})
+    def test_unlimited_tracks_every_frame_and_new_photos(self):
+        entries = [(f"1001_{n:02d}.jpg", f"frame-{n}") for n in range(1, 40)]
+        photos = _photo_view(lambda k: [], lambda k: entries, DONORS, None)
+        p = part(r_number="9999")
+        self.assertEqual(39, len(photos.resolve(p)))
+        self.assertEqual(39, len(photos.stamps(p)))
+        entries.append(("1001_40.jpg", "frame-40"))
+        self.assertEqual("donor:1001_40.jpg", photos.resolve(p)[-1])
+        self.assertEqual("donor:frame-40", photos.stamps(p)[-1])
+
     def test_only_the_first_frames_are_inherited(self):
         from coreyard.yms import images
         big = {"1001": [(f"1001_{n:02d}.jpg", f"1001_{n:02d}.jpg|1|t") for n in range(1, 40)]}
@@ -215,6 +227,17 @@ class DonorFrameUploadedOnce(unittest.TestCase):
         files = self.pub._staged_files(self._part(), lambda i: f"alt {i}")
         self.assertEqual([{"id": "gid://File/1"}, {"id": "gid://File/2"}], files)
         self.assertEqual("gid://File/1", self.state.donor_file_id("15", "15_01.jpg"))
+
+    @patch.dict("os.environ", {"STORE_DONOR_PHOTO_LIMIT": "0"})
+    def test_unlimited_publisher_includes_frames_beyond_six(self):
+        self.images.list_vehicle_images = lambda key: [
+            f"{key}_{n:02d}.jpg" for n in range(1, 10)
+        ]
+        files = self.pub._staged_files(self._part(), lambda i: f"alt {i}")
+        self.assertEqual(9, len(files))
+        self.assertEqual(9, self.client.created)
+        self.pub._staged_files(self._part(), lambda i: f"alt {i}")
+        self.assertEqual(9, self.client.created)
 
     def test_a_same_name_replacement_gets_a_new_file_id(self):
         self.pub._staged_files(self._part(), lambda i: f"alt {i}")

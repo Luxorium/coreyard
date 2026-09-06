@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from coreyard.config import load_store
 from coreyard.repair import engine
@@ -62,6 +64,10 @@ def _desired(store, r_numbers: set[str], need_fitment: bool) -> dict:
                 part.fitment = resolver.fitment_for(part)
                 if index % 1000 == 0 or index == len(parts):
                     print(f"    {index}/{len(parts)}", flush=True)
+            resolver.flush()
+            summary = resolver.cache_summary()
+            if summary:
+                print(f"  {summary}")
             _enrich(conn, parts)
     return {p.uid(): render(p, [], store) for p in parts}
 
@@ -115,6 +121,45 @@ def cmd_fingerprints(args) -> int:
         print(f"Re-baselined {len(current)} entr(ies). The next sync publishes only what "
               f"moves from here.")
     return 0
+
+
+_LOCAL = threading.local()
+
+
+def _thread_client():
+    """One Shopify client per worker thread.
+
+    ``requests.Session`` is not safe to share across threads, and the client's own
+    rate-budget tracker (``_resume_at``) is per-instance. ``coreyard bulk`` solves this the
+    same way — a publisher, and therefore a client, per thread. The GraphQL cost budget is
+    the *store's*, not the connection's, so parallel clients spend it faster and each backs
+    off on the 429 or THROTTLED it sees; that degrades throughput rather than failing.
+    """
+    client = getattr(_LOCAL, "client", None)
+    if client is None:
+        from coreyard.sink.shopify_api import ShopifyClient
+
+        client = _LOCAL.client = ShopifyClient()
+    return client
+
+
+def _apply_parallel(todo, workers, report):
+    """Apply ``todo`` across ``workers`` threads, reporting in submission order.
+
+    Order matters only for the progress line and for which failures are printed first; each
+    repair is independent and idempotent, so a thread that fails leaves the product exactly
+    as it was for the next run to retry.
+    """
+    def one(change):
+        try:
+            engine.apply(_thread_client(), change)
+            return change, None
+        except RuntimeError as exc:
+            return change, exc
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for index, (change, exc) in enumerate(pool.map(one, todo), 1):
+            report(index, change, exc)
 
 
 def cmd_repair(args) -> int:
@@ -186,18 +231,33 @@ def cmd_repair(args) -> int:
         return 0
 
     todo = changes[: args.limit] if args.limit else changes
-    print(f"\nApplying {len(todo)} repair(s) ...")
+    workers = max(1, getattr(args, "workers", 1))
+    suffix = f" with {workers} workers" if workers > 1 else ""
+    print(f"\nApplying {len(todo)} repair(s){suffix} ...")
     done = failed = 0
-    for i, change in enumerate(todo, 1):
-        try:
-            engine.apply(client, change)
+
+    def report(i, change, exc):
+        nonlocal done, failed
+        if exc is None:
             done += 1
-        except RuntimeError as exc:
+        else:
             failed += 1
             if failed <= 5:
                 print(f"  ! R#{change.r_number}: {exc}", file=sys.stderr)
         if i % 100 == 0 or i == len(todo):
-            print(f"  {i}/{len(todo)}")
+            print(f"  {i}/{len(todo)}", flush=True)
+
+    if workers == 1:
+        # The serial path keeps the client that already walked the catalogue, and its
+        # warmed rate budget with it.
+        for i, change in enumerate(todo, 1):
+            try:
+                engine.apply(client, change)
+                report(i, change, None)
+            except RuntimeError as exc:
+                report(i, change, exc)
+    else:
+        _apply_parallel(todo, workers, report)
     print(f"Repaired {done} product(s), {failed} failed.")
     if done:
         print("The sync snapshot still holds the old fingerprints; the next sync will "
@@ -217,6 +277,10 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
         p.add_argument("--limit", type=int, default=0,
                        help="apply at most this many, for a cautious first run")
         p.add_argument("--show", type=int, default=10, help="examples to print")
+        p.add_argument("--workers", type=int, default=1,
+                       help="apply this many products at once (default 1). The write is "
+                            "one API call per product, so a whole-catalogue repair is "
+                            "bound by round trips rather than by the store's budget.")
         p.add_argument("--status", default=None, choices=["ACTIVE", "DRAFT", "ARCHIVED"],
                        help="only products with this status")
         p.set_defaults(func=cmd_repair)

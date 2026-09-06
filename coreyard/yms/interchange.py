@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from coreyard.yms import fitment_cache
 from coreyard.yms import schema as schema_module
 from coreyard.yms.db import query
 
@@ -172,9 +173,14 @@ def parse_application(app: str) -> Optional[dict]:
 class InterchangeResolver:
     """Loads the model->make map once, then resolves fitment per part on the same connection."""
 
-    def __init__(self, conn: Any, source=None) -> None:
+    def __init__(self, conn: Any, source=None, cache: Any = "auto") -> None:
         self.conn = conn
         self.schema = source or schema_module.load()
+        # The in-memory cache spans one run and is keyed by interchange group; the on-disk
+        # one spans runs and holds the *raw* rows. See :mod:`coreyard.yms.fitment_cache`
+        # for why the parsed result is deliberately not what is stored.
+        self.cache = fitment_cache.open_for(self.schema) if cache == "auto" else cache
+        self._pending_writes = 0
         self._make_of = self._load_make_map()
         self._fitment_cache: dict[tuple[int, str], list[Fitment]] = {}
 
@@ -198,8 +204,20 @@ class InterchangeResolver:
         sql = self.schema.interchange_applications.format(
             part_type_code=int(part_type_code), interchange_code=key
         )
+        if self.cache is not None:
+            stored = self.cache.get(part_type_code, key)
+            if stored is not None:
+                return stored
         rows = query(self.conn, sql)
-        return [a for a in (_clean(r["app"]) for r in rows) if a]
+        # Only a query that returned records the cache. A transport failure raises out of
+        # ``query`` before this line, so a blip cannot be frozen in as "fits nothing".
+        apps = [a for a in (_clean(r["app"]) for r in rows) if a]
+        if self.cache is not None:
+            self.cache.put(part_type_code, key, apps)
+            self._pending_writes += 1
+            if self._pending_writes >= 500:
+                self.flush()
+        return apps
 
     def fitment_for(self, part) -> list[Fitment]:
         if not part.part_type_code or not part.interchange_code:
@@ -246,7 +264,17 @@ class InterchangeResolver:
         self._fitment_cache[cache_key] = fits
         return fits
 
+    def flush(self) -> None:
+        """Bank whatever the run has learned so far. Safe to call at any point."""
+        if self.cache is not None and self._pending_writes:
+            self.cache.commit()
+            self._pending_writes = 0
+
+    def cache_summary(self) -> str:
+        return self.cache.summary() if self.cache is not None else ""
+
     def attach(self, parts) -> None:
         """Populate ``part.fitment`` for each part (in place)."""
         for part in parts:
             part.fitment = self.fitment_for(part)
+        self.flush()
