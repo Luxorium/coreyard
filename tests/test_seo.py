@@ -207,6 +207,25 @@ class PartSpecFromNotes(unittest.TestCase):
         self.assertIn("Engine Motor Assembly", title)
         self.assertFalse(BANNED_IN_TITLE & set(title), title)
 
+    def test_vin_code_survives_when_the_position_introduces_it(self):
+        """The code does not have to sit next to the label.
+
+        A counter writes "3.0L, 4th digit Z" as readily as "VIN Z". Requiring adjacency
+        published screen 54898 naming the fourth VIN digit with the Z missing — the one
+        character in the phrase a buyer can check against their own vehicle.
+        """
+        for note in ("3.0L, 4th digit Z", "4th VIN digit Z", "(4th digit Z)"):
+            with self.subTest(note=note):
+                title = seo.build_title(part(part_type="Screen", side=None, year=2011,
+                                             make="Nissan", model="Murano",
+                                             description=note))
+                self.assertIn("VIN Z", title)
+
+    def test_a_word_after_the_position_is_not_read_as_a_vin_code(self):
+        """Case is what separates a code from the next ordinary word."""
+        p = part(part_type="Screen", side=None, description="4th digit and the rest")
+        self.assertNotIn("VIN", seo.build_title(p))
+
     def test_cylinder_count_is_picked_up(self):
         p = part(part_type="Engine Assembly", side=None,
                  description="4.2L (VIN S, 8th digit),6 cyl")

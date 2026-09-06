@@ -684,7 +684,19 @@ def _note_phrases(note: str) -> list[str]:
 
 _DISPLACEMENT_L = re.compile(r"\b(\d\.\d)\s*L\b", re.I)
 _CYLINDERS = re.compile(r"\b(\d{1,2})\s*cyl\b", re.I)
-_VIN_CODE = re.compile(r"\bVIN\s+([A-Z0-9])\b", re.I)
+# The VIN code, however the counter wrote it. "VIN C" is the tidy form, but the position
+# phrase is just as often what introduces the character — "3.0L, 4th digit Z", or
+# "4th VIN digit Z" — and requiring the code to sit immediately after the label is what
+# published a screen naming the fourth VIN digit while dropping the Z it points at. The
+# code is the only part of the phrase a buyer can check against their own vehicle.
+#
+# The second alternative keeps its character class case-sensitive: after a position phrase
+# the next token is very often an ordinary word, and a case-insensitive single letter would
+# take its initial. This data writes codes in upper case.
+_VIN_CODE = re.compile(
+    r"\bVIN\s+([A-Z0-9])\b"
+    r"|\b\d+(?:st|nd|rd|th)\s+(?:VIN\s+)?digits?[,\s]+((?-i:[A-Z0-9]))\b",
+    re.I)
 
 # The manufacturer's option code for a drivetrain, as the note writes it: "(opt LFW)",
 # "Opt LZE", "option LU3". Only the *code* is case-sensitive — it is always upper case in
@@ -822,7 +834,7 @@ def part_spec(part: Part) -> list[str]:
         spec.append(f"{m.group(1)} Cylinder")
     m = _VIN_CODE.search(text)
     if m:
-        spec.append(f"VIN {m.group(1).upper()}")
+        spec.append(f"VIN {(m.group(1) or m.group(2)).upper()}")
     m = _OPTION_CODE.search(text)
     if m:
         spec.append(f"Opt {m.group(1).upper()}")
