@@ -450,7 +450,15 @@ class ShopifyPublisher:
                 # would otherwise raise here forever and never checkpoint, holding the shared
                 # sync lock open. Any *other* refusal still raises: a shared donor file left
                 # attached to the wrong product is the real problem this step guards against.
-                if "not exist" not in str(exc):
+                #
+                # The trailing "... do not exist." is often past mutate()'s 400-char error
+                # truncation when several ids are listed, so the "already gone" case is also
+                # recognised by its message stem: this call's only ``files`` userError is an
+                # id it cannot resolve.
+                text = str(exc).lower()
+                already_gone = ("not exist" in text
+                                or '"message": "file id' in text)
+                if not already_gone:
                     raise
         # Only a product that is meant to be visible is put on a channel: publishing a DRAFT
         # would make the holding state for "not ready yet" mean nothing.

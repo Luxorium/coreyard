@@ -230,16 +230,24 @@ class FailureSafeRefresh(unittest.TestCase):
         """``productSet(files=...)`` replaces the media set, so the follow-up detach finds
         the old ids gone. That is this step's goal already met — it must not raise, or a
         donor part refreshed on every delta tick never checkpoints and the shared sync
-        lock stays wedged (the 2026-09 starvation)."""
+        lock stays wedged (the 2026-09 starvation).
+
+        The id list here is long enough that ``mutate()``'s 400-char truncation drops the
+        trailing "do not exist.", which is exactly what production saw."""
+        import json
+
+        ids = [f"gid://shopify/MediaImage/34109{n:09d}" for n in range(8)]
+        errs = [{"field": ["files"],
+                 "message": f"File ids {json.dumps(ids)} do not exist."}]
+        truncated = f"fileUpdate: {json.dumps(errs)[:400]}"
+        self.assertNotIn("do not exist", truncated)  # the phrase really is gone
 
         class GoneClient(FakeClient):
             def mutate(self, query, variables, name):
                 self.calls.append(name)
                 self.variables[name] = variables
                 if name == "fileUpdate":
-                    raise RuntimeError(
-                        'fileUpdate: [{"field": ["files"], "message": '
-                        '"File ids [\\"gid://File/old\\"] do not exist."}]')
+                    raise RuntimeError(truncated)
                 if name == "productSet":
                     return {"product": {"id": "gid://Product/1"}}
                 return {}
@@ -250,7 +258,8 @@ class FailureSafeRefresh(unittest.TestCase):
         self.assertIn("fileUpdate", client.calls)
 
     def test_a_real_detach_refusal_still_raises(self):
-        """Only "does not exist" is tolerated; any other userError is a real problem."""
+        """Only an unresolvable-id error is tolerated; any other userError is a real
+        problem and must still stop this part from checkpointing."""
 
         class RefusingClient(FakeClient):
             def mutate(self, query, variables, name):
@@ -258,7 +267,8 @@ class FailureSafeRefresh(unittest.TestCase):
                 self.variables[name] = variables
                 if name == "fileUpdate":
                     raise RuntimeError(
-                        'fileUpdate: [{"message": "Access denied for fileUpdate."}]')
+                        'fileUpdate: [{"field": ["files"], "message": '
+                        '"Access denied for fileUpdate."}]')
                 if name == "productSet":
                     return {"product": {"id": "gid://Product/1"}}
                 return {}
