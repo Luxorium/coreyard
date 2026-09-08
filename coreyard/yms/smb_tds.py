@@ -11,10 +11,12 @@ shim. Windows Authentication (NTLM) happens at the TDS layer, exactly as the ins
 
 from __future__ import annotations
 
+import random
 import sys
+import time
 from typing import Any
 
-from impacket import tds
+from impacket import nt_errors, tds
 from impacket.smbconnection import SMBConnection
 
 from coreyard.config import _get
@@ -24,6 +26,87 @@ _READ_CHUNK = 65535                   # one SMB2 READ returns one whole TDS pack
 _DEBUG = (_get("COREYARD_SMB_DEBUG", "") or "").strip().lower() in {
     "1", "true", "yes", "on",
 }
+
+# Opening the pipe fails transiently, and often enough to matter: 62 scheduled runs died
+# between 2026-09-03 and 2026-09-08 with STATUS_PIPE_NOT_AVAILABLE ("an instance of a named
+# pipe cannot be found in the listening state"), spread evenly across every hour of the day.
+# SQL Server accepts a bounded number of concurrent pipe instances, and this installation
+# points five schedules at the same pipe — `counts` every minute, eBay every five, plus the
+# sync, delta and order jobs — so they collide. The condition clears in milliseconds; what
+# made it expensive was that a single failed open killed the whole run.
+#
+# Only statuses that can clear on their own are listed. A credential problem must fail on
+# the first attempt and stay failed: retrying STATUS_LOGON_FAILURE four times against a
+# domain account is how a service account gets locked out, which converts a wrong password
+# into an outage for every job at once.
+_TRANSIENT_STATUSES = frozenset({
+    nt_errors.STATUS_PIPE_NOT_AVAILABLE,      # no pipe instance listening right now
+    nt_errors.STATUS_PIPE_BUSY,               # every instance is in use
+    nt_errors.STATUS_INSTANCE_NOT_AVAILABLE,  # same, reported from the other layer
+    nt_errors.STATUS_IO_TIMEOUT,
+    nt_errors.STATUS_CONNECTION_DISCONNECTED,
+    nt_errors.STATUS_CONNECTION_RESET,
+    nt_errors.STATUS_VIRTUAL_CIRCUIT_CLOSED,
+})
+
+DEFAULT_CONNECT_ATTEMPTS = 4
+DEFAULT_CONNECT_BACKOFF = 1.0
+
+
+def _status_of(exc: BaseException) -> int | None:
+    """The NT status behind an impacket exception, or None if it carries none.
+
+    Every SMB layer in impacket spells this differently — ``smb3.SessionError`` exposes
+    ``error`` and ``get_error_code()``, ``smbconnection.SessionError`` exposes
+    ``getErrorCode()``, ``smb.SessionError`` exposes ``get_error_class()`` — and which one
+    surfaces depends on the dialect negotiated at runtime. Asking for each in turn is
+    duplication that earns its keep: a transport error misread as unclassifiable would be
+    re-raised on the first attempt, which is the behaviour being fixed.
+    """
+    for name in ("get_error_code", "getErrorCode"):
+        getter = getattr(exc, name, None)
+        if callable(getter):
+            try:
+                code = getter()
+            except Exception:
+                continue
+            if isinstance(code, int):
+                return code
+    code = getattr(exc, "error", None)
+    return code if isinstance(code, int) else None
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Is another attempt worth making, or is this the same answer every time?
+
+    Socket-level failures are retried without consulting a status: they happen before
+    authentication, so they cannot be a credential problem, and a refused or reset
+    connection to a Windows host that is mid-restart is the textbook case for waiting.
+    """
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    status = _status_of(exc)
+    if status is not None:
+        return status in _TRANSIENT_STATUSES
+    # NetBIOSError and friends carry no status and are transport-level by nature. OSError
+    # covers the rest of the socket surface.
+    return isinstance(exc, OSError) or type(exc).__name__ == "NetBIOSError"
+
+
+def _positive_int(key: str, default: int) -> int:
+    raw = (_get(key, str(default)) or "").strip()
+    try:
+        return max(1, int(raw or default))
+    except ValueError:
+        return default
+
+
+def _positive_float(key: str, default: float) -> float:
+    raw = (_get(key, str(default)) or "").strip()
+    try:
+        return max(0.0, float(raw or default))
+    except ValueError:
+        return default
 
 
 class _PipeSocket:
@@ -105,11 +188,54 @@ class SmbTds(tds.MSSQL):
         self._smb_conn: SMBConnection | None = None
 
     def connect(self):  # override: build the pipe transport, not a TCP socket
+        """Open the pipe, retrying the transient refusals that used to kill whole runs.
+
+        Retried *here and only here*. Establishing the connection is the one step that can
+        be repeated with no consequence, because nothing has been sent yet. A pipe that
+        breaks mid-statement is not retried at any layer above this: the single write path
+        (``yms/orders.py``) is a money transaction, and re-running a batch whose outcome is
+        unknown could book a work order twice. It already handles that its own way, by
+        making the write idempotent at the source.
+        """
+        attempts = _positive_int("COREYARD_SMB_CONNECT_ATTEMPTS", DEFAULT_CONNECT_ATTEMPTS)
+        backoff = _positive_float("COREYARD_SMB_CONNECT_BACKOFF", DEFAULT_CONNECT_BACKOFF)
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._connect_once()
+            except Exception as exc:
+                if attempt == attempts or not _is_transient(exc):
+                    raise
+                # Jittered, so that jobs which collided on the first attempt — `counts`
+                # runs every minute and eBay every five, against this same pipe — do not
+                # line up and collide again on the retry.
+                pause = backoff * (2 ** (attempt - 1))
+                pause += random.uniform(0, pause / 2)
+                print(f"  . source pipe unavailable ({type(exc).__name__}); "
+                      f"retrying in {pause:.1f}s ({attempt}/{attempts - 1})",
+                      file=sys.stderr)
+                time.sleep(pause)
+        raise AssertionError("unreachable: the loop returns or raises")
+
+    def _connect_once(self):
+        """One full attempt, leaving nothing behind if it fails part-way.
+
+        The four steps below fail at different points and the later ones hold a live socket
+        and an authenticated session. Dropping that on the floor and looping would leak a
+        session per attempt against a server whose pipe instances are already exhausted —
+        making the next attempt likelier to fail for the same reason.
+        """
         host, name, user, pwd, domain, pipe = self._smb
         conn = SMBConnection(name, host, sess_port=445, timeout=20)
-        conn.login(user, pwd, domain=domain)
-        tid = conn.connectTree("IPC$")
-        fid = conn.openFile(tid, pipe)
+        try:
+            conn.login(user, pwd, domain=domain)
+            tid = conn.connectTree("IPC$")
+            fid = conn.openFile(tid, pipe)
+        except Exception:
+            try:
+                conn.logoff()
+            except Exception:
+                pass        # already dead; the original failure is the one worth raising
+            raise
         self._smb_conn = conn
         self.socket = _PipeSocket(conn, tid, fid)
         return self.socket
