@@ -170,3 +170,66 @@ class CodeAndDataAreSeparate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AConfiguredPathIsNotRelativeToWhereverYouStarted(unittest.TestCase):
+    """A relative path in `.env` names one of this installation's files.
+
+    Resolved against the process directory instead, the same configuration works from a
+    shell in the checkout and fails from anywhere else. That is not hypothetical: the health
+    check is the one scheduled job whose crontab line has no `cd` in front of it, so cron ran
+    it from the home directory, `STORE_CATALOG_OVERRIDES_FILE=out/engine-catalog-overrides.json`
+    resolved to a file that was never there, and `doctor` reported a perfectly good override
+    file as missing every fifteen minutes for days. The error named the relative path it was
+    handed, so it read as "the file is gone" rather than "I looked in the wrong place".
+    """
+
+    def test_a_relative_path_resolves_against_the_data_root(self):
+        from coreyard.config import data_path
+
+        self.assertEqual(data_path("out/overrides.json"), DATA_ROOT / "out/overrides.json")
+
+    def test_it_does_not_depend_on_the_working_directory(self):
+        from coreyard.config import data_path
+
+        here = os.getcwd()
+        try:
+            os.chdir(tempfile.gettempdir())
+            moved = data_path("out/overrides.json")
+        finally:
+            os.chdir(here)
+        self.assertEqual(moved, DATA_ROOT / "out/overrides.json")
+
+    def test_an_absolute_path_is_left_exactly_as_written(self):
+        from coreyard.config import data_path
+
+        self.assertEqual(data_path("/etc/coreyard/overrides.json"),
+                         Path("/etc/coreyard/overrides.json"))
+
+    def test_a_home_relative_path_is_expanded_not_nested(self):
+        from coreyard.config import data_path
+
+        resolved = data_path("~/overrides.json")
+        self.assertEqual(resolved, Path.home() / "overrides.json")
+        self.assertTrue(resolved.is_absolute())
+
+    def test_nothing_configured_stays_nothing(self):
+        from coreyard.config import data_path
+
+        for empty in (None, "", "   "):
+            self.assertIsNone(data_path(empty))
+
+    def test_the_override_loader_uses_it(self):
+        """The specific path that produced the popup."""
+        from coreyard import overrides
+
+        here = os.getcwd()
+        try:
+            os.chdir(tempfile.gettempdir())
+            with self.assertRaises(overrides.OverrideError) as caught:
+                overrides.load("out/definitely-not-there.json")
+        finally:
+            os.chdir(here)
+        # The message must name where it actually looked, or the next person reads
+        # "not found" and goes hunting for a file that is sitting right there.
+        self.assertIn(str(DATA_ROOT), str(caught.exception))

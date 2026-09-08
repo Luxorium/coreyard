@@ -70,6 +70,29 @@ def out_dir() -> Path:
     return DATA_ROOT / "out"
 
 
+def data_path(value: "str | Path | None") -> "Path | None":
+    """Resolve a configured file path against the data root, not the process directory.
+
+    Every path in ``.env`` names one of this installation's own files, and the natural way
+    to write one is relative: ``out/engine-catalog-overrides.json``. Left as-is that is
+    resolved against the current directory, so the same configuration finds the file from a
+    shell in the checkout and fails from anywhere else — which made ``doctor`` report a
+    perfectly good override file as missing whenever cron ran the health check, because that
+    is the one scheduled job with no ``cd`` in front of it. The error named the relative path
+    it was given, so it read as "the file is gone" rather than "I looked in the wrong place".
+
+    An absolute path is returned unchanged, and ``~`` is expanded, so nothing an operator has
+    already written stops working.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    return path if path.is_absolute() else DATA_ROOT / path
+
+
 def load_env(path: Path = ENV_PATH) -> None:
     """Load KEY=VALUE lines from ``.env`` into ``os.environ`` (without overriding
     variables already set in the real environment). Supports ``#`` comments, blank

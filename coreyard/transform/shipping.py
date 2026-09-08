@@ -236,7 +236,11 @@ def load(path: "str | Path | None") -> ShippingPolicy:
     """
     if not path:
         return EMPTY
-    target = Path(path).expanduser()
+    # Relative paths name this installation's own files, so they resolve against the
+    # data root rather than whatever directory the caller started in.
+    from coreyard.config import data_path
+
+    target = data_path(path) or Path(path).expanduser()
     if not target.exists():
         raise ShippingPolicyError(
             f"STORE_SHIPPING_POLICY_FILE points at {target}, which does not exist. "

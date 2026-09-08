@@ -35,7 +35,12 @@ EMPTY = CatalogOverrides({})
 def load(path: str | Path | None) -> CatalogOverrides:
     if not path:
         return EMPTY
-    source = Path(path)
+    # Resolved against the data root: a relative path in `.env` names one of this
+    # installation's files, not one relative to whatever directory the caller happened to
+    # start in. See `config.data_path`.
+    from coreyard.config import data_path
+
+    source = data_path(path) or Path(path)
     try:
         data = json.loads(source.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:

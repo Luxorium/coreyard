@@ -283,7 +283,9 @@ def detect(load: bool = True) -> Capabilities:
     portal = _text("EBAY_PORTAL_FILE")
     default_portal = DATA_ROOT / "portal.json"
     if portal:
-        exists = Path(portal).expanduser().is_file()
+        from coreyard.config import data_path
+
+        exists = bool((data_path(portal) or Path(portal)).is_file())
         add("portal", ON if exists else MISSING,
             f"portal map {portal}" if exists else f"{portal} does not exist",
             ("EBAY_PORTAL_FILE",))
