@@ -120,13 +120,13 @@ def merge(into: dict, aspects: list[dict]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--categories", default=str(REPO_ROOT / "out" / "ebay-category-suggestions.json"),
+    ap.add_argument("--categories", default=str(out_dir() / "ebay-category-suggestions.json"),
                     help="category plan to read ids from")
     ap.add_argument("--category", action="append", default=[],
                     help="fetch only this category id (repeatable)")
     ap.add_argument("--marketplace", default="EBAY_MOTORS")
-    ap.add_argument("--out", default=str(REPO_ROOT / "out" / "ebay-item-aspects.json"))
-    ap.add_argument("--cache", default=str(REPO_ROOT / "out" / "ebay-aspect-pages"))
+    ap.add_argument("--out", default=str(out_dir() / "ebay-item-aspects.json"))
+    ap.add_argument("--cache", default=str(out_dir() / "ebay-aspect-pages"))
     ap.add_argument("--delay", type=float, default=0.2)
     ap.add_argument("--refresh", action="store_true", help="ignore the cache")
     args = ap.parse_args(argv)

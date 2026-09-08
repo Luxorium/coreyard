@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
-from coreyard.config import REPO_ROOT, _get
+from coreyard.config import DATA_ROOT, _get
 
 
 class PortalConfigError(ValueError):
@@ -151,7 +151,7 @@ def load(path: str | Path | None = None) -> PortalMap:
     When ``path`` is omitted, ``EBAY_PORTAL_FILE`` is consulted through ``config._get``
     and then falls back to the ignored repository-root ``portal.json``.
     """
-    configured = path or _get("EBAY_PORTAL_FILE", str(REPO_ROOT / "portal.json"))
+    configured = path or _get("EBAY_PORTAL_FILE", str(DATA_ROOT / "portal.json"))
     source = Path(str(configured))
     try:
         data = json.loads(source.read_text(encoding="utf-8"))

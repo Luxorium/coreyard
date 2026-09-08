@@ -64,6 +64,8 @@ Python 3.10+ is required; there is no build step.
 ./install.sh --no-deps --yes
 .venv/bin/python -m unittest discover -s tests -v
 .venv/bin/python scripts/check_neutrality.py
+.venv/bin/python scripts/inventory.py --check
+.venv/bin/python scripts/ledger.py --summary
 .venv/bin/python scripts/demo_offline.py
 bin/coreyard --help                 # every command; routing lives in coreyard/cli.py
 bin/coreyard doctor                 # installation + liveness, read-only

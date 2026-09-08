@@ -26,11 +26,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from coreyard.config import REPO_ROOT
+from coreyard.config import DATA_ROOT, REPO_ROOT, out_dir
 
 NAME = "coreyard-sync"
-LOCK = REPO_ROOT / "out" / ".sync.lock"
-LOG = REPO_ROOT / "out" / "sync.log"
+LOCK = out_dir() / ".sync.lock"
+LOG = out_dir() / "sync.log"
 # What a new installation schedules. `sync` publishes: the operator-facing command assumes
 # Shopify, so a scheduled job cannot end up quietly writing a CSV that nobody reads.
 DEFAULT_TASK = "sync"
@@ -125,7 +125,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory={REPO_ROOT}
+WorkingDirectory={DATA_ROOT}
 ExecStart={command_for(task)}
 # A stalled SMB call must not wedge the timer forever.
 TimeoutStartSec={max(seconds * 4, 3600)}
@@ -223,7 +223,7 @@ def install_cron(task: str, seconds: int, dry_run: bool) -> int:
     task_name = _task_name(task)
     marker_name = f"{NAME}:{task_name}"
     marker = f"# {marker_name} (managed by coreyard.schedule)"
-    entry = (f"{_cron_schedule(seconds)} cd {REPO_ROOT} && {command_for(task)} "
+    entry = (f"{_cron_schedule(seconds)} cd {DATA_ROOT} && {command_for(task)} "
              f">> {LOG} 2>&1 # {marker_name}")
     if dry_run:
         print(f"--- would add to crontab ---\n{marker}\n{entry}")
@@ -233,6 +233,117 @@ def install_cron(task: str, seconds: int, dry_run: bool) -> int:
     _write_crontab(lines)
     print(f"  added cron entry: {entry}")
     return 0
+
+
+def _cron_field(field: str, low: int, high: int) -> list[int] | None:
+    """The values a cron field fires on, or None if it is a shape we do not read."""
+    values: set[int] = set()
+    for part in field.split(","):
+        step = 1
+        if "/" in part:
+            part, _, raw_step = part.partition("/")
+            if not raw_step.isdigit() or int(raw_step) < 1:
+                return None
+            step = int(raw_step)
+        if part == "*":
+            start, stop = low, high
+        elif "-" in part:
+            first, _, last = part.partition("-")
+            if not (first.isdigit() and last.isdigit()):
+                return None
+            start, stop = int(first), int(last)
+        elif part.isdigit():
+            start = stop = int(part)
+        else:
+            return None
+        if start < low or stop > high or stop < start:
+            return None
+        values.update(range(start, stop + 1, step))
+    return sorted(values) or None
+
+
+def cron_period(spec: str) -> int | None:
+    """The **longest** gap between two consecutive runs of this cron expression.
+
+    The longest, not the average: "stale" has to be measured against the worst wait the
+    schedule actually permits, or a job firing at ``5,15,25,35,45,55`` would be called late
+    every hour on the one ten-minute boundary it never crosses.
+
+    Only minute and hour are read. A schedule narrowed by day-of-month or day-of-week is
+    reported as at least a day, because a weekday-only job is legitimately silent all
+    weekend and guessing more precisely than that is how a check earns a permanent place in
+    the ignored pile.
+    """
+    fields = spec.split()
+    if len(fields) < 5:
+        return None
+    minutes = _cron_field(fields[0], 0, 59)
+    hours = _cron_field(fields[1], 0, 23)
+    if not minutes or not hours:
+        return None
+    restricted = fields[2] != "*" or fields[4] != "*"
+    firings = sorted(hour * 3600 + minute * 60 for hour in hours for minute in minutes)
+    if len(firings) == 1:
+        return 7 * 86400 if restricted else 86400
+    gaps = [second - first for first, second in zip(firings, firings[1:])]
+    gaps.append(firings[0] + 86400 - firings[-1])          # the wrap past midnight
+    longest = max(gaps)
+    return max(longest, 86400) if restricted else longest
+
+
+def _cron_task(line: str) -> str | None:
+    """Which CoreYard job a crontab line runs, or None if it runs none.
+
+    Recognised by the launcher rather than by a marker this module wrote, because a real
+    host's crontab is hand-written: this installation's hourly sync, five-minute delta and
+    ten-minute order poll carry a full safety envelope of `timeout`, `prlimit`, `nice` and
+    `ionice` and none of the generated marker. A scheduler check that only saw its own
+    entries would report "nothing scheduled" on the busiest host it will ever run on.
+    """
+    if not re.search(r"(bin/coreyard|-m\s+coreyard)\b", line):
+        return None
+    lock = re.search(r"--lock\s+([A-Za-z0-9_-]+)", line)
+    if lock:
+        return lock.group(1)
+    after = re.split(r"bin/coreyard|-m\s+coreyard[\w.]*", line, maxsplit=1)
+    tokens = [t for t in (after[1] if len(after) > 1 else "").split() if not t.startswith("-")]
+    return tokens[0] if tokens else None
+
+
+def installed_intervals() -> dict[str, int]:
+    """``{task: seconds}`` for the CoreYard jobs this host actually runs, or ``{}``.
+
+    Read rather than assumed, because "stale" has no meaning without it: a job is late
+    relative to *its own schedule*, and a five-minute catch-up and a nightly pass are late
+    at very different times. An installation with nothing scheduled has nothing to be late
+    for, which is why an empty mapping is a real answer rather than a failure — alerting on
+    a job the operator deliberately paused is the fastest way to teach them to ignore
+    alerts.
+
+    Where one task is scheduled more than once — an hourly sync plus a morning deep pass —
+    the shortest interval wins, because that is the one whose silence is evidence.
+    """
+    found: dict[str, int] = {}
+
+    def note(task: str | None, seconds: int | None) -> None:
+        if task and seconds:
+            found[task] = min(seconds, found.get(task, seconds))
+
+    if shutil.which("crontab"):
+        for line in _crontab_lines():
+            if line.lstrip().startswith("#"):
+                continue
+            note(_cron_task(line), cron_period(line))
+    if shutil.which("systemctl"):
+        for backend in ("systemd-user", "systemd-system"):
+            timer = _unit_dir(backend) / f"{NAME}.timer"
+            if not timer.exists():
+                continue
+            match = re.search(r"^OnUnitActiveSec=(\d+)", timer.read_text(errors="replace"),
+                              re.M)
+            if match:
+                note(DEFAULT_TASK, int(match.group(1)))
+    return found
 
 
 # --------------------------------------------------------------------- actions ---
@@ -246,7 +357,7 @@ def do_install(args) -> int:
     if backend == "cron":
         return install_cron(args.task, seconds, args.dry_run)
     print("No supported scheduler found (systemd or cron). Run CoreYard manually, or add:\n"
-          f"  {_cron_schedule(seconds)} cd {REPO_ROOT} && {command_for(args.task)}",
+          f"  {_cron_schedule(seconds)} cd {DATA_ROOT} && {command_for(args.task)}",
           file=sys.stderr)
     return 1
 

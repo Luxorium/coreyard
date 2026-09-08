@@ -23,10 +23,12 @@ customer data access, which for a custom app is a toggle on the app itself.
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import Iterator, Optional
 
-from coreyard.orders.pipeline import EventQueue, OrderWorker, _order_key, drain
+from coreyard.orders.pipeline import (EventQueue, OrderWorker, _order_key,
+                                      booking_attempts, drain)
 
 # The window a first poll looks back over when it has no cursor of its own.
 DEFAULT_LOOKBACK = timedelta(days=2)
@@ -122,6 +124,41 @@ def poll(client, spool: EventQueue, worker: OrderWorker, since: datetime,
     return queued, seen, latest
 
 
+def retry_parked(spool: EventQueue, worker: OrderWorker) -> int:
+    """Re-attempt bookings that failed on an earlier tick. Returns how many were tried.
+
+    A booking is refused for reasons that live outside CoreYard, and most of them are gone
+    by the next tick: the yard database was down, a lock was held too long, the batch timed
+    out. Until now every one of those waited for a person to notice `orders status` and run
+    `orders retry` by hand, which is the same as not being automatic at all — the sale sat
+    unbooked for as long as it took somebody to look.
+
+    Re-attempting is safe to do unasked because the write is idempotent at the source: the
+    booking transaction takes ``CustomerPO`` under ``UPDLOCK, HOLDLOCK`` and returns the
+    existing work order rather than raising a second one, so a retry of an order that in
+    fact succeeded is a no-op that reports the number it already had.
+
+    Bounded by :func:`booking_attempts`, because the other kind of cause — the part is no
+    longer on the shelf — never clears by waiting, and a job that retries it every ten
+    minutes forever is how a decision somebody has to make stays invisible. Orders past the
+    bound are left parked and reported, and `coreyard doctor` fails on them.
+    """
+    # Without write_orders a "retry" only re-parks the order with "retry skipped", burning
+    # an attempt on a stage that was never going to run.
+    if not worker.write_orders:
+        return 0
+    limit = booking_attempts()
+    count = spool.requeue_retryable(limit)
+    if count:
+        print(f"\n  re-attempting {count} order(s) parked by an earlier tick ...")
+        drain(spool, worker)
+    for webhook_id, name in spool.exhausted(limit):
+        print(f"  ! {name or webhook_id}: still unbooked after {limit} attempts, "
+              f"left for a person — `coreyard orders retry --id {webhook_id}`",
+              file=sys.stderr)
+    return count
+
+
 def check(client) -> int:
     """Report whether this installation can poll at all, and write nothing."""
     scopes = client.access_scopes()
@@ -155,6 +192,9 @@ def run(args) -> int:
         with EventQueue() as spool:
             queued, seen, latest = poll(client, spool, worker, start, limit=args.limit,
                                         paid_only=not args.include_unpaid)
+            # After the new arrivals, not before: a fresh order is the one with a customer
+            # waiting, and it should not queue behind a retry of something already late.
+            retry_parked(spool, worker)
         print(f"\n{seen} order(s) in the window, {queued} newly queued and handled.")
         # Safe to advance even if a stage failed: the order is already in the durable
         # queue, so `orders retry` still owns it. The cursor only decides what the *next*

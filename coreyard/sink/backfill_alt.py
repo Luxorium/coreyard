@@ -29,13 +29,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, NamedTuple
 
-from coreyard.config import REPO_ROOT, StoreProfile, load_store
+from coreyard.config import StoreProfile, load_store, out_dir
 from coreyard.models import Part
 from coreyard.sink.shopify_api import ShopifyClient
 from coreyard.transform import seo
 from coreyard.transform.render import r_number_from_handle
 
-DEFAULT_LOG = REPO_ROOT / "out" / "alt_backfill_results.jsonl"
+DEFAULT_LOG = out_dir() / "alt_backfill_results.jsonl"
 BATCH = 25
 
 _PAGE = """query($cursor:String){

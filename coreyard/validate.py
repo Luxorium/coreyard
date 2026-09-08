@@ -243,7 +243,7 @@ def validate(profile=None, weights=None, orders=None, shipping=None,
 
 
 def _configured() -> dict:
-    from coreyard.config import REPO_ROOT, _get, load_env
+    from coreyard.config import DATA_ROOT, _get, load_env
 
     load_env()
     return {
@@ -253,11 +253,11 @@ def _configured() -> dict:
         "shipping": _get("STORE_SHIPPING_POLICY_FILE", "") or None,
         "overrides": _get("STORE_CATALOG_OVERRIDES_FILE", "") or None,
         "portal": (_get("EBAY_PORTAL_FILE", "") or
-                   (str(REPO_ROOT / "portal.json")
-                    if (REPO_ROOT / "portal.json").is_file() else None)),
+                   (str(DATA_ROOT / "portal.json")
+                    if (DATA_ROOT / "portal.json").is_file() else None)),
         "store": (_get("STORE_FILE", "") or
-                  (str(REPO_ROOT / "store.json")
-                   if (REPO_ROOT / "store.json").is_file() else None)),
+                  (str(DATA_ROOT / "store.json")
+                   if (DATA_ROOT / "store.json").is_file() else None)),
     }
 
 

@@ -38,10 +38,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from coreyard.config import REPO_ROOT, _get, load_env, load_store
+from coreyard.config import DATA_ROOT, _get, load_env, load_store
 
-QUEUE_DB = REPO_ROOT / "coreyard_webhook_queue.sqlite3"
+QUEUE_DB = DATA_ROOT / "coreyard_webhook_queue.sqlite3"
 DEFAULT_ERROR_RETENTION_DAYS = 7
+
+# How many booking attempts an order gets in total, the first being the live one at the time
+# of sale and the rest automatic re-attempts on later ticks. Bounded on purpose: the causes divide into two kinds and only one of them clears by
+# waiting. A yard database that was down, a lock held too long, a timeout — those are gone by
+# the next tick. "R#nnnnn is not available in the quantity ordered" is not: the part has left
+# the shelf, and no number of retries puts it back. Retrying the first kind forever is how a
+# transient blip needs a human; retrying the second kind forever is how a real decision hides
+# behind a job that looks busy. Five ticks is under an hour at the installed schedule.
+DEFAULT_BOOKING_ATTEMPTS = 5
 
 
 def order_is_paid(payload: object) -> bool:
@@ -69,6 +78,22 @@ def _order_name(payload: dict) -> str:
     storefront one — and the duplicate guard keys on it.
     """
     return payload.get("name") or f"#{payload.get('order_number', '')}"
+
+
+def booking_attempts() -> int:
+    """Total booking attempts allowed per order, counting the original.
+
+    So the default of 5 is one live booking plus four automatic re-attempts. Below 2 there
+    is no retry pass at all, which is the way to turn the behaviour off.
+    """
+    raw = (_get("COREYARD_ORDER_BOOKING_ATTEMPTS",
+                str(DEFAULT_BOOKING_ATTEMPTS)) or "").strip()
+    try:
+        attempts = int(raw or DEFAULT_BOOKING_ATTEMPTS)
+    except ValueError:
+        raise RuntimeError("COREYARD_ORDER_BOOKING_ATTEMPTS must be a whole number, "
+                           f"got {raw!r}") from None
+    return max(0, attempts)
 
 
 def _retention_days(key: str, default: int) -> int:
@@ -214,6 +239,23 @@ class EventQueue:
             )
             self.conn.commit()
 
+    def stuck(self, older_than: "datetime") -> list[tuple[str, str, str, str]]:
+        """``(webhook_id, state, received_at, order_name)`` for events that have not
+        finished and were received before ``older_than``.
+
+        Deliberately returns no payload. This feeds an alert, an alert is delivered to
+        somewhere outside this host, and the payload is the one field in this table that
+        carries customer PII. An order *name* is a reference the operator needs in order to
+        act; a customer's address is never needed to say that a booking is stuck.
+        """
+        cutoff = older_than.isoformat()
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT webhook_id, state, received_at, COALESCE(order_name, '')"
+                " FROM events WHERE state IN ('pending','error') AND received_at < ?"
+                " ORDER BY received_at", (cutoff,)).fetchall()
+        return [tuple(row) for row in rows]
+
     def recent(self, limit: int = 20) -> list[tuple]:
         with self.lock:
             return list(self.conn.execute(
@@ -238,6 +280,33 @@ class EventQueue:
             result = self.conn.execute(sql, values)
             self.conn.commit()
             return result.rowcount
+
+    def requeue_retryable(self, max_attempts: int) -> int:
+        """Make parked error rows pending again — but only while they have attempts left.
+
+        The unbounded :meth:`requeue` above is what ``orders retry`` calls, because a person
+        asking for a retry has looked at the failure and decided it is worth another go.
+        Nothing has looked at this one, so it needs a stop: an order refused because its part
+        is gone would otherwise be re-attempted every ten minutes until somebody noticed the
+        log, which is the state this was meant to end.
+        """
+        if max_attempts < 1:
+            return 0
+        with self.lock:
+            result = self.conn.execute(
+                "UPDATE events SET state='pending' WHERE state='error'"
+                " AND payload IS NOT NULL AND attempts < ?", (max_attempts,))
+            self.conn.commit()
+            return result.rowcount
+
+    def exhausted(self, max_attempts: int) -> list[tuple[str, str]]:
+        """``(webhook_id, order_name)`` for parked orders that have run out of attempts."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT webhook_id, COALESCE(order_name, '') FROM events"
+                " WHERE state='error' AND payload IS NOT NULL AND attempts >= ?"
+                " ORDER BY received_at", (max_attempts,)).fetchall()
+        return [tuple(row) for row in rows]
 
     def error_count(self, webhook_id: str | None = None) -> int:
         sql = "SELECT COUNT(*) FROM events WHERE state='error' AND payload IS NOT NULL"

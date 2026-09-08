@@ -18,14 +18,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from coreyard.config import REPO_ROOT, StoreProfile
+from coreyard.config import DATA_ROOT, StoreProfile
 from coreyard.models import Part
 from coreyard.transform.render import render
 
 # Named here rather than in the sync orchestrator because the order webhook also needs to
 # reach the retirement memory, and importing the whole sync path to learn a filename would
 # drag the extract layer into a service that must start without a database.
-DEFAULT_STATE_DB = REPO_ROOT / "coreyard_sync_state.sqlite3"
+DEFAULT_STATE_DB = DATA_ROOT / "coreyard_sync_state.sqlite3"
 
 
 def product_fingerprint(part: Part, image_urls: list[str], store: StoreProfile) -> str:

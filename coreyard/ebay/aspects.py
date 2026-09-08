@@ -10,7 +10,7 @@ import json
 import re
 from pathlib import Path
 
-from coreyard.config import REPO_ROOT, _get
+from coreyard.config import _get, out_dir
 
 
 class AspectError(ValueError):
@@ -25,7 +25,7 @@ def vocab(path: str | Path | None = None, *, required: bool = False) -> dict[str
     """Load eBay aspect metadata, or return an empty vocabulary for derivation-only use."""
     global _VOCAB, _VOCAB_PATH
     configured = str(path or _get(
-        "EBAY_ASPECTS_FILE", str(REPO_ROOT / "out" / "ebay-item-aspects.json")
+        "EBAY_ASPECTS_FILE", str(out_dir() / "ebay-item-aspects.json")
     ))
     if _VOCAB is not None and configured == _VOCAB_PATH:
         return _VOCAB

@@ -8,7 +8,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from coreyard.config import REPO_ROOT, _get, load_env
+from coreyard.config import _get, load_env, out_dir
 from coreyard.ebay.client import PortalClient
 from coreyard.ebay.portal import load as load_portal
 from coreyard.ebay import link
@@ -16,7 +16,7 @@ from coreyard.ebay.util import TITLE_MAX as EBAY_TITLE_MAX
 from coreyard.ebay.util import groups_by_interchange, truthy
 from coreyard.transform.pricing import money_str, parse_money
 
-DEFAULT_LISTINGS = REPO_ROOT / "out" / "ebay-listings.json"
+DEFAULT_LISTINGS = out_dir() / "ebay-listings.json"
 DEFAULT_CAP = 25
 TABS = ("unlisted", "listed", "flagged", "sold")
 
@@ -536,11 +536,11 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     command.add_argument("--limit", type=int, help="stop after this many listings")
     command.add_argument("--title-limit", type=int, default=EBAY_TITLE_MAX)
     command.add_argument("--details",
-                         default=str(REPO_ROOT / "out" / "ebay-details.json"),
+                         default=str(out_dir() / "ebay-details.json"),
                          help="edit-form cache, read if present and never fetched")
-    command.add_argument("--out-prefix", default=str(REPO_ROOT / "out" / "ebay-daily"))
+    command.add_argument("--out-prefix", default=str(out_dir() / "ebay-daily"))
     command.add_argument("--overrides-out",
-                         default=str(REPO_ROOT / "out" / "catalog-overrides.json"))
+                         default=str(out_dir() / "catalog-overrides.json"))
     command.add_argument("--portal")
     command.add_argument("--apply", action="store_true",
                          help="save in the portal; omit for a dry run. Never pushes.")
@@ -562,7 +562,7 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     command.add_argument("--tab", choices=TABS, default="unlisted")
     command.add_argument("--portal", help="portal map JSON (default: EBAY_PORTAL_FILE)")
     command.add_argument("--no-resume", action="store_true")
-    command.add_argument("--out", default=str(REPO_ROOT / "out" / "ebay-details.json"))
+    command.add_argument("--out", default=str(out_dir() / "ebay-details.json"))
     command.set_defaults(func=details)
 
 
@@ -583,17 +583,17 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     ):
         command = sub.add_parser(name, help=help_text)
         command.add_argument("listings", nargs="?",
-                             default=str(REPO_ROOT / "out" / "ebay-engines.json"),
+                             default=str(out_dir() / "ebay-engines.json"),
                              help="normalized listing checkpoint from `ebay pull`")
         command.add_argument("--details",
-                             default=str(REPO_ROOT / "out" / "ebay-engine-details.json"),
+                             default=str(out_dir() / "ebay-engine-details.json"),
                              help="edit-form cache; supplies the R# each title is keyed to")
         command.add_argument("--parts",
                              help="JSON of yard rows instead of reading the database")
         command.add_argument("--limit", type=int, default=EBAY_TITLE_MAX,
                              help="marketplace title budget, measured after escaping")
         command.add_argument("--out",
-                             default=str(REPO_ROOT / "out" / "ebay-engine-titles.json"))
+                             default=str(out_dir() / "ebay-engine-titles.json"))
         command.set_defaults(func=marketplace_titles)
 
     command = sub.add_parser("aspects", help="derive and save eBay item specifics")
@@ -602,7 +602,7 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     command.add_argument("--rows", type=int, default=1000)
     command.add_argument("--deep", action="store_true")
     command.add_argument("--details-out",
-                         default=str(REPO_ROOT / "out" / "ebay-details.json"))
+                         default=str(out_dir() / "ebay-details.json"))
     command.add_argument("--aspect-metadata")
     command.add_argument("--warranty")
     command.add_argument("--portal")

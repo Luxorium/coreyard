@@ -33,6 +33,11 @@ _DDL = """CREATE TABLE IF NOT EXISTS runs (
   ok INTEGER,
   counts TEXT NOT NULL DEFAULT '{}')"""
 
+# Added after the table shipped. A row written before the upgrade has no code to report,
+# which is why this reads as NULL rather than as 0: "we did not record it" and "it exited
+# cleanly" are different answers, and only one of them should make a failed run look fine.
+_MIGRATIONS = (("exit_code", "ALTER TABLE runs ADD COLUMN exit_code INTEGER"),)
+
 # Written at the top of every scheduled run's output. Scheduled jobs append to one log
 # forever, so without a boundary there is no way to tell a failure that is happening from
 # one that was fixed days ago: an error sits in the tail window and is re-reported until
@@ -61,6 +66,10 @@ def _connect(db: Path) -> sqlite3.Connection:
     db.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db, timeout=30)
     conn.execute(_DDL)
+    present = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
+    for column, statement in _MIGRATIONS:
+        if column not in present:
+            conn.execute(statement)
     conn.commit()
     return conn
 
@@ -68,6 +77,33 @@ def _connect(db: Path) -> sqlite3.Connection:
 # A row with no `finished` is a run in flight — unless it is old, in which case the process
 # was killed outright and will never come back to close it.
 STALE_RUN = timedelta(hours=2)
+
+
+# 124 is the status GNU ``timeout`` uses and the one ``cli._deadline`` raises. A run
+# stopped by its own deadline kept everything it banked, so it is recorded as an outcome in
+# its own right rather than as a failure — reporting it FAILED buries the runs that broke.
+TIMED_OUT = 124
+
+
+class Outcome:
+    """The exit status of the run being recorded.
+
+    A command reports failure by *returning* a nonzero code, not by raising: that is what
+    ``argparse``-style CLIs do and what ``cli.main`` propagates to the shell. The recorder
+    therefore has to be told, because from inside a ``with`` block a function that returns 2
+    and one that returns 0 look identical. Not being told is exactly how a sync that exited
+    2 was written to the run history as ``ok=1``, so ``coreyard status`` reported the last
+    full sync as successful while the shell had already reported it as failed.
+    """
+
+    __slots__ = ("code",)
+
+    def __init__(self) -> None:
+        self.code: int | None = 0
+
+    @property
+    def ok(self) -> bool:
+        return self.code in (0, None, TIMED_OUT)
 
 
 @contextmanager
@@ -79,6 +115,10 @@ def record(command: str, scope: str = "", db: Path = DEFAULT_STATE_DB):
     because a full sync holds the lock" from "the catch-up job is dead". A crash is the
     other case worth recording, so the close happens in a ``finally``. Recording must never
     be the thing that breaks a run, so every failure here is swallowed.
+
+    Yields an :class:`Outcome`. A caller whose command returns an exit code must assign it
+    (``with ops.record(...) as run: run.code = func(args)``); one whose body raises on
+    failure can ignore the value and keep the plain ``with`` form.
     """
     _counts.clear()
     started = datetime.now(timezone.utc)
@@ -98,36 +138,40 @@ def record(command: str, scope: str = "", db: Path = DEFAULT_STATE_DB):
     except Exception:
         pass
 
-    ok = False
+    outcome = Outcome()
+    raised = False
     try:
-        yield
-        ok = True
+        yield outcome
     except SystemExit as exc:
-        ok = exc.code in (0, None)
-        # 124 is the deadline the run was given, not a fault. It stopped where it was told
-        # to, keeping everything it had banked; calling that FAILED buries the runs that
-        # actually broke.
-        if exc.code == 124:
-            _counts["timed_out"] = True
+        outcome.code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None
+                                                                   else 1)
         raise
     except BaseException:
+        raised = True
+        outcome.code = 1
         raise
     finally:
+        if outcome.code == TIMED_OUT:
+            _counts["timed_out"] = True
+        # An exception is a failure whatever the code says; otherwise the returned status
+        # is the answer, because it is the one the shell and any monitor already saw.
+        ok = (not raised) and outcome.ok
         try:
             conn = _connect(db)
             with conn:
                 if row_id is None:                 # the opening insert did not land
                     conn.execute(
-                        "INSERT INTO runs(command, scope, started, finished, ok, counts)"
-                        " VALUES (?,?,?,?,?,?)",
+                        "INSERT INTO runs(command, scope, started, finished, ok, counts,"
+                        " exit_code) VALUES (?,?,?,?,?,?,?)",
                         (command, scope, started.isoformat(),
                          datetime.now(timezone.utc).isoformat(), int(ok),
-                         json.dumps(_counts, default=str)))
+                         json.dumps(_counts, default=str), outcome.code))
                 else:
                     conn.execute(
-                        "UPDATE runs SET finished = ?, ok = ?, counts = ? WHERE id = ?",
+                        "UPDATE runs SET finished = ?, ok = ?, counts = ?, exit_code = ?"
+                        " WHERE id = ?",
                         (datetime.now(timezone.utc).isoformat(), int(ok),
-                         json.dumps(_counts, default=str), row_id))
+                         json.dumps(_counts, default=str), outcome.code, row_id))
             conn.close()
         except Exception:
             pass
@@ -167,7 +211,7 @@ def history(limit: int = 20, db: Path = DEFAULT_STATE_DB,
     try:
         conn = _connect(db)
         rows = conn.execute(
-            "SELECT command, scope, started, finished, ok, counts FROM runs"
+            "SELECT command, scope, started, finished, ok, counts, exit_code FROM runs"
             " ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     except Exception:
         return []
@@ -175,7 +219,7 @@ def history(limit: int = 20, db: Path = DEFAULT_STATE_DB,
         if conn is not None:
             conn.close()
     out = []
-    for command, scope, started, finished, ok, counts in rows:
+    for command, scope, started, finished, ok, counts, exit_code in rows:
         # An unfinished row is a run in flight. It is not an outcome, so by default it is
         # left out: "last full sync" must mean the last one that *ended*, or a run that is
         # still going would mask the result of the one before it.
@@ -187,7 +231,7 @@ def history(limit: int = 20, db: Path = DEFAULT_STATE_DB,
             parsed = {}
         out.append({"command": command, "scope": scope or "", "started": started,
                     "finished": finished, "ok": bool(ok), "counts": parsed,
-                    "running": finished is None})
+                    "exit_code": exit_code, "running": finished is None})
     return out
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from coreyard.config import REPO_ROOT, load_env, load_store
+from coreyard.config import load_env, load_store, out_dir
 from coreyard.ebay import link, workflow
 from coreyard.ebay.client import PortalClient
 from coreyard.ebay.portal import load as load_portal
@@ -192,7 +192,7 @@ def add_arguments(parser):
     parser.add_argument("--types-per-run", type=int, default=12)
     parser.add_argument("--part-type")
     parser.add_argument("--portal")
-    parser.add_argument("--state", default=str(REPO_ROOT / "out" / "ebay-price-state.json"))
-    parser.add_argument("--out", default=str(REPO_ROOT / "out" / "ebay-auto-prices.json"))
+    parser.add_argument("--state", default=str(out_dir() / "ebay-price-state.json"))
+    parser.add_argument("--out", default=str(out_dir() / "ebay-auto-prices.json"))
     parser.set_defaults(func=run)
     return parser

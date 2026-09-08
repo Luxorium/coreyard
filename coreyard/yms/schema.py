@@ -24,9 +24,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from coreyard.config import REPO_ROOT, _get, load_env
+from coreyard.config import DATA_ROOT, REPO_ROOT, _get, load_env
 
-SCHEMA_PATH = REPO_ROOT / "schema.json"
+SCHEMA_PATH = DATA_ROOT / "schema.json"
 EXAMPLE_PATH = REPO_ROOT / "schema.example.json"
 
 # Fields the transform layer expects the extract query to alias. Anything absent simply

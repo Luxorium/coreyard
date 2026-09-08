@@ -9,7 +9,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from coreyard.config import REPO_ROOT, load_env, load_store
+from coreyard.config import REPO_ROOT, load_env, load_store, out_dir
 from coreyard.ebay import link, titles, workflow
 from coreyard.ebay.client import PortalClient
 from coreyard.ebay.portal import load as load_portal
@@ -220,8 +220,8 @@ def add_arguments(parser):
     parser.add_argument("--cap", type=int, default=100)
     parser.add_argument("--apply", action="store_true",
                         help="save and verify unlisted titles; never prices or publication")
-    parser.add_argument("--state", default=str(REPO_ROOT / "out" / "ebay-title-state.json"))
-    parser.add_argument("--out", default=str(REPO_ROOT / "out" / "ebay-auto-titles.json"))
+    parser.add_argument("--state", default=str(out_dir() / "ebay-title-state.json"))
+    parser.add_argument("--out", default=str(out_dir() / "ebay-auto-titles.json"))
     parser.add_argument("--portal")
     parser.add_argument("--part-type", help="check only one source part-type code")
     parser.set_defaults(func=run)

@@ -50,7 +50,7 @@ class _DualStackServer(HTTPServer):
             pass
         HTTPServer.server_bind(self)
 
-from coreyard.config import ENV_PATH, REPO_ROOT, _get, load_env
+from coreyard.config import ENV_PATH, _get, load_env, out_dir
 
 DEFAULT_REDIRECT = "http://localhost:3456/callback"
 # read/write_files lets the publisher attach photos and set their alt text; read_orders lets
@@ -152,7 +152,7 @@ def run() -> int:
     })
 
     # Expose the consent URL to a file so it can be relayed/clicked without the terminal.
-    url_file = REPO_ROOT / "out" / "oauth_authorize_url.txt"
+    url_file = out_dir() / "oauth_authorize_url.txt"
     url_file.parent.mkdir(parents=True, exist_ok=True)
     url_file.write_text(authorize + "\n", encoding="utf-8")
 

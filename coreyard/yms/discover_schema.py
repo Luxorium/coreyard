@@ -18,10 +18,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from coreyard.config import REPO_ROOT, load_settings
+from coreyard.config import load_settings, out_dir
 from coreyard.yms.db import connect, query
 
-OUT_DIR = REPO_ROOT / "out" / "schema"
+OUT_DIR = out_dir() / "schema"
 
 # Name fragments that hint at the tables we care about, grouped by concern.
 KEYWORDS = {

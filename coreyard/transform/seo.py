@@ -84,6 +84,10 @@ _NOT_ACRONYM = {
     "ROD", "PIN", "NUT", "OIL", "GAS", "AIR", "HUB", "TOP", "JAR", "MOD",
     "BAG", "KEY", "CAM", "TIE", "RIM", "JACK",
     "PUMP", "DOOR",
+    # Proper nouns, not acronyms. The rule is right for the badges that really are
+    # initials — BMW, GMC, MDX, CTS — and wrong for a name that is merely short, so the
+    # same catalogue shipped "KIA Rondo" beside "Kia Amanti" and a make menu that shouted.
+    "KIA", "RIO",
 }
 
 # Abbreviations the source part-type table uses, expanded to the word a shopper types.

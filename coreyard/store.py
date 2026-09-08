@@ -50,7 +50,7 @@ def path(explicit: str | Path | None = None) -> Optional[Path]:
     The default location is only used when it happens to be there, so an installation that
     has never heard of this file is unaffected.
     """
-    from coreyard.config import REPO_ROOT, _get
+    from coreyard.config import DATA_ROOT, _get
 
     named = str(explicit or _get("STORE_FILE", "") or "").strip()
     if named:
@@ -58,7 +58,7 @@ def path(explicit: str | Path | None = None) -> Optional[Path]:
         if not target.is_file():
             raise StoreFileError(f"STORE_FILE points at {target}, which does not exist.")
         return target
-    fallback = REPO_ROOT / DEFAULT_NAME
+    fallback = DATA_ROOT / DEFAULT_NAME
     return fallback if fallback.is_file() else None
 
 

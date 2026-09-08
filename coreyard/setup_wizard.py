@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from coreyard.config import REPO_ROOT
+from coreyard.config import DATA_ROOT
 
 DEMO_SOURCE = "tabular:examples/parts.csv"
 
@@ -216,8 +216,8 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
                     help="'database' (default) or 'tabular:<path>'")
     ap.add_argument("--require-images", action="store_true",
                     help="only publish parts that have a photograph")
-    ap.add_argument("--env", type=Path, default=REPO_ROOT / ".env")
-    ap.add_argument("--store", type=Path, default=REPO_ROOT / "store.json")
+    ap.add_argument("--env", type=Path, default=DATA_ROOT / ".env")
+    ap.add_argument("--store", type=Path, default=DATA_ROOT / "store.json")
     ap.set_defaults(func=run)
     return ap
 

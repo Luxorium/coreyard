@@ -88,6 +88,8 @@ supported; there is no build, formatter, or linter.
 .venv/bin/python -m unittest discover -s tests -v          # full offline suite
 .venv/bin/python -m unittest tests.test_state.Diff.test_summary
 .venv/bin/python scripts/check_neutrality.py
+.venv/bin/python scripts/inventory.py --check              # docs/INVENTORY.md is current
+.venv/bin/python scripts/ledger.py --summary               # release acceptance status
 .venv/bin/python scripts/demo_offline.py                   # no DB; uses SMB photos
 ```
 
@@ -185,6 +187,7 @@ coreyard/setup_wizard.py  `coreyard init`: writes a working .env and store.json
 coreyard/store.py    one store file (profile/weights/shipping/orders), explicit files win
 coreyard/status.py   read-only overview of what the pipeline believes
 coreyard/doctor.py   installation and liveness diagnostics (shared with scripts/healthcheck.py)
+coreyard/capabilities.py  what this installation is configured to do; read before any check runs
 coreyard/ops.py      run history in the state database
 coreyard/source/     where inventory comes from: the Source seam, the database, a CSV/SQLite file
 coreyard/yms/        schema mapping, SMB/TDS reads, images, fitment, opt-in orders
@@ -542,6 +545,79 @@ output. The fixes are worth keeping intact:
 - **Exit 124 is a deadline, not a fault.** A run stopped by `--timeout` kept everything it
   banked; reporting it as FAILED buries the runs that actually broke.
 
+**"Not configured" and "broken" are different answers.** `coreyard/capabilities.py` is the
+only place that decides which, and every diagnostic asks it before it asks anything else. A
+capability is `on` when the operator configured it, `missing` when something else that *is*
+on depends on it, and `off` when it is simply not part of this installation — and only the
+middle case is a failure. That distinction is what lets order booking and the listing portal
+stay opt-in without their absence reading as a broken install, and what stopped `doctor`
+telling a yard running `COREYARD_SOURCE=tabular:parts.csv` to supply SMB credentials it does
+not need, a `schema.json` nothing would read, and an `smbclient` it never shells out to.
+
+Three rules keep it honest. It **reads configuration and nothing else** — no socket, no
+query, no write — because it runs before the checks decide what to check. It **must not call
+`load_env`**, for exactly the reason the render-path gates must not: a gate that loads the
+environment leaks the site's real `.env` into every unit test that touches it. And the
+resolved snapshot is **passed down, never re-derived**: `source.load(None)` re-reads the
+environment, so a check that resolved a tabular source and then asked for "the source" was
+handed the database instead — which is how a unit test came to open a live named pipe.
+
+**A check that stays quiet is the same defect as one that stays lit.** The delta cursor is
+allowed to age while a full sync holds the shared lock, because the catch-up tick is skipped
+by design. That excuse must be *bounded* — one full sync interval past the staleness
+threshold — or it inverts: on a host whose hourly full sync takes most of an hour a sync is
+almost always running, so "a sync is running" explained a cursor frozen for five days as
+readily as one frozen for six minutes, and `doctor` reported the five days as OK.
+`doctor._suppression_grace` and `alerts.check_delta` share the rule and read the interval
+from the host's own schedule (`schedule.installed_intervals`, which recognises hand-written
+crontab entries by the launcher, not by a marker this project wrote).
+
+**Alerting notifies three times and no more.** `coreyard alert` (`coreyard/alerts.py`)
+records each condition by a stable key, so it can tell a new breakage from a continuing one
+and can match a recovery to what it resolves: once when it appears, again after
+`COREYARD_ALERT_REPEAT` if still true, once when it clears. A delivery that failed is never
+recorded as sent — the condition stays open and is retried, because a page nobody received
+must not read as a page that was answered — and a breakage nobody was told about sends no
+recovery notice, which would otherwise arrive as a fresh incident. Alerts leave the host, so
+they carry order *names* and never payloads, credentials, or a notifier's own stdout, which
+may echo a URL with a token in it. Delivery is a configured command rather than a built-in
+mail or chat client: no transport dependency, no vendor, and every operator already has
+something that works.
+
+**Code paths and data paths are different roots.** `config.REPO_ROOT` is where the code
+is — the launcher, the virtualenv interpreter, `schema.example.json`, the source
+fingerprint. `config.DATA_ROOT` (and `config.out_dir()`) is where this installation's own
+files are: `.env`, `store.json`, `schema.json`, `portal.json`, the state and queue
+databases, `out/` and the locks. Anchoring the second to the first is correct only in a
+source checkout; installed as a package it means writing into `site-packages`, which fails
+on a read-only tree and is wrong even when it works, because the next upgrade replaces the
+directory holding the yard's sync state. Resolution order is `COREYARD_HOME`, then the
+checkout when this is one and it is writable, then `$XDG_DATA_HOME/coreyard` — the middle
+rule is what guarantees an upgrade moves nothing for an existing installation.
+`COREYARD_HOME` is read from the real environment only, never through `_get`, because the
+location of `.env` cannot be configured inside `.env`.
+
+**An unsupported combination refuses before side effects.** `cli.SUPPORT` declares what
+each of the 55 command nodes writes and the capabilities it cannot run without; `cli.unmet`
+compares that against the resolved snapshot and `cli.main` exits 2 before the lock is taken,
+naming the capability, the reason and the configured source. The tree is walked by one
+implementation (`cli.tree`), used by both the preflight and `scripts/inventory.py`, because
+a generated document that walked the tree differently from the code enforcing it would
+describe a different tool. Two rules keep the declarations honest: "cannot run without" is
+strict, so a capability only *some* invocations need does not belong there — gating `orders
+poll` on the webhook secret would refuse to poll for a site that deliberately never
+registered a webhook — and a refusal is *recorded*, so a scheduled job that starts refusing
+every tick does not read as a job that stopped being scheduled.
+
+**A run's exit code is part of its record.** A command reports failure by *returning* a
+nonzero code, not by raising, so from inside `ops.record` a run that exited 2 and one that
+exited 0 look identical. Believing the second wrote `ok=1` for runs the shell had already
+called failures, and `coreyard status` then reported the last full sync as successful.
+`cli.main` assigns the result to the yielded `Outcome`; `record` treats an exception as a
+failure whatever the code says, and stores the code so a failure can be told from another.
+`exit_code` is NULL for rows written before the column existed, because "not recorded" and
+"exited cleanly" are different answers.
+
 `run_sync.CHECKPOINT_EVERY` banks published fingerprints during a long run. Scheduled jobs
 are wrapped in a timeout, so without this a backlog larger than one window can never be
 worked off — this installation spent twelve consecutive hourly runs republishing the same
@@ -757,7 +833,10 @@ defaults to "tag and note only".
 
 For documentation-only changes, review the diff, check references, and run the neutrality
 check and `git diff --check`. For code or behavior changes, also run the full offline
-unit suite. Once these pass, repeat or broaden checks only for a change, failure, or
+unit suite. When a command, subcommand or flag changes, regenerate the functionality
+inventory (`scripts/inventory.py`) and give the new node an entry in `cli.SUPPORT` — the
+suite fails if the tree and the declared support statuses disagree, because a public
+command with an undocumented support status cannot be qualified for release. Once these pass, repeat or broaden checks only for a change, failure, or
 unresolved concern, as described in `AGENTS.md`.
 Explain any schema/config assumptions and any storefront-visible output changes. Call
 out changes that affect handles, fingerprints, retirement, API fields, webhook PII,

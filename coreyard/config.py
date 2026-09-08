@@ -26,8 +26,48 @@ from coreyard.transform.weights import EMPTY as NO_WEIGHTS
 from coreyard.transform.weights import WeightRules
 from coreyard.transform.weights import load as load_weight_rules
 
+# Where the *code* is. Used for the launcher, the virtualenv interpreter, the bundled
+# example files and the source fingerprint — never for anything CoreYard writes.
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ENV_PATH = REPO_ROOT / ".env"
+
+
+def _data_root() -> Path:
+    """Where this installation's own files live: `.env`, config, state, locks, `out/`.
+
+    Separate from :data:`REPO_ROOT` because the two are only the same thing in a source
+    checkout. Installed as a package, ``REPO_ROOT`` is inside ``site-packages``, and
+    anchoring the state database, the lock directory and ``.env`` there means an ordinary
+    ``pip install`` tries to write into its own installation — which fails outright when
+    that tree is read-only, and is wrong even when it is not, because the next upgrade
+    replaces the directory holding the yard's sync state.
+
+    Three rules, in order:
+
+    1. ``COREYARD_HOME``, when set. This is also how two installations share one host
+       without sharing store identity, credentials, locks or state.
+    2. The checkout, when this is one and it is writable — so every existing installation
+       keeps the exact paths it has always used and an upgrade moves nothing.
+    3. ``$XDG_DATA_HOME/coreyard``, else ``~/.local/share/coreyard``.
+
+    ``COREYARD_HOME`` is read from the real environment only, never from ``.env``: the
+    location of the configuration file cannot itself be configured inside that file.
+    """
+    explicit = (os.environ.get("COREYARD_HOME") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    if (REPO_ROOT / "pyproject.toml").is_file() and os.access(REPO_ROOT, os.W_OK):
+        return REPO_ROOT
+    base = (os.environ.get("XDG_DATA_HOME") or "").strip() or "~/.local/share"
+    return Path(base).expanduser() / "coreyard"
+
+
+DATA_ROOT = _data_root()
+ENV_PATH = DATA_ROOT / ".env"
+
+
+def out_dir() -> Path:
+    """``out/`` under the data root: previews, logs, locks, caches and progress files."""
+    return DATA_ROOT / "out"
 
 
 def load_env(path: Path = ENV_PATH) -> None:
@@ -207,7 +247,7 @@ def load_settings() -> Settings:
         db=db,
         smb=_smb_from_env(),
         store=load_store(),
-        out_dir=REPO_ROOT / "out",
+        out_dir=out_dir(),
     )
 
 

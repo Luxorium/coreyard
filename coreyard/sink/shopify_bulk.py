@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from coreyard.config import REPO_ROOT
+from coreyard.config import out_dir
 from coreyard.models import Part
 from coreyard.state import DEFAULT_STATE_DB, SyncState
 from coreyard.yms.db import connect
@@ -20,7 +20,7 @@ from coreyard.yms.interchange import InterchangeResolver
 from coreyard.yms.inventory import fetch_parts, photos_required
 from coreyard.sink.shopify_write import ShopifyPublisher
 
-DEFAULT_LOG = REPO_ROOT / "out" / "shopify_bulk_results.jsonl"
+DEFAULT_LOG = out_dir() / "shopify_bulk_results.jsonl"
 _thread_local = threading.local()
 
 

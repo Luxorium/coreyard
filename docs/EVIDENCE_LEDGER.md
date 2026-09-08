@@ -1,0 +1,128 @@
+# CoreYard v0.1.0 evidence ledger
+
+One row per acceptance criterion, as QA-02 requires. `scripts/ledger.py` fails if a
+criterion in [the specification](../RELEASE_ACCEPTANCE_v0.1.0.md) has no row here, or if a
+row names a criterion the specification no longer defines.
+
+**Missing evidence is NOT VERIFIED, never PASS** (REL-04). Most rows below are NOT
+VERIFIED, and that is the honest state of the release rather than an oversight: the offline
+suite passing is development evidence, and does not establish clean customer installation,
+live integration behaviour, recovery, capacity or the soak gates.
+
+A status here is a claim about *this* commit. Any later artifact or code change invalidates
+the affected rows and requires re-verification (QA-03).
+
+| Status | Meaning |
+|---|---|
+| PASS | Evidence collected at this commit and reviewed. |
+| IN PROGRESS | Work landed and referenced, but the criterion is not yet fully met. |
+| NOT VERIFIED | No evidence collected. The default, and not a judgement that it fails. |
+| FAIL | Evidence collected and the criterion is not met. |
+
+Owner and environment are unassigned until a release owner is named (SEC-04, QA-03).
+
+Baseline commit: `e9c88ab` · offline suite: 1119 tests · Python 3.14.7 locally, 3.10-3.13 in CI.
+
+| Criterion | Title | Status | Evidence and outstanding work |
+|---|---|---|---|
+
+| `REL-01` | Supported product | IN PROGRESS | Matrix published: `docs/CAPABILITY_MATRIX.md` covers sources, outputs, photos, every sync mode, reconcile/repair/audit, setup, diagnostics, scheduling, all four order stages and the listing-portal channel, with prerequisites, limitations and per-row evidence. Unsupported combinations now refuse before side effects: `cli.unmet` checks declared requirements against resolved capabilities and exits 2 naming the capability, the reason and the configured source (`tests/test_command_inventory.py::UnsupportedCombinationsRefuseFirst`). Outstanding: no combination has live acceptance evidence, and no portal mapping is qualified.
+| `REL-02` | Optional features | IN PROGRESS | Order booking and the listing portal are `off` rather than `missing` when unconfigured, so neither reads as a broken install (`tests/test_capabilities.py::OptionalFeatures`). Nothing has been removed, deferred or relabelled. Outstanding: each optional feature still needs its own gates passed, which is what the rest of this ledger tracks.
+| `REL-03` | Version and compatibility | PASS | `coreyard/__init__.py` is the single declaration; `pyproject.toml` reads it via setuptools dynamic metadata. No 1.0.0 artifact was ever distributed (no git tag, no GitHub release, no sdist/wheel), so no migration note is owed. `tests/test_inventory.py::VersionIsDeclaredOnce`; CI job `hygiene` compares the built wheel against `coreyard.__version__`. |
+| `REL-04` | Decision rule | NOT VERIFIED | No evidence collected. |
+| `REL-05` | Complete functionality inventory | IN PROGRESS | Inventory of all 55 CLI nodes generated from the live tree: `docs/INVENTORY.md`, `scripts/inventory.py`, CI job `inventory`. `cli.SUPPORT` gives every node an effect and its required capabilities; `tests/test_inventory.py` fails if the tree and the declarations disagree. The tree is walked by one implementation (`cli.tree`), used by both the preflight and the generator, so the document cannot describe a tree the code does not enforce. Outstanding: per-entry links to acceptance evidence, legacy entry-point coverage, and flag-interaction cases. |
+| `DIST-01` | Public release | NOT VERIFIED | No evidence collected. |
+| `DIST-02` | Reproducible dependency selection | NOT VERIFIED | No evidence collected. |
+| `DIST-03` | Clean installation | IN PROGRESS | Paths with spaces are covered (`tests/test_data_root.py`). Outstanding: everything else — clean-environment install on each advertised OS/Python pair, CLI discovery, missing system tools, interrupted installation, and reinstallation preserving user configuration and state.
+| `DIST-04` | Installed runtime | IN PROGRESS | `config.DATA_ROOT` separates writable files from the installation: `COREYARD_HOME`, else a writable checkout, else `$XDG_DATA_HOME/coreyard`. Every `.env`, config file, database, lock, log and `out/` path moved; the installation directory now holds code only, guarded by a regression test. Arbitrary working directory, spaces in paths and two separate installations on one host are covered by `tests/test_data_root.py`. A source checkout resolves to itself, so no existing installation moves. Outstanding: exercising an actual installed package on a read-only tree (DIST-03).
+| `UX-01` | Independent onboarding | NOT VERIFIED | No evidence collected. |
+| `UX-02` | Configuration contract | IN PROGRESS | `coreyard/capabilities.py` reports each setting as on/off/missing with the key that decides it, and never echoes a secret (`tests/test_capabilities.py`). Outstanding: the documented type, default, requirement, precedence and example for every supported setting. |
+| `UX-03` | Explicit effects | IN PROGRESS | Every node declares its effect and the flag that unlocks it (`docs/INVENTORY.md`); `tests/test_inventory.py` fails any external write with no named gate. Fixed: `images --delete` was classified read-only and left no run record. Outstanding: dry-run non-mutation proofs per command. |
+| `UX-04` | Actionable failure | IN PROGRESS | `coreyard doctor` help and every command's `--help` run without credentials (`tests/test_inventory.py::HelpWorksWithoutCredentials`). Outstanding: documented exit codes for automation, and the injected-failure cases. |
+| `UX-05` | Streamlined workflows | NOT VERIFIED | No evidence collected. |
+| `UX-06` | Simple, consistent controls | NOT VERIFIED | No evidence collected. |
+| `UX-07` | Verbose, useful feedback | NOT VERIFIED | No evidence collected. |
+| `UX-08` | Dynamic configuration and capability handling | IN PROGRESS | Available operations and probes derive from validated configuration; one run resolves one capability snapshot and passes it down (`coreyard/capabilities.py`, `coreyard/doctor.py`). Outstanding: part-type coverage, unknown-type rendering, and the no-restart verification. |
+| `UX-09` | Customer comprehension | NOT VERIFIED | No evidence collected. |
+| `DATA-01` | Identity and isolation | NOT VERIFIED | No evidence collected. |
+| `DATA-02` | Extraction safety | NOT VERIFIED | No evidence collected. |
+| `DATA-03` | One rendering contract | NOT VERIFIED | No evidence collected. |
+| `DATA-04` | Truthful content | NOT VERIFIED | No evidence collected. |
+| `DATA-05` | Media correctness | NOT VERIFIED | No evidence collected. |
+| `DATA-06` | Customer mapping acceptance | NOT VERIFIED | No evidence collected. |
+| `DATA-07` | Source freshness | NOT VERIFIED | No evidence collected. |
+| `SYNC-01` | Convergence | NOT VERIFIED | No evidence collected. |
+| `SYNC-02` | Partial failure | NOT VERIFIED | No evidence collected. |
+| `SYNC-03` | Retirement guards | NOT VERIFIED | No evidence collected. |
+| `SYNC-04` | Time and contention | NOT VERIFIED | No evidence collected. |
+| `SYNC-05` | Sale versus publication race | NOT VERIFIED | No evidence collected. |
+| `ORD-01` | Authenticated paid orders | NOT VERIFIED | No evidence collected. |
+| `ORD-02` | Database transaction | NOT VERIFIED | No evidence collected. |
+| `ORD-03` | Lifecycle accuracy | NOT VERIFIED | No evidence collected. |
+| `ORD-04` | Durable receipt and bounded retries | NOT VERIFIED | No evidence collected. |
+| `MKT-01` | Listing identity and guards | NOT VERIFIED | No evidence collected. |
+| `MKT-02` | Write boundaries | NOT VERIFIED | No evidence collected. |
+| `SEC-01` | Review and scans | NOT VERIFIED | No evidence collected. |
+| `SEC-02` | Least privilege and isolation | NOT VERIFIED | No evidence collected. |
+| `SEC-03` | Payload lifecycle | NOT VERIFIED | No evidence collected. |
+| `SEC-04` | Response ownership | NOT VERIFIED | No evidence collected. |
+| `OPS-01` | Truthful status | IN PROGRESS | The observed `exit=2` / `ok=1` defect is fixed and regressed: `cli.main` assigns the command's return code to the recorder, `ops.record` stores it and treats an exception as failure regardless (`tests/test_ops.py`). Diagnostics honour the configured source and enabled capabilities (`tests/test_doctor.py`). Outstanding: agreement under interrupted processes, and queue-age reporting. |
+| `OPS-02` | Unattended service | NOT VERIFIED | No evidence collected. |
+| `OPS-03` | Alerts | IN PROGRESS | `coreyard alert` implements every named condition: full sync stale for two of its own scheduled intervals (read from the host's crontab or timer), delta cursor stale 15 min, an order stage pending/failed 10 min, and storage/credentials blocking progress — plus the timing-out and failing sync a staleness check cannot see. Delivery and recovery are exercised through a real command (`tests/test_alerts.py`, 30 tests), a failed delivery is retried rather than recorded as sent, and alerts carry no payload or secret. `doctor` warns when no notifier is configured. Outstanding: delivery to a real paging service on a customer host, and a scheduled-job entry in the documented runbook.
+| `OPS-04` | Backup and restore | NOT VERIFIED | No evidence collected. |
+| `OPS-05` | Upgrade and rollback | NOT VERIFIED | No evidence collected. |
+| `OPS-06` | Emergency stop and bounded rollout | NOT VERIFIED | No evidence collected. |
+| `PERF-01` | Reference workload | NOT VERIFIED | No evidence collected. |
+| `PERF-02` | Steady state | NOT VERIFIED | No evidence collected. |
+| `PERF-03` | Order latency | NOT VERIFIED | No evidence collected. |
+| `PERF-04` | Initial import | NOT VERIFIED | No evidence collected. |
+| `PERF-05` | Measured efficiency | NOT VERIFIED | No evidence collected. |
+| `QUAL-01` | Soak | NOT VERIFIED | No evidence collected. |
+| `QUAL-02` | External contracts and buyer-visible output | NOT VERIFIED | No evidence collected. |
+| `DOC-01` | Complete operator path | NOT VERIFIED | No evidence collected. |
+| `DOC-02` | Honest positioning | NOT VERIFIED | No evidence collected. |
+| `DOC-03` | Supportability | NOT VERIFIED | No evidence collected. |
+| `QA-01` | Continuous gates | IN PROGRESS | Offline suite: 1119 tests, no `.env`, credentials or network, on Python 3.10-3.13 in CI. CI now also checks the functionality inventory, tracked-file whitespace and built-artifact version. Example config validation added for `portal.example.json` and `schema.example.json`. Outstanding: installed-artifact demo and dependency-metadata jobs. |
+| `QA-02` | Evidence ledger | IN PROGRESS | This ledger, with `scripts/ledger.py` holding it level with the specification. Outstanding: owner, environment and redacted result link per row. |
+| `QA-03` | Final acceptance | NOT VERIFIED | No evidence collected. |
+| `QA-04` | Artifact provenance and withdrawal | NOT VERIFIED | No evidence collected. |
+
+## What the next work is, in the specification's own order
+
+The specification's closing list, with what has moved:
+
+1. ~~Fix nonzero command results being recorded as successful runs (OPS-01).~~ **Done** —
+   `cli.main` hands the command's exit code to `ops.record`, which stores it and refuses to
+   call an exception a success. `coreyard status` prints the code beside a failed run.
+2. ~~Resolve `1.0.0` metadata versus the intended `v0.1.0` release (REL-03).~~ **Done** —
+   one declaration in `coreyard/__init__.py`, read by `pyproject.toml`. Nothing at 1.0.0 was
+   ever distributed, so nothing needs a transition note.
+3. ~~Make diagnostics honour tabular sources and optional capabilities (UX-02, OPS-01).~~
+   **Done** — `coreyard/capabilities.py` decides what this installation is configured to do,
+   and every check asks it first. A file-backed yard is no longer told to install
+   `smbclient`, supply SMB credentials and map a `schema.json` it will never read.
+4. Qualify clean distributed-artifact installs and runtime paths (DIST-03, DIST-04). **Not
+   started.** CI builds no artifact today beyond the new version check, and `setuptools` is
+   absent from the development venv, so the wheel build is unexercised locally.
+5. Create and exercise backup, restore, upgrade and rollback procedures (OPS-04, OPS-05).
+   **Not started.** `scripts/backup_state.sh` exists and is neither documented as the
+   procedure nor exercised by a restore drill.
+6. ~~Establish the complete functionality inventory, capability matrix and evidence
+   ledger (REL-01, REL-05, QA-02).~~ **Done as documents** — `docs/INVENTORY.md`,
+   `docs/CAPABILITY_MATRIX.md` and this ledger, all three CI-enforced against the code they
+   describe. What remains is not more documenting: it is collecting the evidence the
+   matrix currently records as `NOT VERIFIED`.
+
+## Where the work goes next
+
+The three documents now say precisely what is unqualified, which makes the order obvious:
+
+- **Nothing has live acceptance evidence.** Every "Live: `NOT VERIFIED`" row in the matrix
+  needs a controlled environment — a test store, a disposable mapped database, a controlled
+  portal account. That is the bulk of sections 4 through 9 of the specification.
+- **No portal mapping is qualified** (MKT-02), so the listing-portal channel is currently
+  unsupported for release purposes even though it is implemented and running here.
+- **Clean-install and recovery drills have not been run** (DIST-03, DIST-04, OPS-04,
+  OPS-05), and `setuptools` is absent from the development venv, so the wheel build is
+  unexercised outside CI.
+

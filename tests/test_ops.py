@@ -11,6 +11,7 @@ import contextlib
 import io
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from coreyard import doctor, ops, status
@@ -239,6 +240,80 @@ class CryWolf(unittest.TestCase):
             status._render(report)
         self.assertIn("timed out", out.getvalue())
         self.assertNotIn("FAILED", out.getvalue())
+
+    def test_a_command_that_returns_nonzero_is_not_recorded_as_a_success(self):
+        """OPS-01, the observed `exit=2` / `ok=1` defect.
+
+        A command reports failure by *returning* a code, not by raising. The recorder saw
+        only that the `with` block ended, so a sync that exited 2 was written to the run
+        history as ok — and `coreyard status` then reported the last full sync as
+        successful while the shell had already reported it as a failure. A status page that
+        contradicts the exit code is worse than no status page: it is the one an operator
+        believes.
+        """
+        with ops.record("sync", "", db=self.db) as run:
+            run.code = 2
+        recorded = ops.last("sync", "", db=self.db)
+        self.assertFalse(recorded["ok"])
+        self.assertEqual(recorded["exit_code"], 2)
+
+    def test_a_command_that_returns_zero_is_recorded_as_a_success(self):
+        with ops.record("sync", "", db=self.db) as run:
+            run.code = 0
+        recorded = ops.last("sync", "", db=self.db)
+        self.assertTrue(recorded["ok"])
+        self.assertEqual(recorded["exit_code"], 0)
+
+    def test_the_deadline_code_is_recorded_but_is_not_a_failure(self):
+        """124 is the deadline the run was given, not a fault."""
+        with ops.record("sync", "", db=self.db) as run:
+            run.code = ops.TIMED_OUT
+        recorded = ops.last("sync", "", db=self.db)
+        self.assertTrue(recorded["ok"])
+        self.assertTrue(recorded["counts"].get("timed_out"))
+
+    def test_an_exception_beats_whatever_code_was_assigned(self):
+        with self.assertRaises(RuntimeError):
+            with ops.record("sync", "", db=self.db) as run:
+                run.code = 0
+                raise RuntimeError("fell over after saying it was fine")
+        self.assertFalse(ops.last("sync", "", db=self.db)["ok"])
+
+    def test_a_row_written_before_the_column_existed_still_reads(self):
+        """`exit_code` was added after the table shipped. An old row reports None rather
+        than 0, because "not recorded" and "exited cleanly" are different answers."""
+        import sqlite3
+
+        with ops.record("sync", "", db=self.db) as run:
+            run.code = 0
+        conn = sqlite3.connect(self.db)
+        with conn:
+            conn.execute("UPDATE runs SET exit_code = NULL")
+        conn.close()
+        self.assertIsNone(ops.last("sync", "", db=self.db)["exit_code"])
+
+    def test_the_cli_hands_the_command_result_to_the_recorder(self):
+        """The fix only works if `cli.main` actually assigns it, so assert the wiring."""
+        import argparse
+
+        from coreyard import cli
+
+        calls = {}
+
+        @contextlib.contextmanager
+        def fake_record(command, scope="", db=None):
+            outcome = ops.Outcome()
+            yield outcome
+            calls["code"] = outcome.code
+
+        parser = argparse.ArgumentParser()
+        parser.set_defaults(command="sync", func=lambda args: 2, lock=None, timeout=None,
+                            scope="")
+        with unittest.mock.patch.object(cli, "build_parser", lambda: parser), \
+                unittest.mock.patch.object(cli.ops, "record", fake_record), \
+                unittest.mock.patch.object(cli.ops, "run_header", lambda *a, **k: ""):
+            self.assertEqual(cli.main([]), 2)
+        self.assertEqual(calls["code"], 2, "the exit code never reached the run history")
 
     def test_a_real_failure_is_still_reported_as_one(self):
         with self.assertRaises(RuntimeError):

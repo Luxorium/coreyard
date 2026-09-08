@@ -11,6 +11,13 @@ should not have to know which one their symptom belongs to:
                   when the source server's IP moved, every sync failed for as long as it
                   took a human to happen to look.
 
+Every check is asked against :mod:`coreyard.capabilities` first, because "not configured"
+and "broken" are different answers and only one of them is worth waking somebody for. A
+yard running ``COREYARD_SOURCE=tabular:parts.csv`` has no SMB credentials to be missing and
+no ``schema.json`` to map; reporting three FAIL lines for a correct installation is the same
+defect as a check that stays lit for something already fixed, and it is worse, because the
+first thing a new customer sees is a diagnosis that their working install is broken.
+
 Exit status is 0 healthy, 1 degraded (warnings), 2 failed, so cron, a monitor, or a person
 can all use it. Writes nothing to Shopify or the yard database.
 """
@@ -18,6 +25,7 @@ can all use it. Writes nothing to Shopify or the yard database.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import shutil
@@ -25,13 +33,14 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 
-from coreyard import ops
-from coreyard.config import REPO_ROOT
+from coreyard import __version__, capabilities, ops
+from coreyard.capabilities import MISSING, ON
+from coreyard.config import out_dir
 from coreyard.ops import RUN_HEADER
 from coreyard.state import DEFAULT_STATE_DB
 
 STATE_DB = DEFAULT_STATE_DB
-LOG_DIR = REPO_ROOT / "out"
+LOG_DIR = out_dir()
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
 RANK = {OK: 0, WARN: 1, FAIL: 2}
@@ -46,6 +55,12 @@ SNAPSHOT_STALE = timedelta(hours=30)
 # The order poller runs every ten minutes, all week. Three missed ticks is past any
 # plausible slow run and still catches a dead poller inside half an hour.
 ORDERS_STALE = timedelta(minutes=35)
+
+# How long a sale may sit in the queue unbooked before it is a problem rather than a
+# retry. A failed booking is not a stale log: the poller keeps running, keeps finding the
+# order in its overlap window, and keeps reporting OK while the sale waits. Two poll ticks,
+# so a failure that the next run clears never fires.
+ORDERS_STUCK = timedelta(minutes=20)
 
 # A job that dies before its first line of output leaves no traceback: the interpreter or
 # the shell says its piece on stderr and exits 1. That is exactly how the order poller
@@ -75,20 +90,72 @@ def _age(then: datetime) -> timedelta:
     return datetime.now(timezone.utc) - then
 
 
+def _span(gap: timedelta) -> str:
+    """A duration read at a glance: minutes until there are too many of them."""
+    total = int(gap.total_seconds() // 60)
+    return f"{total} min" if total < 120 else f"{total // 60}h {total % 60}m"
+
+
+def _received(stamp: str) -> timedelta:
+    """How long ago a queue row arrived, or zero if its timestamp is unreadable.
+
+    An unparseable timestamp must not turn a real stuck-order report into a crash that
+    ``collect`` renders as "check itself failed" — the order still needs saying.
+    """
+    try:
+        return _age(datetime.fromisoformat(stamp))
+    except (TypeError, ValueError):
+        return timedelta(0)
+
+
 # ------------------------------------------------------------- installation --
-def check_environment() -> list[Result]:
+def check_capabilities(*, caps=None) -> list[Result]:
+    """What this installation is configured to do — before asking whether it works.
+
+    This is the section that makes every skipped check below legible. Without it an
+    operator sees no ``smbclient`` line and no photo-share line and cannot tell whether
+    they were checked and passed or never ran; with it the report says "photos: local
+    directory ./photos" and the absent SMB lines explain themselves.
+
+    A capability that is simply off is one line, collapsed with the others, because a
+    report that spends eleven lines listing things this site deliberately does not use is
+    a report people stop reading. A capability that is *required by something enabled here*
+    and not configured is a FAIL on its own line, with the setting that fixes it.
+    """
+    caps = caps or capabilities.detect()
+    out: list[Result] = []
+    off: list[str] = []
+    for name, state, detail in caps.summary():
+        if state == MISSING:
+            out.append((FAIL, name, detail))
+        elif state == ON:
+            out.append((OK, name, detail))
+        else:
+            off.append(name)
+    if off:
+        out.append((OK, "not in use", ", ".join(off)))
+    return out
+
+
+def check_environment(*, caps=None) -> list[Result]:
     """The things that are nobody's fault but stop everything: a missing tool, a read-only
     directory, an interpreter too old."""
+    caps = caps or capabilities.detect()
     out: list[Result] = []
-    if shutil.which("smbclient"):
-        out.append((OK, "smbclient", "on PATH"))
-    else:
-        out.append((FAIL, "smbclient",
-                    "not on PATH — photo fetching shells out to it (install samba-client)"))
-    out_dir = REPO_ROOT / "out"
+    # Only the SMB photo path shells out to smbclient. Demanding it from an installation
+    # that reads its photographs off a local directory is asking for a package that will
+    # never be called.
+    if caps.source_kind == "database" and caps.enabled("photos"):
+        if shutil.which("smbclient"):
+            out.append((OK, "smbclient", "on PATH"))
+        else:
+            out.append((FAIL, "smbclient",
+                        "not on PATH — photo fetching shells out to it "
+                        "(install samba-client)"))
+    workspace = out_dir()
     try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        probe = out_dir / ".doctor-write-probe"
+        workspace.mkdir(parents=True, exist_ok=True)
+        probe = workspace / ".doctor-write-probe"
         probe.write_text("", encoding="utf-8")
         probe.unlink()
         out.append((OK, "out/", "writable"))
@@ -102,38 +169,30 @@ def check_environment() -> list[Result]:
     return out
 
 
-def check_configuration() -> list[Result]:
-    """`.env`, the schema mapping, and the four external config files.
+def check_configuration(*, caps=None) -> list[Result]:
+    """The config files, and whether the settings this installation needs are present.
 
     Every one of these is a thing CoreYard deliberately does not ship, because it belongs to
     the installation rather than to the project — which also means every one of them is a
-    thing that can be missing.
+    thing that can be missing. Which of them are *required* is not fixed: it follows from
+    the capabilities above, which is why the credentials and the schema mapping are checked
+    there and only the files are checked here.
     """
-    from coreyard.config import load_env
+    from coreyard.config import ENV_PATH
 
+    # `capabilities.detect()` has already loaded `.env` at the command boundary. Loading it
+    # again from inside a check is how the site's real configuration reaches a unit test.
+    caps = caps or capabilities.detect()
     out: list[Result] = []
-    load_env()
-    required = ("SMB_HOST", "SMB_USER", "SMB_PASSWORD")
-    missing = [key for key in required if not (os.environ.get(key) or "").strip()]
-    out.append((FAIL, ".env", f"missing {', '.join(missing)}") if missing
-               else (OK, ".env", "source credentials present"))
-
-    if (os.environ.get("SHOPIFY_ADMIN_TOKEN") or "").strip():
-        out.append((OK, "shopify-token", "present"))
+    # Not a failure on its own: a container or a systemd unit legitimately supplies every
+    # setting through the real environment, and `capabilities` has already reported
+    # anything actually missing by name.
+    if ENV_PATH.exists():
+        out.append((OK, ".env", f"{ENV_PATH.name} present"))
     else:
-        out.append((WARN, "shopify-token",
-                    "no SHOPIFY_ADMIN_TOKEN — run `coreyard oauth` (CSV output still works)"))
-
-    try:
-        from coreyard.yms.inventory import is_configured
-
-        if is_configured():
-            out.append((OK, "schema.json", "mapped"))
-        else:
-            out.append((FAIL, "schema.json",
-                        "unmapped — see README 'Map your database', or run `coreyard schema`"))
-    except Exception as exc:
-        out.append((FAIL, "schema.json", f"{type(exc).__name__}: {str(exc)[:100]}"))
+        out.append((WARN, ".env",
+                    f"no {ENV_PATH.name} — settings must come from the environment "
+                    f"(run `coreyard init` to write one)"))
 
     try:
         from coreyard.validate import _configured, validate
@@ -151,48 +210,79 @@ def check_configuration() -> list[Result]:
     return out
 
 
-def check_liveness() -> list[Result]:
+def check_liveness(*, caps=None) -> list[Result]:
+    """Can this machine actually reach the services it has been configured to use?
+
+    Asked through the configured :class:`~coreyard.source.Source` rather than through
+    ``yms.db`` directly, so a tabular installation is diagnosed against the file it reads
+    instead of against a named pipe it will never open. A capability that is off is not
+    probed at all: an unreachable service is a failure, but a service this site does not
+    use is not a service.
+    """
+    caps = caps or capabilities.detect()
     out: list[Result] = []
-    try:
-        from coreyard.yms.db import ping
 
-        ping()
-        out.append((OK, "source-db", "reachable"))
-    except Exception as exc:
-        out.append((FAIL, "source-db", f"{type(exc).__name__}: {str(exc)[:110]}"))
-    try:
-        from coreyard.yms.images import SmbImageStore
+    source = caps.get("source")
+    if source.state == MISSING:
+        out.append((FAIL, "source", source.detail))
+    else:
+        try:
+            from coreyard.source import load
 
-        SmbImageStore().list_inventory_images("0")
-        out.append((OK, "photo-share", "reachable"))
-    except Exception as exc:
-        out.append((FAIL, "photo-share", f"{type(exc).__name__}: {str(exc)[:110]}"))
-    try:
-        from coreyard.sink.shopify_api import ShopifySink
+            line = str(load(caps.source_spec).ping()).splitlines()[0]
+            out.append((OK, "source", f"{caps.source_kind}: {line[:90]}"))
+        except Exception as exc:
+            out.append((FAIL, "source", f"{type(exc).__name__}: {str(exc)[:110]}"))
 
-        out.append((OK, "shopify", f"connected to {ShopifySink().check()}"))
-    except Exception as exc:
-        out.append((FAIL, "shopify", f"{type(exc).__name__}: {str(exc)[:110]}"))
+    photos = caps.get("photos")
+    if photos.state == MISSING:
+        out.append((FAIL, "photos", photos.detail))
+    elif photos.enabled and caps.source_kind == "database":
+        try:
+            from coreyard.yms.images import SmbImageStore
+
+            SmbImageStore().list_inventory_images("0")
+            out.append((OK, "photo-share", "reachable"))
+        except Exception as exc:
+            out.append((FAIL, "photo-share", f"{type(exc).__name__}: {str(exc)[:110]}"))
+    elif photos.enabled:
+        out.append((OK, "photo-dir", photos.detail))
+
+    shopify = caps.get("shopify")
+    if shopify.state == MISSING:
+        out.append((FAIL, "shopify", shopify.detail))
+    elif shopify.enabled:
+        try:
+            from coreyard.sink.shopify_api import ShopifySink
+
+            out.append((OK, "shopify", f"connected to {ShopifySink().check()}"))
+        except Exception as exc:
+            out.append((FAIL, "shopify", f"{type(exc).__name__}: {str(exc)[:110]}"))
     return out
 
 
-def check_publishing() -> list[Result]:
+def check_publishing(*, caps=None) -> list[Result]:
     """The location stock is set at, and the channels a product has to reach to be visible.
 
     Status alone never made a product visible: an ACTIVE product on no sales channel still
     returns 404 to every shopper and to Google, which is a failure that looks like success
     in every report except a customer's.
     """
+    caps = caps or capabilities.detect()
     out: list[Result] = []
+    # Nothing here is answerable without the Admin API, and a CSV-sink installation is not
+    # a broken one. `capabilities` has already said the store credentials are absent.
+    if not caps.enabled("shopify"):
+        return out
     try:
         from coreyard.sink.shopify_write import ShopifyPublisher
 
         publisher = ShopifyPublisher()
         out.append((OK, "location", publisher.location or "?"))
         if publisher.publications:
-            out.append((OK, "publications", f"{len(publisher.publications)} channel(s)"))
+            out.append((OK, "channels", f"{len(publisher.publications)} channel(s)"))
         else:
-            out.append((WARN, "publications",
+            out.append((WARN, "channels",
                         "STORE_PUBLICATIONS unset — new products reach no sales channel"))
         out.extend(check_unpublished(publisher.client))
     except Exception as exc:
@@ -232,10 +322,30 @@ def check_unpublished(client) -> list[Result]:
 
 
 # ----------------------------------------------------------------- liveness --
-def check_freshness() -> list[Result]:
+def _suppression_grace() -> timedelta:
+    """How long a running full sync may excuse an ageing delta cursor.
+
+    One full cycle past the staleness threshold: beyond that, a run in flight is no longer
+    the explanation, because a cursor is only written when a full run reaches its end.
+    """
+    try:
+        from coreyard.schedule import installed_intervals
+
+        period = installed_intervals().get("sync", 3600)
+    except Exception:
+        period = 3600
+    return timedelta(seconds=period) + CURSOR_STALE
+
+
+def check_freshness(*, caps=None) -> list[Result]:
+    caps = caps or capabilities.detect()
     out: list[Result] = []
     if not STATE_DB.exists():
-        return [(FAIL, "state", f"no sync state at {STATE_DB.name}")]
+        # A new installation has not run a sync yet. That is the expected state five
+        # minutes after `coreyard init`, and telling a new customer their install has
+        # FAILED is how the first thing they see becomes a wrong diagnosis.
+        return [(WARN, "state", f"no sync state at {STATE_DB.name} yet — "
+                                f"run `coreyard sync --dry-run`, then `coreyard sync`")]
     try:
         conn = sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True, timeout=10)
     except sqlite3.Error as exc:
@@ -247,19 +357,29 @@ def check_freshness() -> list[Result]:
             ).fetchone()
         except sqlite3.Error:
             row = None
-        if not row:
+        if not caps.enabled("delta"):
+            # Nothing advances this cursor on an installation with no delta query, so its
+            # age says nothing about the pipeline. Timing a clock nobody winds is the
+            # purest form of a check that is lit for a non-problem.
+            pass
+        elif not row:
             out.append((WARN, "delta", "no delta cursor yet (run a full sync)"))
         else:
             age = _age(datetime.fromisoformat(row[0]))
             minutes = int(age.total_seconds() // 60)
             if age <= CURSOR_STALE:
                 out.append((OK, "delta", f"cursor {minutes} min old"))
-            elif ops.running("sync", ""):
+            elif ops.running("sync", "") and age <= _suppression_grace():
                 # The catch-up job shares the full sync's lock on purpose: a full run
                 # supersedes it, so the tick is skipped rather than raced. During a long
                 # full sync the cursor is *expected* to age, and calling that a failure
                 # every hour is how a check earns itself a permanent place in the ignored
                 # pile.
+                #
+                # Bounded, though. On a host whose hourly full sync takes most of an hour a
+                # sync is almost *always* running, so an unbounded excuse inverts the
+                # check: it explained a cursor frozen for five days exactly as readily as
+                # one frozen for six minutes, and reported the five days as OK.
                 out.append((OK, "delta", f"cursor {minutes} min old — catch-up is "
                                          f"skipped while a full sync holds the lock"))
             else:
@@ -280,7 +400,7 @@ def check_freshness() -> list[Result]:
     return out
 
 
-def check_orders() -> list[Result]:
+def check_orders(*, caps=None) -> list[Result]:
     """Watch the one pipeline whose silence costs money rather than face.
 
     A stale catalog is embarrassing. A storefront sale that never reaches the yard is a part
@@ -292,9 +412,21 @@ def check_orders() -> list[Result]:
     leave identical state. What happens every ten minutes either way is that the job runs and
     says how many orders it saw, so an orders.log that has stopped growing is the signal.
     """
+    caps = caps or capabilities.detect()
     log = LOG_DIR / "orders.log"
+    # A log that exists is evidence the job ran, whatever the configuration says — and it
+    # is the only evidence a *polling* site leaves, because polling needs no webhook secret
+    # and so turns the capability on nowhere. Gating on the capability alone would have
+    # stopped watching the transport that is hardest to notice failing.
+    if not caps.enabled("orders") and not log.exists():
+        # Order receipt is opt-in. A site that never registered a webhook and never runs
+        # the poller has no log to be stale, and reporting a missing one as a failure
+        # tells that operator to fix something they deliberately did not turn on.
+        return []
     if not log.exists():
-        return [(FAIL, "orders", "no orders.log — is the poller still scheduled?")]
+        return [(WARN, "orders",
+                 "order receipt is configured but out/orders.log does not exist — "
+                 "start `coreyard orders serve`, or schedule `coreyard orders poll`")]
     try:
         age = timedelta(seconds=time.time() - log.stat().st_mtime)
     except OSError as exc:
@@ -306,7 +438,75 @@ def check_orders() -> list[Result]:
     return [(OK, "orders", f"polled {mins} min ago")]
 
 
-def check_logs(within=timedelta(hours=2)) -> list[Result]:
+def check_order_queue(queue_db=None) -> list[Result]:
+    """Sales that reached the queue and never came out of it.
+
+    ``check_orders`` above watches the transport — is the poller still running? This watches
+    the outcome, and the two fail independently. A booking is refused for reasons outside
+    CoreYard: the part was sold at the counter first, or the yard database was unreachable.
+    The event is then parked in ``error`` and deliberately not retried on its own, because a
+    booking whose cause is unfixed only fails again. Nothing on a schedule reads that queue,
+    so until somebody runs ``orders status`` by hand the only symptom is a work order that
+    does not exist.
+
+    That is not hypothetical. Order #1012 was refused on 2026-09-06 because its part had
+    left the shelf two days earlier, and waited 43 hours behind a healthy
+    ``[OK] orders  polled 6 min ago`` — the transport was never the thing that was wrong.
+
+    Read-only, and never opens a queue that is not already there: ``EventQueue`` creates its
+    database on construction, and a diagnostic must not leave one behind on a host that has
+    never taken an order. Reports order names and never the payload, the queue's one
+    PII-bearing column: the reference is what an operator acts on, and a customer's address
+    says nothing about why a booking failed.
+    """
+    from coreyard.orders import pipeline
+
+    path = pipeline.QUEUE_DB if queue_db is None else queue_db
+    if not path.exists():
+        return []
+    try:
+        with pipeline.EventQueue(path) as queue:
+            stuck = queue.stuck(datetime.now(timezone.utc) - ORDERS_STUCK)
+    except Exception as exc:
+        return [(WARN, "bookings", f"order queue unreadable: {type(exc).__name__}")]
+    if not stuck:
+        return [(OK, "bookings", "every order booked")]
+    failed = sum(1 for _id, state, _at, _name in stuck if state == "error")
+    names = ", ".join(sorted({name for *_, name in stuck if name})[:5]) or "unnamed"
+    return [(FAIL, "bookings",
+             f"{len(stuck)} order(s) unbooked for over {_span(ORDERS_STUCK)} "
+             f"({failed} failed), oldest {_span(_received(stuck[0][2]))} — {names}; "
+             f"run `coreyard orders status`, then `orders retry --id <webhook-id>`")]
+
+
+def check_alerting(*, caps=None) -> list[Result]:
+    """Is anything actually going to tell somebody?
+
+    The one check whose subject is the checks. Everything else here reports what is wrong
+    to whoever ran the command; this reports whether anyone finds out when nobody does. A
+    WARN rather than a FAIL: an operator who watches the pipeline another way has not
+    misconfigured anything, but the gap is worth naming, because it is invisible until an
+    outage has already gone unnoticed.
+    """
+    caps = caps or capabilities.detect()
+    if not caps.enabled("alerting"):
+        return [(WARN, "alerting",
+                 "no COREYARD_ALERT_COMMAND — nothing will notify you when the pipeline "
+                 "stops; see `coreyard alert --help`")]
+    out: list[Result] = [(OK, "alerting", caps.get("alerting").detail)]
+    try:
+        from coreyard import alerts
+
+        firing = alerts.evaluate(caps=caps)
+    except Exception as exc:
+        return out + [(WARN, "alerts", f"could not evaluate: {str(exc)[:90]}")]
+    for alert in firing:
+        out.append((FAIL if alert.level == alerts.FAIL else WARN,
+                    alert.key.split(".")[0], alert.summary))
+    return out
+
+
+def check_logs(within=timedelta(hours=2), *, caps=None) -> list[Result]:
     out: list[Result] = []
     cutoff = time.time() - within.total_seconds()
     for log in sorted(LOG_DIR.glob("*.log")):
@@ -343,17 +543,27 @@ def check_logs(within=timedelta(hours=2)) -> list[Result]:
 
 
 # --------------------------------------------------------------------- CLI --
-INSTALLATION = (check_environment, check_configuration)
+INSTALLATION = (check_capabilities, check_environment, check_configuration)
 NETWORK = (check_liveness, check_publishing)
-PIPELINE = (check_freshness, check_orders, check_logs)
+PIPELINE = (check_freshness, check_orders, check_order_queue,
+            check_alerting, check_logs)
 
 
-def collect(checks) -> list[Result]:
-    """Run each check, and never let one failing check hide the rest of the report."""
+def collect(checks, caps=None) -> list[Result]:
+    """Run each check, and never let one failing check hide the rest of the report.
+
+    The capability snapshot is resolved once and handed to every check, so a report cannot
+    describe two different installations because a setting changed while it was printing.
+    """
+    caps = caps or capabilities.detect()
     results: list[Result] = []
     for check in checks:
         try:
-            results.extend(check())
+            # A check that does not care which installation this is says so by not
+            # accepting the argument. Decided from the signature rather than by catching
+            # TypeError, which would re-run a check that raised one from inside itself.
+            wants = "caps" in inspect.signature(check).parameters
+            results.extend(check(caps=caps) if wants else check())
         except Exception as exc:
             results.append((FAIL, check.__name__.replace("check_", ""),
                             f"check itself failed: {type(exc).__name__}: {str(exc)[:90]}"))
@@ -376,23 +586,46 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     return ap
 
 
+# The three questions, in the order an operator asks them. Grouping them is not decoration:
+# "source" means the configured one in the first section and the reachable one in the
+# second, and a flat list made those two lines look like one line printed twice.
+SECTIONS = (
+    ("what this installation is set up to do", INSTALLATION),
+    ("whether it can reach what it uses", NETWORK),
+    ("whether the scheduled work is still happening", PIPELINE),
+)
+
+
 def run(args) -> int:
-    checks = list(INSTALLATION)
-    if not args.no_network:
-        checks += list(NETWORK)
-    if not args.install_only:
-        checks += list(PIPELINE)
-    results = collect(checks)
+    caps = capabilities.detect()
+    skip = set()
+    if args.no_network:
+        skip.add(NETWORK)
+    if args.install_only:
+        skip.add(PIPELINE)
+    sections = [(label, collect(checks, caps))
+                for label, checks in SECTIONS if checks not in skip]
+    results = [row for _, rows in sections for row in rows]
     outcome = verdict(results)
 
     if args.json:
         print(json.dumps({"verdict": outcome,
-                          "checks": [{"level": lvl, "name": name, "detail": detail}
-                                     for lvl, name, detail in results]}, indent=2))
+                          "version": __version__,
+                          "source": caps.source_kind,
+                          "capabilities": {name: state
+                                           for name, state, _ in caps.summary()},
+                          "checks": [{"section": label, "level": lvl, "name": name,
+                                      "detail": detail}
+                                     for label, rows in sections
+                                     for lvl, name, detail in rows]}, indent=2))
     elif not args.quiet or outcome != OK:
-        print(f"CoreYard doctor: {outcome}\n")
-        for level, name, detail in results:
-            print(f"  [{level:<4}] {name:<14} {detail}")
+        print(f"CoreYard doctor: {outcome}")
+        for label, rows in sections:
+            if not rows:
+                continue
+            print(f"\n  {label}")
+            for level, name, detail in rows:
+                print(f"    [{level:<4}] {name:<14} {detail}")
         if outcome != OK:
             print("\nFix the FAIL lines first; a WARN is usually a deliberate choice.")
     return RANK[outcome]

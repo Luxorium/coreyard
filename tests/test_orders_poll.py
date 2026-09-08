@@ -196,3 +196,83 @@ class Scopes(Quiet):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AParkedBookingIsReattemptedWithoutBeingAskedTo(Quiet):
+    """The half of "automatic" that was missing.
+
+    Booking a work order already happened on its own; recovering from a booking that failed
+    did not. A yard database that was down for one tick left the sale parked in `error`
+    until a person read `orders status` and typed `orders retry` — so the pipeline was
+    automatic exactly until the first thing went wrong with it.
+    """
+
+    def _queue(self) -> EventQueue:
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        spool = EventQueue(Path(directory.name) / "queue.sqlite3")
+        self.addCleanup(spool.close)
+        return spool
+
+    def _park(self, spool, webhook_id="poll:1", name="#1012",
+              error="work order not created: yard database unreachable"):
+        spool.add(webhook_id, "orders/paid", json.dumps(rest_order()["order"]).encode(), name)
+        spool.finish(webhook_id, name, ["51"], booking_error=error)
+
+    def _worker(self, *, writes=True, succeeds=True):
+        worker = MagicMock()
+        worker.write_orders = writes
+        worker.handle.return_value = MagicMock(
+            order_name="#1012", r_numbers=["51"],
+            work_order="2087" if succeeds else "",
+            booking_error="" if succeeds else "work order not created: still down",
+            retire_error="", error="" if succeeds else "still down")
+        return worker
+
+    def test_a_booking_that_failed_last_tick_is_tried_again_this_one(self):
+        spool = self._queue()
+        self._park(spool)
+        self.assertEqual(spool.error_count(), 1)
+        tried = poll_mod.retry_parked(spool, self._worker())
+        self.assertEqual(tried, 1)
+        self.assertEqual(spool.error_count(), 0)
+
+    def test_it_gives_up_rather_than_retrying_a_gone_part_forever(self):
+        """"R#nnnnn is not available" never clears by waiting. A job that re-attempts it
+        every ten minutes for a week is how a refund nobody has issued stays invisible."""
+        spool = self._queue()
+        self._park(spool, error="work order not created: R#47259 is not available")
+        worker = self._worker(succeeds=False)
+        allowed = poll_mod.booking_attempts()
+        for _ in range(10):
+            poll_mod.retry_parked(spool, worker)
+        # The booking at the time of sale is attempt one, so the pass adds the rest and
+        # then stops — ten ticks do not buy ten attempts.
+        self.assertEqual(worker.handle.call_count, allowed - 1)
+        self.assertEqual([name for _, name in spool.exhausted(allowed)], ["#1012"])
+
+    def test_it_does_not_burn_an_attempt_when_booking_is_switched_off(self):
+        """Without --write-orders the retry could only re-park the order with "retry
+        skipped", spending one of the few attempts a real outage will need."""
+        spool = self._queue()
+        self._park(spool)
+        worker = self._worker(writes=False)
+        self.assertEqual(poll_mod.retry_parked(spool, worker), 0)
+        self.assertEqual(worker.handle.call_count, 0)
+        self.assertEqual(spool.error_count(), 1)
+
+    def test_an_order_whose_payload_has_been_purged_is_not_resurrected(self):
+        """Past its retention window there is nothing left to retry with, and the row must
+        not be flipped to pending where `drain` would read a null payload."""
+        spool = self._queue()
+        self._park(spool)
+        spool.purge_error_payloads(0 if False else 1)
+        spool.conn.execute("UPDATE events SET payload=NULL")
+        spool.conn.commit()
+        self.assertEqual(poll_mod.retry_parked(spool, self._worker()), 0)
+
+    def test_a_clean_queue_costs_nothing(self):
+        spool = self._queue()
+        worker = self._worker()
+        self.assertEqual(poll_mod.retry_parked(spool, worker), 0)
+        self.assertEqual(worker.handle.call_count, 0)

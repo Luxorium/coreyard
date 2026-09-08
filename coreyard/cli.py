@@ -22,11 +22,108 @@ import sys
 from contextlib import contextmanager
 
 from coreyard import __version__, ops
-from coreyard.config import REPO_ROOT
+from coreyard.config import out_dir
 
-# Commands that write nothing, anywhere. They are left out of the run history so that
-# "when did a sync last finish" is not buried under a hundred status checks.
+# Commands that write nothing outside ``out/``. They are left out of the run history so
+# that "when did a sync last finish" is not buried under a hundred status checks.
 READ_ONLY = frozenset({"status", "doctor", "audit", "validate", "images", "schema"})
+
+
+def _reports_only(args) -> bool:
+    """Is *this* invocation one that changes nothing outside ``out/``?
+
+    Asked per invocation rather than per command because one command is both. ``images``
+    lists and downloads photographs, which is why it is on the list above — but
+    ``images --delete --apply`` removes them from the share, and being on the list meant
+    the single most destructive image operation was the one nothing recorded. A run
+    history that omits exactly the deletions is worse than one that omits nothing.
+    """
+    if args.command not in READ_ONLY:
+        return False
+    return not (args.command == "images" and getattr(args, "delete", None))
+
+
+# What each command does and what it needs, keyed by its path in the tree. REL-01: no
+# public command may have an undocumented support status, so `tests/test_inventory.py`
+# fails if a node here has no entry or an entry here names no node — adding a command
+# without saying what it writes is not possible without the test going red.
+#
+# Effects, in increasing order of consequence. `local` covers `out/`, the state database,
+# `.env` and the scheduler; the rest name whose system changes.
+READS = "read-only"
+LOCAL = "local files"
+STORE = "Shopify"
+PORTAL = "listing portal (stored values; not yet live)"
+LIVE = "live marketplace listings"
+IRREVERSIBLE = "ends live listings (irreversible)"
+SOURCE = "source database"
+
+# path -> (effect, capabilities it cannot run without, the flag that unlocks the write)
+#
+# "cannot run without" is strict: it is what makes the command refuse *before* any side
+# effect, so a capability that only some invocations need does not belong here. `orders
+# poll` needs the Admin API and nothing else — gating it on the webhook secret would refuse
+# to poll for a site that deliberately never registered a webhook. `orders retry` and
+# `orders replay` work the local queue and need nothing; their `--write-orders` flag is
+# gated by the booking path itself, which has its own mapping check.
+SUPPORT: dict[str, tuple[str, tuple[str, ...], str]] = {
+    "init": (LOCAL, (), ""),
+    "status": (READS, (), ""),
+    "counts": (STORE, ("shopify",), "--apply"),
+    "doctor": (READS, (), ""),
+    "sync": (STORE, ("source",), ""),
+    "sync delta": (STORE, ("source", "delta"), ""),
+    "sync inventory": (STORE, ("source",), ""),
+    "sync photos": (STORE, ("source", "photos"), ""),
+    "sync catalog": (STORE, ("source",), ""),
+    "ebay": (READS, ("portal",), ""),
+    "ebay auto-prices": (PORTAL, ("portal", "source"), "--apply"),
+    "ebay auto-titles": (PORTAL, ("portal", "source"), "--apply"),
+    "ebay daily": (PORTAL, ("portal", "source"), "--apply"),
+    "ebay pull": (READS, ("portal",), ""),
+    "ebay details": (LOCAL, ("portal",), ""),
+    "ebay apply": (PORTAL, ("portal",), "--apply"),
+    "ebay titles": (LOCAL, ("portal", "source"), ""),
+    "ebay engine-titles": (LOCAL, ("portal", "source"), ""),
+    "ebay aspects": (PORTAL, ("portal",), "--apply"),
+    "ebay push": (LIVE, ("portal",), "--apply"),
+    "ebay delist": (IRREVERSIBLE, ("portal",), "--apply"),
+    "ebay undo": (PORTAL, ("portal",), "--apply"),
+    "reconcile": (STORE, ("source", "shopify"), "--apply"),
+    "repair": (READS, ("shopify",), ""),
+    "repair titles": (STORE, ("source", "shopify"), "--apply"),
+    "repair tags": (STORE, ("source", "shopify"), "--apply"),
+    "repair seo": (STORE, ("source", "shopify"), "--apply"),
+    "repair descriptions": (STORE, ("source", "shopify"), "--apply"),
+    "repair weights": (STORE, ("source", "shopify"), "--apply"),
+    "repair metafields": (STORE, ("source", "shopify"), "--apply"),
+    "repair all": (STORE, ("source", "shopify"), "--apply"),
+    "repair fingerprints": (LOCAL, ("source",), "--apply"),
+    "audit": (READS, ("shopify",), ""),
+    "audit catalog": (READS, ("shopify",), ""),
+    "orders": (READS, (), ""),
+    "orders serve": (SOURCE, ("orders",), "--write-orders"),
+    "orders register": (STORE, ("orders", "shopify"), ""),
+    "orders list": (READS, ("shopify",), ""),
+    "orders unregister": (STORE, ("shopify",), ""),
+    "orders replay": (SOURCE, (), "--write-order"),
+    "orders retry": (SOURCE, (), "--write-orders"),
+    "orders status": (READS, (), ""),
+    "orders poll": (SOURCE, ("shopify",), "--write-orders"),
+    "orders sync-status": (STORE, ("shopify",), "--apply"),
+    "alert": (LOCAL, (), ""),
+    "images": (LOCAL, ("database", "photos"), "--delete --apply"),
+    "part-types": (READS, ("source",), ""),
+    "schema": (READS, ("database",), ""),
+    "validate": (READS, (), ""),
+    "bulk": (STORE, ("source", "shopify"), ""),
+    "altfix": (STORE, ("shopify",), ""),
+    "oauth": (LOCAL, (), ""),
+    "schedule": (READS, (), ""),
+    "schedule install": (LOCAL, (), ""),
+    "schedule uninstall": (LOCAL, (), ""),
+    "schedule status": (READS, (), ""),
+}
 
 # name -> (module path, help text). The module supplies its own flags via add_arguments().
 # Order is the order `--help` prints them: the daily verbs first, then the occasional ones.
@@ -39,6 +136,8 @@ COMMANDS: list[tuple[str, str, str]] = [
      "refresh the exact source-inventory counter shown on the storefront"),
     ("doctor", "coreyard.doctor",
      "check the installation, and whether the scheduled jobs are still running"),
+    ("alert", "coreyard.alerts",
+     "notify the operator when the pipeline has stopped, and when it recovers"),
     ("sync", "coreyard.run_sync",
      "publish the yard to the store (the main loop)"),
     ("ebay", "coreyard.ebay.cli",
@@ -127,7 +226,7 @@ def _single_instance(name: str):
     """
     import fcntl
 
-    path = REPO_ROOT / "out" / f".{name}.lock"
+    path = out_dir() / f".{name}.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = path.open("w")
     try:
@@ -161,6 +260,50 @@ def _deadline(seconds: int):
         signal.signal(signal.SIGALRM, previous)
 
 
+def tree(parser: argparse.ArgumentParser, prefix: str = "") -> list[tuple]:
+    """Every node below ``parser``, depth first, as ``(path, parser)``.
+
+    One implementation, because two would drift: the preflight below decides what a command
+    needs from these paths, and ``scripts/inventory.py`` documents the same paths. A
+    generated document that walked the tree differently from the code that enforces it
+    would be a document describing a different tool.
+    """
+    action = next((a for a in parser._actions
+                   if isinstance(a, argparse._SubParsersAction)), None)
+    if action is None:
+        return []
+    found: list[tuple] = []
+    for name, child in action.choices.items():
+        path = f"{prefix} {name}".strip()
+        found.append((path, child))
+        found.extend(tree(child, path))
+    return found
+
+
+def unmet(path: str, caps) -> list[tuple[str, str]]:
+    """Capabilities this command cannot run without that this installation does not have.
+
+    REL-01: an unsupported combination must fail before side effects with a useful
+    explanation. A tabular source genuinely cannot serve `coreyard schema` or a database
+    delta, and the useful moment to say so is before the run starts — not as a traceback
+    from somewhere inside the extract, after a lock has been taken and a log line written
+    that looks like a job that ran.
+    """
+    _, needs, _ = SUPPORT.get(path, (READS, (), ""))
+    return [(name, caps.get(name).detail) for name in needs if not caps.enabled(name)]
+
+
+def _refuse(path: str, missing: list[tuple[str, str]], caps) -> int:
+    """Say what cannot run here, why, and that nothing was changed."""
+    print(f"`coreyard {path}` cannot run on this installation.\n", file=sys.stderr)
+    for name, detail in missing:
+        print(f"  {name:<14} {detail}", file=sys.stderr)
+    print(f"\nThis installation's source is {caps.source_spec}. "
+          f"`coreyard doctor` lists every capability, and docs/CAPABILITY_MATRIX.md says "
+          f"which commands each one supports.\nNothing was changed.", file=sys.stderr)
+    return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The whole command tree, built eagerly so ``--help`` can show all of it."""
     import importlib
@@ -189,6 +332,11 @@ def build_parser() -> argparse.ArgumentParser:
             formatter_class=argparse.RawDescriptionHelpFormatter,
         )
         module.add_arguments(parser)
+    # argparse applies a subparser's defaults after the parent's, so the deepest node the
+    # invocation reached is the one left in the namespace. That is exactly the path
+    # `SUPPORT` is keyed by, and reading it back beats re-deriving it from argv.
+    for path, node in tree(root):
+        node.set_defaults(_support_path=path)
     return root
 
 
@@ -204,17 +352,39 @@ def main(argv: list[str] | None = None) -> int:
         root.parse_args([args.command, "--help"])
         return 2
 
+    # Before the lock and before the deadline: a command that cannot run here should not
+    # take a lock the next scheduled run then waits on.
+    from coreyard import capabilities
+
+    caps = capabilities.detect()
+    path = getattr(args, "_support_path", None) or args.command
+    missing = unmet(path, caps)
+
     with _single_instance(args.lock) if args.lock else _nullcontext():
         with _deadline(args.timeout) if args.timeout else _nullcontext():
-            if args.command in READ_ONLY:
-                return args.func(args)
+            if _reports_only(args):
+                return _refuse(path, missing, caps) if missing else args.func(args)
             scope = getattr(args, "scope", None) or ""
             # Only when redirected. At a terminal the operator can see where their own run
             # started; in a log file nothing else marks the boundary.
             if not sys.stdout.isatty():
                 print(ops.run_header(args.command, scope), flush=True)
-            with ops.record(args.command, scope):
-                return args.func(args)
+            # The code is handed to the recorder rather than only returned, because a
+            # command reports failure by *returning* nonzero: from inside the ``with``
+            # block a run that exited 2 and one that exited 0 are indistinguishable, and
+            # believing the second wrote "ok" into the history for runs the shell had
+            # already called failures.
+            #
+            # A refusal is recorded too. A scheduled job that starts refusing every tick
+            # must not read as a job that stopped being scheduled — the run history is
+            # where "this has been failing since Tuesday" is legible.
+            with ops.record(args.command, scope) as run:
+                if missing:
+                    ops.count(refused=", ".join(name for name, _ in missing))
+                    run.code = _refuse(path, missing, caps)
+                else:
+                    run.code = args.func(args)
+                return run.code
 
 
 @contextmanager

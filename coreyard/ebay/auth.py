@@ -25,7 +25,7 @@ import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
 
-from coreyard.config import REPO_ROOT, _get
+from coreyard.config import _get, out_dir
 from coreyard.ebay.portal import PortalMap
 
 
@@ -194,7 +194,7 @@ def parse_cookie_header(raw: str) -> dict[str, str]:
 
 def cookie_file() -> Path:
     configured = _get("EBAY_PORTAL_COOKIE_FILE", "") or ""
-    return Path(configured) if configured else REPO_ROOT / "out" / "ebay-portal.cookies"
+    return Path(configured) if configured else out_dir() / "ebay-portal.cookies"
 
 
 def cached_cookies(path: Path | None = None) -> dict[str, str] | None:

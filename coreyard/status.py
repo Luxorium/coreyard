@@ -17,7 +17,7 @@ import argparse
 import json
 from datetime import datetime, timezone
 
-from coreyard import ops
+from coreyard import capabilities, ops
 from coreyard.state import DEFAULT_STATE_DB, SyncState
 
 UNKNOWN = "—"
@@ -51,16 +51,30 @@ def _probe(label: str, fn) -> tuple[str, str]:
 
 def gather(deep: bool = False) -> dict:
     """Everything the report shows. Each section degrades to a message on its own."""
-    report: dict = {"reachability": [], "counts": {}, "pending": {}, "runs": {}}
+    caps = capabilities.detect()
+    report: dict = {"reachability": [], "counts": {}, "pending": {}, "runs": {},
+                    "source": caps.source_kind,
+                    "capabilities": {name: state for name, state, _ in caps.summary()}}
 
-    report["reachability"].append(_probe("Yard database", lambda: (
-        __import__("coreyard.yms.db", fromlist=["ping"]).ping().splitlines()[0].split(" - ")[0][:40])))
-    report["reachability"].append(_probe("Photo share", lambda: (
-        __import__("coreyard.yms.images", fromlist=["SmbImageStore"])
-        .SmbImageStore().list_inventory_images("0") is not None and "OK")))
-    report["reachability"].append(_probe("Shopify", lambda: (
-        __import__("coreyard.sink.shopify_api", fromlist=["ShopifySink"])
-        .ShopifySink().check())))
+    # Probe what this installation actually uses. Asking a tabular yard whether its named
+    # pipe answers reports a failure for a service it does not have, which is exactly the
+    # kind of permanently-red line people learn to scroll past.
+    report["reachability"].append(_probe(
+        f"Source ({caps.source_kind})",
+        lambda: str(__import__("coreyard.source", fromlist=["load"])
+                    .load(caps.source_spec).ping()).splitlines()[0][:48]))
+    if caps.enabled("photos") and caps.source_kind == "database":
+        report["reachability"].append(_probe("Photo share", lambda: (
+            __import__("coreyard.yms.images", fromlist=["SmbImageStore"])
+            .SmbImageStore().list_inventory_images("0") is not None and "OK")))
+    elif caps.enabled("photos"):
+        report["reachability"].append(("Photo directory", caps.get("photos").detail))
+    if caps.enabled("shopify"):
+        report["reachability"].append(_probe("Shopify", lambda: (
+            __import__("coreyard.sink.shopify_api", fromlist=["ShopifySink"])
+            .ShopifySink().check())))
+    else:
+        report["reachability"].append(("Shopify", caps.get("shopify").detail))
 
     # Local state first: it is the one source that is always readable, so a report that can
     # show nothing else can still show this.
@@ -91,7 +105,9 @@ def gather(deep: bool = False) -> dict:
         report["counts"]["Yard listable"] = f"FAILED — {str(exc)[:60]}"
         listable = None
 
-    if deep:
+    if deep and not caps.enabled("shopify"):
+        report["counts"]["Shopify managed"] = "not configured — no Admin API credentials"
+    elif deep:
         try:
             from coreyard.config import load_store
             from coreyard.reconcile.store import scan
@@ -124,14 +140,15 @@ def gather(deep: bool = False) -> dict:
                          ("Last inventory sync", "inventory")):
         run = ops.last("sync", scope)
         report["runs"][label] = ({"when": _ago(run["finished"] or run["started"]),
-                                  "ok": run["ok"], "counts": run["counts"]}
+                                  "ok": run["ok"], "counts": run["counts"],
+                                  "exit_code": run.get("exit_code")}
                                  if run else None)
     for command in ("reconcile", "repair", "orders"):
         run = ops.last(command)
         if run:
             report["runs"][f"Last {command}"] = {
                 "when": _ago(run["finished"] or run["started"]), "ok": run["ok"],
-                "counts": run["counts"]}
+                "counts": run["counts"], "exit_code": run.get("exit_code")}
     return report
 
 
@@ -165,10 +182,12 @@ def _render(report: dict) -> None:
         dry = counts.pop("dry_run", False)
         timed_out = counts.pop("timed_out", False)
         counts.pop("scope", None)
+        code = run.get("exit_code")
         verdict = ("dry run" if dry else "timed out" if timed_out
-                   else "ok" if run["ok"] else "FAILED")
+                   else "ok" if run["ok"]
+                   else f"FAILED ({code})" if code not in (None, 1) else "FAILED")
         detail = "  ".join(f"{k}={v}" for k, v in sorted(counts.items()) if v)
-        line = f"  {label:<32}{run['when']:>12}  {verdict:<9}"
+        line = f"  {label:<32}{run['when']:>12}  {verdict:<12}"
         print((line + f"  {detail}" if detail and not dry else line).rstrip())
 
     if report.get("running"):

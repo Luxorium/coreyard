@@ -43,6 +43,49 @@ jobs:
       - name: No vendor names or site schema in the repository
         run: python scripts/check_neutrality.py
 
+  inventory:
+    name: functionality inventory is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      # REL-01/REL-05. The inventory is generated from the live command tree, so this
+      # fails when a command is added, renamed or removed without the document following.
+      - name: docs/INVENTORY.md matches the command tree
+        run: python scripts/inventory.py --check
+      # QA-02. A criterion with no ledger row is one nobody looks at again.
+      - name: Every acceptance criterion has an evidence-ledger row
+        run: python scripts/ledger.py --summary
+
+  hygiene:
+    name: whitespace and metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # `git diff --check` only sees a working tree, so on a clean checkout it passes
+      # regardless. Scan the tracked files themselves.
+      - name: No trailing whitespace in tracked text files
+        run: |
+          if git grep -nI -E ' +$' -- . ; then
+            echo "::error::trailing whitespace above"; exit 1
+          fi
+      # REL-03/DIST-01: the built artifact must carry the same version the CLI reports.
+      - name: The built package version equals coreyard.__version__
+        run: |
+          pip install --upgrade pip build
+          python -m build --wheel --outdir dist/ .
+          runtime=$(python -c "import coreyard; print(coreyard.__version__)")
+          echo "runtime version: $runtime"
+          ls dist/ | grep -F "coreyard-$runtime-" || {
+            echo "::error::built wheel does not carry version $runtime"; ls dist/; exit 1;
+          }
+
   installer:
     name: installer smoke test
     runs-on: ubuntu-latest

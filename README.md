@@ -53,6 +53,10 @@ whose columns are named after `Part` fields and set `COREYARD_SOURCE=tabular:<pa
 
 ## Status
 
+The proposed [v0.1.0 release acceptance criteria](RELEASE_ACCEPTANCE_v0.1.0.md) define
+the customer, operational, security and public-distribution gates. The working features
+below are not a claim that those release gates have been met.
+
 | Layer | State |
 |---|---|
 | Image fetch from the photo share over SMB (by R#) | **working, tested vs live server** |
@@ -97,7 +101,8 @@ coreyard/
   __main__.py                `python -m coreyard`
   status.py                  read-only "what does the pipeline believe right now"
   doctor.py                  installation and liveness diagnostics
-  ops.py                     run history: what ran, when, and whether it worked
+  capabilities.py            what this installation is configured to do, from config alone
+  ops.py                     run history: what ran, when, whether it worked, and its exit code
   models.py                  Part dataclass (the neutral extract-to-transform contract)
   config.py                  .env loader + typed settings + the store profile
   overrides.py               reviewed per-R# title/price decisions for the renderer
@@ -145,6 +150,11 @@ coreyard/
   schedule.py                systemd/cron sync scheduling helper
 scripts/demo_offline.py      offline proof (no DB needed)
 scripts/check_neutrality.py  CI guard: no vendor or site names in the tree
+scripts/inventory.py         generates docs/INVENTORY.md from the live command tree
+scripts/ledger.py            CI guard: every acceptance criterion has an evidence row
+docs/INVENTORY.md            every command: what it changes, and what it needs
+docs/CAPABILITY_MATRIX.md    what is supported per source and feature, and what is not
+docs/EVIDENCE_LEDGER.md      release acceptance status, one row per criterion
 scripts/test_db_connection.py  one-off live DB connectivity check
 tests/                       unittest suite - offline, no DB, no network, no .env
 ```
@@ -405,8 +415,37 @@ bin/coreyard sync            # do it
 says whether it writes. `python -m coreyard` is the same CLI, and `coreyard` is on your PATH
 after `pip install -e .`.
 
+CoreYard writes only under its **data root**: `.env`, `store.json`, `schema.json`,
+`portal.json`, the state and queue databases, and `out/`. Run from a checkout that is the
+checkout, so nothing an existing installation has ever used moves. Installed as a package it
+is `$XDG_DATA_HOME/coreyard` (or `~/.local/share/coreyard`), because a package must not
+write into its own installation directory — that fails on a read-only tree, and the next
+upgrade would replace the directory holding your sync state. `COREYARD_HOME` overrides it,
+which is also how two installations share one host without sharing store identity,
+credentials, locks or state. The code location (`bin/coreyard`, the virtualenv, the bundled
+examples) is separate and stays with the installation.
+
+A command that cannot run on this installation says so before it starts, naming the
+capability it needs and the source you configured, and exits 2 without taking a lock or
+changing anything — `coreyard sync delta` on a CSV export, for instance, because a file has
+no row-level change cursor. [`docs/CAPABILITY_MATRIX.md`](docs/CAPABILITY_MATRIX.md) says
+which combinations are supported.
+
+`coreyard alert` is the piece that pushes rather than waits: it evaluates the same
+conditions on a schedule and notifies you once when something breaks, again if it is still
+broken much later, and once more when it recovers. Delivery is whatever command you put in
+`COREYARD_ALERT_COMMAND` — `mail`, `curl` to a webhook, a paging CLI — so CoreYard carries
+no transport dependency. Prove the channel with `coreyard alert --test` before you need it.
+
+`doctor` reports in three sections: what this installation is *configured* to do, whether it
+can reach what it uses, and whether the scheduled work is still happening. The first section
+is why the rest is short — a capability that is off is not probed, so a yard reading a CSV
+export is never asked for SMB credentials and a site that has not enabled order booking is
+never told its order log is missing. Only a capability that something enabled here *depends
+on* is reported as a failure. `--json` adds the same capability map for a monitor to read.
+
 ```bash
-# 0. Prove connectivity (DB, photo share, and Shopify if configured)
+# 0. Prove connectivity (whatever this installation is configured to use)
 bin/coreyard doctor
 
 # 1. Eyeball the extract

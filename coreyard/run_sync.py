@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import NamedTuple, Optional
 
 from coreyard import ops
-from coreyard.config import REPO_ROOT, load_settings
+from coreyard.config import load_settings, out_dir
 from coreyard.state import DEFAULT_STATE_DB, SyncState, fingerprints_all
 
 # The channel this pipeline publishes to. Recorded alongside the canonical
@@ -47,7 +47,7 @@ STATE_DB = DEFAULT_STATE_DB
 # it describes returned cleanly, so an interrupted run leaves a smaller snapshot, never a
 # wrong one.
 CHECKPOINT_EVERY = 100
-DEFAULT_CSV = REPO_ROOT / "out" / "products.csv"
+DEFAULT_CSV = out_dir() / "products.csv"
 
 
 class Photos(NamedTuple):
