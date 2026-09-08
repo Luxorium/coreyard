@@ -16,7 +16,7 @@ Follow explicit user instructions over repository or skill guidance, within syst
 developer constraints. Reuse authorization already given for the same action and scope.
 If a missing decision blocks work, complete independent preparation first, then explain
 the concrete decision needed. When a file causes a pause, link it and quote the relevant
-instruction. The publishing, database, and portal safeguards below still apply.
+instruction. The publishing and database safeguards below still apply.
 
 Use concise progress updates and report the outcome, verification, and any remaining
 blocker plainly. Batch independent read-only checks when useful; use subagents only when
@@ -38,14 +38,13 @@ the canonical renderer (`render.py`) plus the SEO engine, tag ownership, weights
 CSV framing; `sink/` contains the one Shopify client and the CSV and API
 publishers. `orders/` owns the order pipeline and its transports, `reconcile/` compares the
 store with the yard, `repair/` rewrites output an older renderer produced, and `audit/`
-reports listing quality. `ebay/` is the optional
-listing-portal channel: a portal map, its client, guarded writes, and `daily.py`, the
-unattended pass that composes them. `yms/part_types.py` reports every part
+reports listing quality. `yms/part_types.py` reports every part
 type the yard can inventory and where the renderer's wording runs out.
-`overrides.py` carries the reviewed decisions that channel hands back to the renderer. `run_sync.py` orchestrates syncs,
+`overrides.py` carries reviewed per-R# titles the renderer prefers over its own.
+`run_sync.py` orchestrates syncs,
 `state.py` tracks fingerprints, `webhook.py` is the webhook transport, and `schedule.py`
 installs timers. Tests are in `tests/`; operational checks belong in `scripts/`. Photos are
-external; `out/`, `*.sqlite3`, `.env`, `schema.json`, `portal.json`, `notes/`, and generated
+external; `out/`, `*.sqlite3`, `.env`, `schema.json`, `notes/`, and generated
 `bin/` content are private or generated.
 
 A storefront repository may live beside this one. CoreYard must never import it, assume it,
@@ -107,16 +106,12 @@ Read config through `_get` and let the caller load the environment. Name files
 `test_<area>.py`, classes for the behavior, and methods `test_<expected_behavior>`.
 Add regression coverage for identifiers, mappings, fingerprints/state diffs, retirement,
 revival, webhooks, order guards, tag ownership, the listable policy, weight rules,
-reconciliation, repair, order polling, rendered Shopify output, and — for the listing-portal
-channel — cap guards, title validation, exact source-price mapping, aspect
-derivation, and which listing ids a write resolves to. Run one test with, for
+reconciliation, repair, order polling, and rendered Shopify output. Run one test with, for
 example, `.venv/bin/python -m unittest tests.test_state.Diff.test_summary`.
 
 Anything that talks to Shopify takes a client so a fake can be passed in, and every planning
 decision that could empty a catalogue — retirement fractions, reconciliation buckets, repair
-diffs — lives in a pure function that a test can call directly. The same rule covers the
-listing portal: its client is injectable, its planning (`ebay/engines.py`) is pure, and no
-test may reach a portal.
+diffs — lives in a pure function that a test can call directly.
 
 CoreYard runs no model and calls no LLM. Titles come from the renderer and prices come
 unchanged from the source database, so every command is reproducible and a test that wanted
@@ -135,11 +130,8 @@ for storefront-visible changes.
 
 Never commit secrets, customer data, generated output, or site-specific names. Source
 table/column names belong only in gitignored `schema.json`; keep
-`schema.example.json` generic. The listing portal's routes, field ids and action ids follow
-the same rule in gitignored `portal.json`, with `portal.example.json` generic and the
-vendor's captured reference material confined to the ignored `notes/`. Portal session
-cookies are owner-only and never passed on a command line. CI enforces vendor neutrality
-with `scripts/check_neutrality.py`.
+`schema.example.json` generic, with any vendor's captured reference material confined to
+the ignored `notes/`. CI enforces vendor neutrality with `scripts/check_neutrality.py`.
 
 Every database path is `SELECT`-only except `coreyard/yms/orders.py`. That opt-in
 work-order path requires an `order_write` mapping plus explicit enablement through
@@ -215,32 +207,6 @@ failed payloads may remain only in the owner-only queue for the bounded retry wi
 - Sale booking is idempotent on the stored order reference, not only webhook ID.
   Keep `order_write.line_items_taxable` false when the storefront remits tax; see
   `CLAUDE.md` before changing order or tax behavior.
-- The listing-portal channel has three write surfaces, and they stay three commands:
-  saving in the portal changes nothing a shopper sees, pushing makes it live, and delisting
-  is irreversible on eBay — a relist mints a new item id and loses the watchers and ranking.
-  The gap between the first two is the review window for portal changes.
-- Every portal write is a dry run without `--apply`, and its cap counts listings rather than
-  plan entries and refuses *before* the first write, so a refused batch writes nothing.
-- `ebay auto-titles` owns the bounded unlisted-title queue. It uses the shared renderer's
-  80-character budget, rechecks live unlisted membership before saving, and records success
-  only after read-back verification. It never changes prices, exports Shopify overrides,
-  or submits listings. Its checkpoint is private generated state in `out/`.
-- A listing is matched to a part from grid data alone, by the R# in the portal's own title or
-  by (donor stock number, part-type code), then — inside a candidate set only — by the grid's
-  interchange number and by the side the title names. Each refuses rather than guesses: a
-  listing that resolves to no single part is left alone, because repricing the wrong part is
-  worse than touching nothing.
-- `EBAY_PORTAL_USER`/`EBAY_PORTAL_PASSWORD` are a sign-in of last resort, used only when the
-  cookie sources yield nothing and only if `portal.json` maps `auth.login_fields`; the client
-  re-signs at most once per expired request. Never print, log, or put a password in an error.
-- The source database is the base-price authority. Shopify uses its unchanged positive
-  price. eBay's optional configured markup and included shipping are computed only in
-  `ebay/pricing.py`: markup applies to the part, then free-shipping listings add the
-  configured Shopify rate. Pickup and freight do not include shipping in the item price;
-  freight selects the mapped shipping policy. Never mark up an already-marked-up price.
-- `ebay auto-prices --apply --revise-listed` may revise existing live listings through
-  the guarded push surface after price/policy read-back. It never lists unlisted inventory.
-  Failed or interrupted revisions retain private pending state for retry.
 - Reviewed titles reach Shopify only as `STORE_CATALOG_OVERRIDES_FILE`, read by the one
   renderer and keyed by R#. Never put prices in that file or patch a product price directly:
   the next sync must restore the source amount.

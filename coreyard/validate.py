@@ -38,8 +38,6 @@ from coreyard.transform.weights import WeightRules, WeightRulesError
 from coreyard.transform.weights import load as load_weights
 from coreyard.overrides import OverrideError
 from coreyard.overrides import load as load_overrides
-from coreyard.ebay.portal import PortalConfigError
-from coreyard.ebay.portal import load as load_portal
 
 
 @dataclass
@@ -176,19 +174,6 @@ def check_overrides(path, result: Result):
     return overrides
 
 
-def check_portal(path, result: Result):
-    if not path:
-        return None
-    try:
-        portal = load_portal(path)
-    except PortalConfigError as exc:
-        result.fail("listing portal", str(exc))
-        return None
-    result.note(f"listing portal: {len(portal.row_fields)} neutral grid field(s), "
-                f"{len(portal.detail_fields)} detail field(s)")
-    return portal
-
-
 def check_store(path, result: Result) -> None:
     """Validate the combined store file's sections, if this site has one.
 
@@ -229,7 +214,7 @@ def check_store(path, result: Result) -> None:
 
 
 def validate(profile=None, weights=None, orders=None, shipping=None,
-             overrides=None, portal=None, store=None) -> Result:
+             overrides=None, store=None) -> Result:
     """Validate the given config paths. Any left as None is simply not checked."""
     result = Result()
     check_store(store, result)
@@ -238,7 +223,6 @@ def validate(profile=None, weights=None, orders=None, shipping=None,
     policy = check_shipping(shipping, result)
     check_orders(orders, result, policy)
     check_overrides(overrides, result)
-    check_portal(portal, result)
     return result
 
 
@@ -252,9 +236,6 @@ def _configured() -> dict:
         "orders": _get("STORE_ORDER_POLICY_FILE", "") or None,
         "shipping": _get("STORE_SHIPPING_POLICY_FILE", "") or None,
         "overrides": _get("STORE_CATALOG_OVERRIDES_FILE", "") or None,
-        "portal": (_get("EBAY_PORTAL_FILE", "") or
-                   (str(DATA_ROOT / "portal.json")
-                    if (DATA_ROOT / "portal.json").is_file() else None)),
         "store": (_get("STORE_FILE", "") or
                   (str(DATA_ROOT / "store.json")
                    if (DATA_ROOT / "store.json").is_file() else None)),
@@ -268,7 +249,6 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     ap.add_argument("--orders", default=None, help="order policy JSON")
     ap.add_argument("--shipping", default=None, help="shipping policy JSON")
     ap.add_argument("--overrides", default=None, help="per-R# catalogue override JSON")
-    ap.add_argument("--portal", default=None, help="listing-portal protocol map JSON")
     ap.add_argument("--store", default=None,
                     help="combined store file (profile/weights/shipping/orders)")
     ap.set_defaults(func=run)
@@ -278,7 +258,7 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
 def run(args) -> int:
     paths = {"profile": args.profile, "weights": args.weights,
              "orders": args.orders, "shipping": args.shipping,
-             "overrides": args.overrides, "portal": args.portal,
+             "overrides": args.overrides,
              "store": args.store}
     if not any(paths.values()):
         # No paths given: check whatever this installation has configured. Reading .env is

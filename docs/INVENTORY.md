@@ -17,7 +17,7 @@ run without. `coreyard doctor` reports which of them this installation has. A bl
 means the command works on any supported installation.
 
 
-CoreYard 0.1.0 — 56 commands.
+CoreYard 0.1.0 — 43 commands.
 
 | Command | What it does | Effect | Unlocked by | Needs |
 |---|---|---|---|---|
@@ -31,19 +31,6 @@ CoreYard 0.1.0 — 56 commands.
 | `coreyard sync inventory` | availability only: new, revived, repriced, restocked, retired | Shopify |  | source |
 | `coreyard sync photos` | media only: parts whose photo set moved on the share | Shopify |  | source, photos |
 | `coreyard sync catalog` | copy only: parts whose rendered text, tags, weight or metafields moved | Shopify |  | source |
-| `coreyard ebay` | pull and manage the eBay catalogue through the listing portal | read-only |  | portal |
-| `coreyard ebay auto-prices` | maintain configured marketplace prices and freight policies | listing portal (stored values; not yet live) | `--apply` | portal, source |
-| `coreyard ebay auto-titles` | maintain unlisted 80-character titles in verified batches | listing portal (stored values; not yet live) | `--apply` | portal, source |
-| `coreyard ebay daily` | offer canonical titles and source prices to the portal | listing portal (stored values; not yet live) | `--apply` | portal, source |
-| `coreyard ebay pull` | download a portal tab (read-only) | read-only |  | portal |
-| `coreyard ebay details` | cache normalized listing edit forms | local files |  | portal |
-| `coreyard ebay apply` | save a reviewed title plan in the portal | listing portal (stored values; not yet live) | `--apply` | portal |
-| `coreyard ebay titles` | title portal listings with the Shopify renderer | local files |  | portal, source |
-| `coreyard ebay engine-titles` | alias of `titles`, kept for existing engine scripts | local files |  | portal, source |
-| `coreyard ebay aspects` | derive and save eBay item specifics | listing portal (stored values; not yet live) | `--apply` | portal |
-| `coreyard ebay push` | preflight and submit explicit listings to eBay | live marketplace listings | `--apply` | portal |
-| `coreyard ebay delist` | end explicit live eBay listings | ends live listings (irreversible) | `--apply` | portal |
-| `coreyard ebay undo` | reset portal titles/prices to source defaults | listing portal (stored values; not yet live) | `--apply` | portal |
 | `coreyard reconcile` | compare the yard with the live store and close the safe differences | Shopify | `--apply` | source, shopify |
 | `coreyard repair` | rewrite catalog output an older renderer produced | read-only |  | shopify |
 | `coreyard repair titles` | repair titles | Shopify | `--apply` | source, shopify |
@@ -89,18 +76,6 @@ CoreYard 0.1.0 — 56 commands.
 - **`coreyard sync inventory`** — `--check` `--deep` `--delta` `--dry-run` `--force-retire` `--image-base-url` `--limit` `--max-retire-fraction` `--no-image-scan` `--out` `--r-number` `--reconcile` `--retire-only` `--sink` `--status`
 - **`coreyard sync photos`** — `--check` `--deep` `--delta` `--dry-run` `--force-retire` `--image-base-url` `--limit` `--max-retire-fraction` `--no-image-scan` `--out` `--r-number` `--reconcile` `--retire-only` `--sink` `--status`
 - **`coreyard sync catalog`** — `--check` `--deep` `--delta` `--dry-run` `--force-retire` `--image-base-url` `--limit` `--max-retire-fraction` `--no-image-scan` `--out` `--r-number` `--reconcile` `--retire-only` `--sink` `--status`
-- **`coreyard ebay auto-prices`** — `--apply` `--batch-size` `--cap` `--out` `--part-type` `--portal` `--revise-listed` `--state` `--types-per-run`
-- **`coreyard ebay auto-titles`** — `--apply` `--batch-size` `--cap` `--out` `--part-type` `--portal` `--state`
-- **`coreyard ebay daily`** — `--apply` `--cap` `--details` `--limit` `--out-prefix` `--overrides-out` `--part-type` `--portal` `--rows` `--tab` `--title-limit` `--yes-i-mean-it`
-- **`coreyard ebay pull`** — `--limit` `--out` `--part-type` `--portal` `--rows` `--tab`
-- **`coreyard ebay details`** — `--no-resume` `--out` `--portal` `--tab`
-- **`coreyard ebay apply`** — `--apply` `--cap` `--portal` `--tab` `--titles` `--yes-i-mean-it`
-- **`coreyard ebay titles`** — `--details` `--limit` `--out` `--parts`
-- **`coreyard ebay engine-titles`** — `--details` `--limit` `--out` `--parts`
-- **`coreyard ebay aspects`** — `--apply` `--aspect-metadata` `--cap` `--deep` `--details-out` `--part-type` `--portal` `--rows` `--tab` `--warranty` `--yes-i-mean-it`
-- **`coreyard ebay push`** — `--apply` `--cap` `--list-as-new` `--part-type` `--portal` `--rows` `--tab` `--yes-i-mean-it`
-- **`coreyard ebay delist`** — `--apply` `--cap` `--no-images` `--part-type` `--portal` `--rows` `--tab` `--yes-i-mean-it`
-- **`coreyard ebay undo`** — `--apply` `--cap` `--portal` `--tab` `--what` `--yes-i-mean-it`
 - **`coreyard reconcile`** — `--activate` `--apply` `--dry-run` `--force-retire` `--max-retire-fraction` `--no-retire` `--repair-state`
 - **`coreyard repair titles`** — `--apply` `--dry-run` `--limit` `--show` `--status` `--workers`
 - **`coreyard repair tags`** — `--apply` `--dry-run` `--limit` `--show` `--status` `--workers`
@@ -123,7 +98,7 @@ CoreYard 0.1.0 — 56 commands.
 - **`coreyard images`** — `--apply` `--delete` `--dest` `--fetch`
 - **`coreyard part-types`** — `--catalogue` `--gaps` `--out` `--parts`
 - **`coreyard schema`** — _(no options)_
-- **`coreyard validate`** — `--orders` `--overrides` `--portal` `--profile` `--shipping` `--store` `--weights`
+- **`coreyard validate`** — `--orders` `--overrides` `--profile` `--shipping` `--store` `--weights`
 - **`coreyard bulk`** — `--all-parts` `--images-only` `--limit` `--log` `--max-attempts` `--no-resume` `--status` `--workers`
 - **`coreyard altfix`** — `--dry-run` `--limit` `--log` `--max-pages` `--no-resume` `--overwrite`
 - **`coreyard oauth`** — _(no options)_

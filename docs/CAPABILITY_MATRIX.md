@@ -29,7 +29,6 @@ Each is `on` when configured, `off` when this installation simply does not use i
 | `publications` | `STORE_PUBLICATIONS` names at least one sales channel | Publication; without it a new product is ACTIVE on no channel and returns 404 |
 | `orders` | `SHOPIFY_WEBHOOK_SECRET` or `SHOPIFY_CLIENT_SECRET` | Webhook receipt only — polling deliberately needs neither |
 | `order_booking` | `YMS_WRITE_ORDERS=1` **and** a complete `order_write` mapping | The one write path into the source database |
-| `portal` | `EBAY_PORTAL_FILE`, or a `portal.json` beside the checkout | The whole `coreyard ebay` channel |
 | `delta` | A modified-at column is mapped | `sync delta` |
 | `alerting` | `COREYARD_ALERT_COMMAND` names a notifier | `coreyard alert` delivery; without it alerts are evaluated and printed but nobody is told |
 
@@ -111,19 +110,6 @@ A tabular source cannot book a work order: there is no database to write to. The
 reports `off` with that reason, and `--write-orders` on such an installation is a
 configuration error rather than a silent no-op.
 
-## The listing-portal channel
-
-| Feature | Capability | Prerequisites | Limitations | Evidence |
-|---|---|---|---|---|
-| Portal reads | `portal` | `EBAY_PORTAL_FILE` (or a `portal.json` beside the checkout); a browser session, cookie jar, or `EBAY_PORTAL_USER`/`EBAY_PORTAL_PASSWORD` | Read-only; no eBay API is used | Offline: `tests/test_ebay.py` |
-| Portal saves | `portal` | As above, plus `--apply` | Stored values only; nothing a shopper sees moves | Offline: `tests/test_ebay_workflow.py` |
-| Pushing to eBay | `portal` | As above, plus `--apply` | Live from this point; a separate command by design, so an unattended job cannot close the review window | Offline: partial. Controlled account: `NOT VERIFIED` (MKT-02) |
-| Delisting | `portal` | As above, plus `--apply` | **Irreversible**: relisting mints a new item id and loses watchers and ranking | Offline: partial. `NOT VERIFIED` |
-
-Title and price work needs `source` as well as `portal`, because both come from the yard:
-titles from the canonical renderer, prices from the source database. Each supported portal
-mapping must be qualified against a controlled account; **no portal mapping has been
-qualified**, so every mapping is currently unsupported for release purposes (MKT-02).
 
 ## Alerting
 
@@ -159,7 +145,7 @@ it. `out/alerts.jsonl` records what was sent; it is an audit trail, not the deli
 CoreYard writes only under its **data root**, resolved once per process: `COREYARD_HOME` if
 set, else the checkout when running from one and it is writable, else
 `$XDG_DATA_HOME/coreyard` (or `~/.local/share/coreyard`). It holds `.env`, `store.json`,
-`schema.json`, `portal.json`, `coreyard_sync_state.sqlite3`,
+`schema.json`, `coreyard_sync_state.sqlite3`,
 `coreyard_webhook_queue.sqlite3` and `out/` — previews, logs, locks, caches and progress
 files. The installation directory holds only code and is never written to.
 
@@ -178,6 +164,6 @@ files. The installation directory holds only code and is never written to.
 - Any model, LLM or inference service. Titles come from the renderer and prices from the
   source database, so the same part produces the same listing on every run.
 - Automatic refunds, a hosted service, a GUI, or multi-tenancy (DOC-02).
-- Atomic reservation across Shopify, the portal and the source database. They share no
+- Atomic reservation across Shopify and the source database. They share no
   transaction; the cross-channel oversell exposure is real and is documented rather than
   promised away (SYNC-05).

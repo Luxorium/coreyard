@@ -1,18 +1,13 @@
 """The catalogue of every part type this yard can inventory, and what it covers.
 
 Two workers add parts all day, and nothing stops them filing one under a type nobody has
-listed before. Every per-type command in the listing-portal channel — item specifics, a
-title pass, a preflight re-read — takes a part-type code from an operator, which is fine
-while a person is driving and useless for a job that has to keep up on its own.  So the
-set of types has to come from somewhere.
+published before. The set of types therefore has to come from somewhere rather than from a
+list somebody remembered to update.
 
-It comes from the source database.  The yard system keeps its own part-type table, the
-extract already joins it for each part's display name, and its codes are the same numbers
-the listing portal filters on — which is not an assumption: :mod:`coreyard.ebay.link`
-resolves listings by (donor stock number, part-type code) across both systems and was
-measured getting 335 of 340 right and none wrong.  Reading the table is one ``SELECT``,
-needs no portal session, and lists the types that have *no* listings yet, which is exactly
-where the automation is blind.
+It comes from the source database. The yard system keeps its own part-type table and the
+extract already joins it for each part's display name, so reading the whole catalogue is
+one ``SELECT`` — and it lists the types that have no products yet, which is exactly where
+the automation is blind.
 
 The second half of this module is the question worth asking of that catalogue: for how
 many of these types does the renderer actually know a shopper's word?  ``expand_part_type``

@@ -54,8 +54,7 @@ class SupportStatus(unittest.TestCase):
         self.assertEqual(stale, [], "these were removed from the CLI; drop their rows")
 
     def test_every_effect_is_one_of_the_declared_kinds(self):
-        known = {cli.READS, cli.LOCAL, cli.STORE, cli.PORTAL, cli.LIVE,
-                 cli.IRREVERSIBLE, cli.SOURCE}
+        known = {cli.READS, cli.LOCAL, cli.STORE, cli.SOURCE}
         for path, (effect, _, _) in cli.SUPPORT.items():
             self.assertIn(effect, known, path)
 
@@ -72,18 +71,14 @@ class SupportStatus(unittest.TestCase):
             for capability in needs:
                 self.assertIn(capability, known, f"{path} needs unknown '{capability}'")
 
-    def test_the_irreversible_command_is_the_one_that_ends_live_listings(self):
-        """If this ever names a second command, that command needs the same review gate."""
-        irreversible = [path for path, (effect, _, _) in cli.SUPPORT.items()
-                        if effect == cli.IRREVERSIBLE]
-        self.assertEqual(irreversible, ["ebay delist"])
 
     def test_every_write_outside_out_names_the_flag_that_unlocks_it(self):
         """UX-03: help and output must identify external writes. A write with no named
         gate is one a customer can trigger without meaning to."""
+        # Deliberately not cli.STORE: a Shopify write is gated the other way round, by
+        # --dry-run rather than by --apply, so the sync commands correctly name no flag.
         ungated = [path for path, (effect, _, gate) in cli.SUPPORT.items()
-                   if effect in (cli.PORTAL, cli.LIVE, cli.IRREVERSIBLE, cli.SOURCE)
-                   and not gate]
+                   if effect == cli.SOURCE and not gate]
         self.assertEqual(ungated, [])
 
 
@@ -143,17 +138,9 @@ class ExampleConfigurationIsGeneric(unittest.TestCase):
     """QA-01: CI validates the generic example configs.
 
     They are the files a new customer copies. `store.example.json` was already checked;
-    the schema and portal examples were not, and those are the two that carry the shape of
-    somebody else's installation if anyone is careless.
+    the schema example was not, and it is the one that carries the shape of somebody else's
+    installation if anyone is careless.
     """
-
-    def test_the_example_portal_map_validates(self):
-        from coreyard.config import REPO_ROOT
-        from coreyard.validate import Result, check_portal
-
-        result = Result()
-        check_portal(str(REPO_ROOT / "portal.example.json"), result)
-        self.assertTrue(result.ok, result.errors)
 
     def test_the_example_schema_loads(self):
         from coreyard.config import REPO_ROOT

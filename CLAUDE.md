@@ -20,14 +20,7 @@ handle prefix. Site configuration belongs in `.env` and in `store.json` (section
 `shipping`, `orders`; the older per-file settings still work and still win); source table and column names belong in the local, gitignored
 `schema.json`. Keep `schema.example.json` generic.
 
-The listing portal behind `coreyard ebay` follows the same rule one level further out.
-CoreYard speaks no portal's protocol natively: routes, parameter names, tab statuses, form
-field ids and bulk-action ids all come from the gitignored `portal.json`, exactly as source
-column names come from `schema.json`. Keep `portal.example.json` generic, and keep the
-vendor's own reference material (captured request shapes, category metadata, filter-field
-tables) in the ignored `notes/` directory rather than in the tree.
-
-Those four files are a contract with whatever storefront sits on the other side, so their
+Those files are a contract with whatever storefront sits on the other side, so their
 schemas are validated offline by `coreyard/validate.py`. Adding a key means extending the
 validator, or the other side cannot check it in CI.
 
@@ -122,13 +115,6 @@ bin/coreyard orders retry --id <webhook-id>
 bin/coreyard orders sync-status            # plan only
 bin/coreyard schedule status
 bin/coreyard part-types                    # part-type catalogue + wording gaps, read-only
-bin/coreyard ebay daily                    # unattended pass, dry run
-bin/coreyard ebay daily --apply            # ...and SAVE it in the portal (never pushes)
-bin/coreyard ebay pull --tab unlisted      # read-only portal download
-bin/coreyard ebay engine-plan --titles ... --prices ...   # plan only
-bin/coreyard ebay engine-apply --titles ... --apply       # WRITES the portal
-bin/coreyard ebay push --apply             # LISTS on eBay
-bin/coreyard ebay delist --apply           # ENDS live eBay listings (irreversible)
 ```
 
 Commands without `--dry-run` can write Shopify or sync state. `bin/coreyard orders
@@ -197,8 +183,6 @@ coreyard/orders/     order pipeline + queue, poll transport, lifecycle sync, pol
 coreyard/reconcile/  yard-vs-store comparison, planning, and guarded application
 coreyard/repair/     rewrite catalog output an older renderer produced
 coreyard/audit/      read-only listing-quality checks with configurable thresholds
-coreyard/ebay/       the listing-portal channel: portal map, client, guarded writes
-coreyard/ebay/index.py      the one place pricing evidence is fetched from, and so replaceable
 coreyard/yms/part_types.py  every part type the yard can inventory, and wording coverage
 coreyard/overrides.py reviewed per-R# title/price decisions, read by the canonical renderer
 coreyard/profile.py  site merchandising policy (claims, wording, metafield namespace)
@@ -232,7 +216,7 @@ answer was the one that stopped saying what the part is.
 
 **How many vehicles a title names is a character budget, not a count.**
 `profile.title_max_models` is a hard ceiling on vehicle names, and **0 means the only
-ceiling is the destination's own limit** — 255 on Shopify, 80 on the listing portal. The
+ceiling is the destination's own limit** — 255 on Shopify. The
 CoreYard default stays at 4 because lifting it rewrites every multi-vehicle title a site has
 published, which is an installation's decision rather than something an upgrade does to a
 live catalogue; a yard with a rich fitment catalogue should set 0 in its profile. The names
@@ -273,8 +257,8 @@ as "142 684".
 
 **A reviewed title is extended, never replaced.** `overrides.py` titles win over the
 renderer because they hold facts the database does not: the engine titles reviewed through
-the listing portal state displacement, VIN code and cylinder configuration for parts whose
-note in the yard system is *empty*, read off the portal's detail page. They are also
+a listing portal state displacement, VIN code and cylinder configuration for parts whose
+note in the yard system is *empty*. They are also
 deliberately narrower than fitment — one engine variant, not every model the interchange
 group covers, which for a 5.2L V8 is the difference between "1998-2003 Dodge 1500 Van" and
 eleven models across 1992-2003. What they predate is the grade and the donor's mileage, and
@@ -399,7 +383,7 @@ make it safe to leave on:
   silent cache and a broken one look identical from outside and only one of them is fine.
 
 Every scheduled job on a host like this resolves fitment — a five-minute `sync delta`, the
-listing-portal title and price workers, the hourly sync — so **several processes share this
+the reconcile pass, the hourly sync — so **several processes share this
 file and contention is the normal case**. WAL allows exactly one writer, so `put` commits on
 the spot rather than batching. Holding one transaction across hundreds of round trips is
 what starved a `sync delta` and killed a two-hour repair at part 1,000 of 26,660 with
@@ -549,8 +533,8 @@ output. The fixes are worth keeping intact:
 only place that decides which, and every diagnostic asks it before it asks anything else. A
 capability is `on` when the operator configured it, `missing` when something else that *is*
 on depends on it, and `off` when it is simply not part of this installation — and only the
-middle case is a failure. That distinction is what lets order booking and the listing portal
-stay opt-in without their absence reading as a broken install, and what stopped `doctor`
+middle case is a failure. That distinction is what lets order booking stay opt-in without
+its absence reading as a broken install, and what stopped `doctor`
 telling a yard running `COREYARD_SOURCE=tabular:parts.csv` to supply SMB credentials it does
 not need, a `schema.json` nothing would read, and an `smbclient` it never shells out to.
 
@@ -587,7 +571,7 @@ something that works.
 **Code paths and data paths are different roots.** `config.REPO_ROOT` is where the code
 is — the launcher, the virtualenv interpreter, `schema.example.json`, the source
 fingerprint. `config.DATA_ROOT` (and `config.out_dir()`) is where this installation's own
-files are: `.env`, `store.json`, `schema.json`, `portal.json`, the state and queue
+files are: `.env`, `store.json`, `schema.json`, the state and queue
 databases, `out/` and the locks. Anchoring the second to the first is correct only in a
 source checkout; installed as a package it means writing into `site-packages`, which fails
 on a read-only tree and is wrong even when it works, because the next upgrade replaces the
@@ -665,145 +649,28 @@ cannot tax the same sale again. The configured customer account is for bookkeepi
 consistency, not the tax exemption mechanism. Do not change order/tax behavior without
 reviewing `schema.example.json`, `coreyard/yms/orders.py`, and `tests/test_orders.py`.
 
-## The Listing-Portal Channel
+## Reviewed Title Overrides
 
-`coreyard ebay` is a *second* sales channel, not a second publishing pipeline. It reads and
-writes a configured listing portal, which in turn lists on eBay; Shopify is not involved
-except through one file. Everything portal-specific is in `portal.json` (see Project
-Boundaries) — if you find yourself writing a route, a form field id or a tab name into a
-`.py` file, it belongs in the map instead.
+`overrides.py` reads a per-R# title override file named by `STORE_CATALOG_OVERRIDES_FILE`,
+and the canonical renderer prefers those titles over its own. They hold facts the database
+does not — an engine's displacement, VIN code and cylinder configuration for parts whose
+note in the yard system is empty — so `seo.extend_override_title` appends the grade and the
+donor's mileage rather than losing them.
 
-The channel is optional and inert: an installation that sets no `EBAY_PORTAL_FILE` never
-reaches any of it, and nothing in the Shopify pipeline imports it.
+The file was originally produced by a listing-portal channel that CoreYard no longer has.
+It is now a **hand-maintained input**: the existing entries keep applying, and nothing
+regenerates them. Deleting it would re-title those parts from the renderer alone and lose
+the engine facts permanently, so it is kept deliberately rather than by neglect.
 
-### Keeping up, unattended
-
-`ebay auto-titles` is the title-only queue worker for frequent scheduling. It scans complete
-part-type grids, resolves identities with the shared linker, and limits fitment work and
-saves to a bounded batch. Source and renderer fingerprints skip verified work; a daily
-recheck catches fitment-only changes. New arrivals precede the backlog and retries rotate.
-The worker rechecks unlisted membership and reads back titles before checkpointing success.
-It neither changes prices nor exports short titles into the Shopify override file.
-
-`ebay daily` is the whole chain as one command, and it is a *driver*: every decision is made
-by the module that already owned it, so nothing in it can be tested only through it. It
-walks part types rather than the tab as a whole, because the grid will not serve a whole tab
-but answers a filtered read completely — and the types it walks come from the yard extract,
-so a type a worker files a part under tomorrow is walked tomorrow without anyone editing a
-list. The unlisted tab is the queue, so there is no cursor to keep or corrupt.
-
-**It stops at the portal.** It never calls submit. An unattended job is exactly the thing
-that must not close the review window, so pushing stays a separate command a person runs.
-
-### Staying signed in
-
-Borrowing the browser's session needs no password on disk, which is why it was the whole
-design. It does not survive a run that outlives the session, though, and an overnight
-maintenance pass can do that — dying two thirds of the way through costs the night.
-
-`EBAY_PORTAL_USER`/`EBAY_PORTAL_PASSWORD` are therefore a sign-in of **last resort**:
-consulted only after the explicit jar, the live browser and the owner-only cache have all come
-up empty, and only when `portal.json` maps `auth.login_fields`. Which input the form calls the
-user, the password and the anti-forgery token is portal vocabulary and belongs in the map,
-exactly like a grid parameter or a tab status. `PortalClient._request` also re-signs **once**
-when a request is redirected to the login path mid-pass, and retries — once, so a genuinely
-wrong password fails fast instead of hammering the form, and the stale session handle is
-dropped with it. The token is read from the form on every attempt rather than cached, because
-it is bound to the page that issued it. A password is never printed, logged, or included in an
-error message, and a sign-in that returns HTTP 200 without every mapped cookie is treated as a
-failure — that is exactly what a wrong password looks like.
-
-### Which part a listing is
-
-`ebay/link.py` answers this from grid data alone, because reading each listing's edit form
-costs about forty seconds — roughly sixty-six hours for the unlisted tab. Two independent
-rules cover different halves of the catalogue:
-
-1. **The R# the portal put at the end of its own title**, accepted only when the part it
-   names agrees with the donor stock number *and* part type the grid reported separately.
-   This is what resolves the parts a car carries two of; the donor key alone is genuinely
-   ambiguous for every tail lamp, mirror and headlamp.
-2. **(donor stock number, part-type code)**, when that pair names exactly one yard part.
-   This is what resolves engines, whose titles carry no R#.
-
-Where a donor yielded a left and a right of the same type and no R# is in the title, two
-tie-breakers run inside that candidate set, strongest first:
-
-3. **The interchange number the grid reports** (`narrow_by_interchange`). It is not unique
-   across the yard — that is what makes it an *interchange* — but inside a set that already
-   agrees on donor and part type it is decisive, because the catalogue gives a car's left and
-   right the same number with a different side suffix. An identifier agreeing with an
-   identifier, so it goes first.
-4. **The side the portal's own title names** (`narrow_by_side`), against the side the yard
-   recorded. Measured on the unlisted tab the two agreed 1,009 times and contradicted zero
-   times; the interchange number settled 53 the title could not, and the title then settled
-   1,187 of the 1,274 listings the first two rules had left, 93%. Both are grid fields, so
-   neither costs an extra request.
-
-None of the four is trusted alone, and each tie-breaker refuses as readily as it decides:
-`narrow_by_side` requires *every* candidate to have a side on file, because picking the only
-part recorded as left out of a pair whose other side was simply never entered is a coin flip
-wearing a rule's clothes. A listing that resolves to no single part is **left alone** rather
-than retitled as a candidate. Keep that refusal: a listing repriced as the wrong part is worse
-than one nothing touched.
-
-### Three separate write surfaces, in increasing order of consequence
-
-1. **Saving in the portal** (`ebay apply`, `ebay daily --apply`, `ebay aspects --apply`)
-   changes stored values only. Nothing a shopper sees moves. This is the review window.
-2. **Pushing** (`ebay push --apply`) sends those values to eBay. Now they are live.
-3. **Delisting** (`ebay delist --apply`) ends live listings. This is **irreversible**:
-   relisting mints a new item id and loses the watchers and the ranking the old one had.
-
-Keep those three as three commands. Collapsing the first two removes the only point at
-which a person sees what a batch of portal changes says before buyers do.
-
-### Guards that are part of the feature
-
-- Every write is a dry run unless `--apply` is passed.
-- `check_cap` counts **listings**, not plan entries, and raises *before* the first write, so
-  a refused batch writes nothing rather than half of itself. `--yes-i-mean-it` lifts it.
-- A per-group portal error is recorded in that group's result, not raised — one rejected
-  group must not abandon the groups after it.
-- `delist` resolves its target set live rather than trusting a saved file, and refuses when
-  the grid returns fewer rows than it reports records: a listing that left the tab since the
-  last pull must not be ended.
-- Titles are validated against the *facts parsed from the source title*. A rewrite that
-  drops the VIN code, the fitment years or the word "Engine" is rejected, and two
-  interchange groups may never publish under one title — they are different parts.
-- Title length is measured **escaped** (`ebay/util.title_length`): the portal escapes `&`
-  and `"` before eBay counts them, so a title that fits locally can overflow there.
-- Item specifics are validated against eBay's own category vocabulary
-  (`EBAY_ASPECTS_FILE`). A value that is not derivable with confidence is left unset, and
-  `--apply` refuses outright without the metadata: eBay ranks on aspect *match* and buyers
-  filter on it, so a wrong aspect is worse than a missing one.
-- A resolved listing's base price is the positive source price. `ebay/pricing.py` applies
-  the configured marketplace markup, then adds the Shopify rate for free-shipping listings.
-  Pickup adds no shipping; freight selects its mapped large/medium policy and charges
-  shipping separately. Missing prices, unknown shipping and unshippable free-shipping
-  listings are held. Shopify prices remain unchanged. Never compound markup on portal prices.
-- `auto-prices --apply --revise-listed` saves and verifies price/policy changes and uses
-  the guarded push surface for existing listed items only. Pending revision intent is
-  checkpointed before writes so interrupted work can resume. Unlisted items are never
-  submitted by the price worker.
-
-### Where this channel meets Shopify
-
-At exactly one place: the daily title pass can write a per-R# title override file, and
-configuring it as `STORE_CATALOG_OVERRIDES_FILE` makes the canonical renderer read those
-reviewed titles. Overrides are keyed by **R#**, never by portal listing id, and the builder
-refuses rather than guessing when a listing has no R#. Prices are absent from the override
-schema; Shopify and the listing portal both take them from the source database.
-
-### No inference, anywhere
+## No inference, anywhere
 
 **CoreYard runs no model and calls no LLM.** Titles come from the canonical renderer and
 prices come from the source database. This is a hard constraint: the same part must produce the same
-listing on every run, and no external pricing source or inference may override the yard's
+product on every run, and no external pricing source or inference may override the yard's
 recorded amount.
 
 If a future task seems to want a model — better titles, a judgement call on a defect note —
-the answer is a rule in the renderer or a held listing for a person to decide, not a
+the answer is a rule in the renderer or a held product for a person to decide, not a
 dependency that makes the nightly run non-reproducible.
 
 ## Transport Constraints

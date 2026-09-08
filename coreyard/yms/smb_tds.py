@@ -31,8 +31,8 @@ _DEBUG = (_get("COREYARD_SMB_DEBUG", "") or "").strip().lower() in {
 # between 2026-09-03 and 2026-09-08 with STATUS_PIPE_NOT_AVAILABLE ("an instance of a named
 # pipe cannot be found in the listening state"), spread evenly across every hour of the day.
 # SQL Server accepts a bounded number of concurrent pipe instances, and this installation
-# points five schedules at the same pipe — `counts` every minute, eBay every five, plus the
-# sync, delta and order jobs — so they collide. The condition clears in milliseconds; what
+# points several schedules at the same pipe — `counts` every minute, plus the sync, delta,
+# reconcile and order jobs — so they collide. The condition clears in milliseconds; what
 # made it expensive was that a single failed open killed the whole run.
 #
 # Only statuses that can clear on their own are listed. A credential problem must fail on
@@ -206,8 +206,8 @@ class SmbTds(tds.MSSQL):
                 if attempt == attempts or not _is_transient(exc):
                     raise
                 # Jittered, so that jobs which collided on the first attempt — `counts`
-                # runs every minute and eBay every five, against this same pipe — do not
-                # line up and collide again on the retry.
+                # runs every minute and the delta every five, against this same pipe — do
+                # not line up and collide again on the retry.
                 pause = backoff * (2 ** (attempt - 1))
                 pause += random.uniform(0, pause / 2)
                 print(f"  . source pipe unavailable ({type(exc).__name__}); "

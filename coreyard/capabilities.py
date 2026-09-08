@@ -16,7 +16,7 @@ what to check before checking it.
 Requirement, not opinion: a capability is ``enabled`` when the operator has configured it,
 ``missing`` when it is required by something else that *is* enabled, and ``off`` when it is
 simply not part of this installation. Only the middle case is a failure. That distinction
-is why order booking and the listing portal can stay opt-in without their absence reading
+is why order booking can stay opt-in without its absence reading
 as a broken install (REL-02), and why "unsupported combination" can be reported before any
 side effect rather than as a traceback halfway through a run (REL-01).
 """
@@ -276,24 +276,6 @@ def detect(load: bool = True) -> Capabilities:
         add("order_booking", OFF,
             "off (read-only); enable with --write-orders or YMS_WRITE_ORDERS=1",
             ("YMS_WRITE_ORDERS",))
-
-    # -- the listing portal ------------------------------------------------------
-    from coreyard.config import DATA_ROOT
-
-    portal = _text("EBAY_PORTAL_FILE")
-    default_portal = DATA_ROOT / "portal.json"
-    if portal:
-        from coreyard.config import data_path
-
-        exists = bool((data_path(portal) or Path(portal)).is_file())
-        add("portal", ON if exists else MISSING,
-            f"portal map {portal}" if exists else f"{portal} does not exist",
-            ("EBAY_PORTAL_FILE",))
-    elif default_portal.is_file():
-        add("portal", ON, f"portal map {default_portal.name}", ("EBAY_PORTAL_FILE",))
-    else:
-        add("portal", OFF, "no EBAY_PORTAL_FILE — the listing-portal channel is off",
-            ("EBAY_PORTAL_FILE",))
 
     # -- telling somebody ---------------------------------------------------------
     # Deliberately not `missing` when unset. Alerting is opt-in, and a site whose operator

@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """Fail if vendor names or a site's real schema leak into the repository.
 
-CoreYard reads a database you license from someone else, and writes eBay listings through
-a portal you license from someone else. Their product names, their table layout and their
+CoreYard reads a database you license from someone else. Their product names, their table
+layout and their
 field identifiers are theirs, so none of it belongs in this source tree — every
-installation supplies those locally (``.env``, ``schema.json`` and ``portal.json``, all
+installation supplies those locally (``.env`` and ``schema.json``, both
 gitignored). The same applies to the identity of whichever yard maintains the project:
 this is a tool any yard can run, so its author's business name must be no more visible in
 the tree than anyone else's.
 
 ``.html`` is scanned as well as the obvious text suffixes. Test fixtures captured from a
-real portal or storefront are exactly the kind of file whose provenance is forgotten, and
+real storefront are exactly the kind of file whose provenance is forgotten, and
 an unscanned suffix is a hole the rule cannot see through.
 
 This runs in CI so the rule is enforced rather than remembered.

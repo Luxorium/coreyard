@@ -165,23 +165,6 @@ class OptionalFeatures(unittest.TestCase):
         for key in ("SHOPIFY_WEBHOOK_SECRET", "SHOPIFY_CLIENT_SECRET"):
             self.assertTrue(detect(**self.base, **{key: "s3cret"}).enabled("orders"), key)
 
-    def test_the_portal_is_off_without_a_map(self):
-        """A site that never configured the listing portal has not failed to configure it.
-
-        The data root is redirected because a maintainer's own checkout carries a
-        portal.json the default lookup would find, and the behaviour under test is what a
-        customer's install does.
-        """
-        import coreyard.config as config
-
-        with mock.patch.object(config, "DATA_ROOT", Path(self.tmp.name)):
-            cap = detect(**self.base).get("portal")
-        self.assertEqual(cap.state, OFF)
-        self.assertIn("EBAY_PORTAL_FILE", cap.detail)
-
-    def test_a_configured_portal_map_that_is_not_there_is_a_failure(self):
-        cap = detect(**self.base, EBAY_PORTAL_FILE="/nonexistent/portal.json").get("portal")
-        self.assertEqual(cap.state, MISSING)
 
     def test_unset_publications_is_off_and_explains_the_consequence(self):
         cap = detect(**self.base).get("publications")

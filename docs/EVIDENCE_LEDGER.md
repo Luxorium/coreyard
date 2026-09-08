@@ -61,7 +61,6 @@ Baseline commit: `e9c88ab` · offline suite: 1119 tests · Python 3.14.7 locally
 | `ORD-03` | Lifecycle accuracy | NOT VERIFIED | No evidence collected. |
 | `ORD-04` | Durable receipt and bounded retries | NOT VERIFIED | No evidence collected. |
 | `MKT-01` | Listing identity and guards | NOT VERIFIED | No evidence collected. |
-| `MKT-02` | Write boundaries | NOT VERIFIED | No evidence collected. |
 | `SEC-01` | Review and scans | NOT VERIFIED | No evidence collected. |
 | `SEC-02` | Least privilege and isolation | NOT VERIFIED | No evidence collected. |
 | `SEC-03` | Payload lifecycle | NOT VERIFIED | No evidence collected. |
@@ -120,8 +119,7 @@ The three documents now say precisely what is unqualified, which makes the order
 - **Nothing has live acceptance evidence.** Every "Live: `NOT VERIFIED`" row in the matrix
   needs a controlled environment — a test store, a disposable mapped database, a controlled
   portal account. That is the bulk of sections 4 through 9 of the specification.
-- **No portal mapping is qualified** (MKT-02), so the listing-portal channel is currently
-  unsupported for release purposes even though it is implemented and running here.
+
 - **Clean-install and recovery drills have not been run** (DIST-03, DIST-04, OPS-04,
   OPS-05), and `setuptools` is absent from the development venv, so the wheel build is
   unexercised outside CI.

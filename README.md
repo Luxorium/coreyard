@@ -86,7 +86,6 @@ below are not a claim that those release gates have been met.
 | Reconciliation against the live store, with retirement guards | **working, unit-tested** |
 | Catalog repair (titles, tags, SEO, weights) against the renderer | **working, unit-tested** |
 | Generic catalog audit with site-configurable thresholds | **working, unit-tested** |
-| Guarded listing-portal titles and source-price synchronization | **working, unit-tested** |
 
 Known gaps: a part's *variant-level* media assignment is not managed — photos attach to the
 product, not to a specific variant, which is fine while every part is a single-variant product.
@@ -145,7 +144,6 @@ coreyard/
   reconcile/                 compare the yard with the store; plan and close the gap
   repair/                    rewrite catalog output an older renderer produced
   audit/                     read-only listing-quality report
-  ebay/                      neutral listing-portal client and guarded engine workflow
   webhook.py                 paid-order receiver: HMAC, HTTP, subscriptions
   schedule.py                systemd/cron sync scheduling helper
 scripts/demo_offline.py      offline proof (no DB needed)
@@ -416,7 +414,7 @@ says whether it writes. `python -m coreyard` is the same CLI, and `coreyard` is 
 after `pip install -e .`.
 
 CoreYard writes only under its **data root**: `.env`, `store.json`, `schema.json`,
-`portal.json`, the state and queue databases, and `out/`. Run from a checkout that is the
+the state and queue databases, and `out/`. Run from a checkout that is the
 checkout, so nothing an existing installation has ever used moves. Installed as a package it
 is `$XDG_DATA_HOME/coreyard` (or `~/.local/share/coreyard`), because a package must not
 write into its own installation directory — that fails on a read-only tree, and the next
@@ -477,104 +475,6 @@ bin/coreyard bulk                # everything the listable policy allows
 bin/coreyard reconcile           # plan only
 bin/coreyard audit catalog       # read-only listing-quality report
 ```
-
-### Listing-portal workflow
-
-The optional `ebay` command manages a configured listing portal without hardcoding that
-portal's protocol. Copy `portal.example.json` to an ignored local file, fill in its routes,
-fields, statuses and action IDs, then point `EBAY_PORTAL_FILE` at it. Authentication may come
-from an explicit cookie header or an existing local Firefox session; cached cookies and all
-portal checkpoints stay under ignored, owner-only local paths.
-
-A borrowed browser session is shorter-lived than the runs that use it — an overnight
-maintenance pass can outlast it. Setting
-`EBAY_PORTAL_USER`/`EBAY_PORTAL_PASSWORD` and mapping `auth.login_fields` in `portal.json`
-lets CoreYard establish a session of its own. It is a fallback of last resort, consulted only
-when every cookie source has come up empty, and the client re-signs at most once per expired
-request so a wrong password fails fast rather than hammering the form. The password is never
-printed, logged, or included in an error message.
-
-```bash
-bin/coreyard ebay pull --tab unlisted --part-type engine \
-  --out out/ebay-engines.json
-bin/coreyard ebay details out/ebay-engines.json \
-  --out out/ebay-engine-details.json
-bin/coreyard ebay titles out/ebay-engines.json \
-  --details out/ebay-engine-details.json
-bin/coreyard ebay apply --titles out/ebay-engine-titles.json   # dry run
-```
-
-Title plans are optional reviewed inputs. Shopify receives the matched source part's
-unchanged positive price. Marketplace pricing can apply `EBAY_PRICE_MARKUP_PERCENT`
-(default `0`). With `EBAY_INCLUDE_SHOPIFY_SHIPPING=true`, free-shipping listings add their
-Shopify shipping rate **after** markup. Pickup adds nothing; freight charges shipping
-through its mapped policy. Prices are always recomputed from the source, never compounded
-from the portal price. No price override file is used.
-
-`ebay auto-prices --apply --revise-listed` saves and verifies bounded price/policy batches,
-then submits revisions for already-listed items through the guarded push surface.
-Unlisted items receive saved prices but are not submitted. The worker rotates part types,
-uses complete shipping-policy-filtered grids, and checkpoints pending revisions.
-Shipping filters and freight-group-to-policy IDs live in private `portal.json` entries
-under `filters`: `shipping_pickup`, `shipping_free`, `shipping_policy`, and
-`freight_policy_by_group`. Structured query placeholders are `{part_type}` and `{policy_id}`;
-the protocol field IDs stay in that map. Unknown shipping policies are excluded.
-The shipping policy field must also be mapped under `fields.shipping_policy`.
-
-Item specifics are a separate pass, because eBay ranks on aspect *match* and buyers filter
-on it:
-
-```bash
-bin/coreyard ebay aspects --part-type engine --deep      # dry run + coverage report
-bin/coreyard ebay aspects --part-type engine --apply
-```
-
-Values are validated against eBay's own category metadata (`EBAY_ASPECTS_FILE`); anything
-not derivable with confidence is left unset, and `--apply` refuses without that metadata.
-
-`daily` is the whole chain as one unattended pass, walking the part types the yard extract
-reports rather than a hand-kept list:
-
-```bash
-bin/coreyard ebay daily              # titles + exact source prices; dry run
-bin/coreyard ebay daily --apply      # save them in the portal
-```
-
-For continuous title maintenance of the unlisted queue, use:
-
-```bash
-bin/coreyard --lock ebay --timeout 14m ebay auto-titles
-bin/coreyard --lock ebay --timeout 14m ebay auto-titles --apply
-```
-
-This checks at most 100 listings per pass, using the shared renderer with the portal's
-80-character budget. New arrivals take priority over the initial backlog; failed or held
-entries rotate so they cannot block it. Verified titles are skipped until their source
-facts, portal title or renderer changes, with a daily fitment recheck. Saves are restricted
-to listings still in the unlisted tab and are read back before progress is recorded.
-The command changes titles only and does not export Shopify overrides. Its private queue
-state and latest report live in `out/ebay-title-state.json` and `out/ebay-auto-titles.json`.
-`--batch-size` selects the maximum work per pass; exceeding `--cap` refuses before writes.
-A scheduler may invoke it every five minutes with the shared `ebay` lock; overlapping
-ticks skip while the preceding pass finishes.
-
-It stops at the portal and never calls submit: an unattended job is exactly the thing that
-must not close the review window.
-
-Saving in the portal is not publishing. Three commands, in increasing order of consequence:
-
-```bash
-bin/coreyard ebay apply --apply     # stored values only; nothing a shopper sees moves
-bin/coreyard ebay push --apply      # sends them to eBay; now they are live
-bin/coreyard ebay delist --apply    # ENDS live listings — irreversible
-bin/coreyard ebay undo <ids>        # put titles or prices back to the portal's defaults
-```
-
-Delisting cannot be undone: relisting mints a new eBay item id and loses the watchers and
-the item ranking the old listing had. `delist` therefore resolves its target set live rather
-than trusting a saved file, and refuses if the portal reports more records than it returned.
-Every one of these writes is a dry run without `--apply`, and each refuses to touch more
-listings than its `--cap` without `--yes-i-mean-it`.
 
 ### Scopes, and what they are not
 

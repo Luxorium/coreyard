@@ -21,12 +21,12 @@ deterministic. Simplicity must preserve functionality and safety.
 - **REL-01 — Supported product.** Publish a capability matrix covering SQL Server over SMB,
   CSV and SQLite sources; CSV and Shopify outputs; photos and donor photos; full, scoped,
   delta and bulk sync; counts; audit, repair and reconciliation; setup, diagnostics and
-  scheduling; order receipt, polling, booking and lifecycle updates; and the listing-portal
+  scheduling; and order receipt, polling, booking and lifecycle updates.
   channel. For each combination, name prerequisites, supported operations, limitations and
   the acceptance evidence. A tabular source need not support database order booking or
   database deltas, but unsupported combinations must fail before side effects with a useful
   explanation. No public command may have an undocumented support status.
-- **REL-02 — Optional features.** Order booking and the listing portal remain opt-in. Every
+- **REL-02 — Optional features.** Order booking remains opt-in. Every
   existing feature must be complete and pass its applicable gates, even if disabled by
   default. Optional means the customer chooses whether to enable it; it does not mean
   optional implementation, testing, documentation or support. No existing feature may be
@@ -46,7 +46,7 @@ deterministic. Simplicity must preserve functionality and safety.
   owner and target milestone. Missing evidence is NOT VERIFIED, never PASS.
 - **REL-05 — Complete functionality inventory.** Create a checked-in inventory from the
   actual CLI tree, nested subcommands, supported flags, legacy entry points and documented
-  workflows. Cover `init`, `status`, `counts`, `doctor`, every `sync` mode, every `ebay`
+  workflows. Cover `init`, `status`, `counts`, `doctor`, every `sync` mode,
   operation/worker, `reconcile`, every `repair` and `audit` operation, every `orders` transport
   and lifecycle operation, `images`, `part-types`, `schema`, `bulk`, `altfix`, `oauth` and
   `schedule`. Include CSV/SQLite sources, enrichment, fitment caches, donor media, configuration
@@ -237,11 +237,6 @@ deterministic. Simplicity must preserve functionality and safety.
   title budgets, aspect vocabulary, price/shipping calculations and per-listing caps. An
   uncertain match is held; no guessed identity is written. Recheck eligibility immediately
   before mutation and verify read-back before checkpointing success.
-- **MKT-02 — Write boundaries.** Portal saves, live pushes and delisting remain distinct.
-  Workers never list unlisted stock as a side effect of title/price work. Existing-listing
-  revisions require their explicit option and retain retry intent across interruption.
-  Authentication expiry retries are bounded and redacted. Qualify each supported portal
-  mapping against a controlled account; mark untested mappings unsupported.
 
 ## 7. Security and privacy
 
@@ -338,7 +333,7 @@ The following are release-test targets, not claims already established or a cust
   for the reference change workload; report media backlogs separately. A material change
   affecting the qualified behavior requires a new relevant qualification window.
 - **QUAL-02 — External contracts and buyer-visible output.** Record and exercise the actual
-  supported Shopify API version, required scopes and portal mapping revision; set an owner
+  supported Shopify API version and required scopes; set an owner
   and review date before any known compatibility deadline. Contract drift fails visibly
   without advancing state. In a controlled storefront, inspect actual desktop/mobile product
   pages and complete test checkouts for parcel, pickup, freight and sold-out cases where
@@ -355,7 +350,7 @@ The following are release-test targets, not claims already established or a cust
   or remote listings by default. Examples use synthetic data and run as written.
 - **DOC-02 — Honest positioning.** Describe CoreYard as a self-hosted integration engine.
   State that source mapping and external accounts are prerequisites, identify supported
-  integrations and single-variant assumptions, and avoid implying universal source/portal
+  integrations and single-variant assumptions, and avoid implying universal source
   compatibility. A hosted service, GUI, multi-tenant platform and automatic refunds are not
   requirements of this release unless separately added to scope.
 - **DOC-03 — Supportability.** Publish a monitored support channel, issue templates, supported

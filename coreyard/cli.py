@@ -53,9 +53,6 @@ def _reports_only(args) -> bool:
 READS = "read-only"
 LOCAL = "local files"
 STORE = "Shopify"
-PORTAL = "listing portal (stored values; not yet live)"
-LIVE = "live marketplace listings"
-IRREVERSIBLE = "ends live listings (irreversible)"
 SOURCE = "source database"
 
 # path -> (effect, capabilities it cannot run without, the flag that unlocks the write)
@@ -76,19 +73,6 @@ SUPPORT: dict[str, tuple[str, tuple[str, ...], str]] = {
     "sync inventory": (STORE, ("source",), ""),
     "sync photos": (STORE, ("source", "photos"), ""),
     "sync catalog": (STORE, ("source",), ""),
-    "ebay": (READS, ("portal",), ""),
-    "ebay auto-prices": (PORTAL, ("portal", "source"), "--apply"),
-    "ebay auto-titles": (PORTAL, ("portal", "source"), "--apply"),
-    "ebay daily": (PORTAL, ("portal", "source"), "--apply"),
-    "ebay pull": (READS, ("portal",), ""),
-    "ebay details": (LOCAL, ("portal",), ""),
-    "ebay apply": (PORTAL, ("portal",), "--apply"),
-    "ebay titles": (LOCAL, ("portal", "source"), ""),
-    "ebay engine-titles": (LOCAL, ("portal", "source"), ""),
-    "ebay aspects": (PORTAL, ("portal",), "--apply"),
-    "ebay push": (LIVE, ("portal",), "--apply"),
-    "ebay delist": (IRREVERSIBLE, ("portal",), "--apply"),
-    "ebay undo": (PORTAL, ("portal",), "--apply"),
     "reconcile": (STORE, ("source", "shopify"), "--apply"),
     "repair": (READS, ("shopify",), ""),
     "repair titles": (STORE, ("source", "shopify"), "--apply"),
@@ -140,8 +124,6 @@ COMMANDS: list[tuple[str, str, str]] = [
      "notify the operator when the pipeline has stopped, and when it recovers"),
     ("sync", "coreyard.run_sync",
      "publish the yard to the store (the main loop)"),
-    ("ebay", "coreyard.ebay.cli",
-     "pull and manage the eBay catalogue through the listing portal"),
     ("reconcile", "coreyard.reconcile.cli",
      "compare the yard with the live store and close the safe differences"),
     ("repair", "coreyard.repair.cli",
