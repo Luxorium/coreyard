@@ -332,3 +332,68 @@ class AFailedBookingIsNotASilentOne(unittest.TestCase):
         """The check exists to be run without being asked for, so its absence from the
         pipeline set is the whole defect coming back."""
         self.assertIn(doctor.check_order_queue, doctor.PIPELINE)
+
+
+class NothingIsTakingSoldPartsOffTheStore(unittest.TestCase):
+    """The four days that produced order #1012.
+
+    `reconcile` is the only job that archives a product whose part has left the yard. From
+    2026-09-02 to 2026-09-06 a wedged delta sync held `.sync.lock` continuously and every
+    reconcile tick logged "Another run holds .sync.lock; skipping this one" — so the job
+    *ran* on schedule, its log kept growing, and the storefront went on selling parts that
+    were no longer there. Freshness of the log or of the newest run row would both have
+    reported that as healthy, which is why this asks when reconcile last **succeeded**.
+    """
+
+    def setUp(self):
+        self.caps = caps_for(COREYARD_SOURCE="tabular:parts.csv",
+                             SHOPIFY_STORE="x.myshopify.com",
+                             SHOPIFY_ADMIN_TOKEN="shpat_x")
+        self.assertTrue(self.caps.enabled("shopify"))
+
+    def finished(self, ago):
+        from datetime import datetime, timezone
+
+        stamp = (datetime.now(timezone.utc) - ago).isoformat()
+        return mock.patch.object(doctor.ops, "last_ok", return_value=stamp)
+
+    def test_a_recent_reconcile_is_quiet(self):
+        from datetime import timedelta
+
+        with self.finished(timedelta(minutes=20)):
+            (level, name, _), = doctor.check_delisting(caps=self.caps)
+        self.assertEqual((level, name), (OK, "delisting"))
+
+    def test_a_job_that_has_not_succeeded_for_days_is_a_failure(self):
+        from datetime import timedelta
+
+        with self.finished(timedelta(days=4)):
+            (level, name, detail), = doctor.check_delisting(caps=self.caps)
+        self.assertEqual((level, name), (FAIL, "delisting"))
+        self.assertIn("sold twice", detail)
+        self.assertIn(".sync.lock", detail)
+
+    def test_a_skipped_tick_does_not_pass_for_a_successful_one(self):
+        """The whole point. A lock-skip records a run row, so `last` stays fresh while
+        nothing is being delisted; only `last_ok` tells the two apart."""
+        from datetime import datetime, timedelta, timezone
+
+        recent = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        stale = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
+        with mock.patch.object(doctor.ops, "last", return_value={"finished": recent}), \
+                mock.patch.object(doctor.ops, "last_ok", return_value=stale):
+            (level, _, _), = doctor.check_delisting(caps=self.caps)
+        self.assertEqual(level, FAIL)
+
+    def test_a_store_that_has_never_reconciled_is_told_what_to_schedule(self):
+        with mock.patch.object(doctor.ops, "last_ok", return_value=None):
+            (level, name, detail), = doctor.check_delisting(caps=self.caps)
+        self.assertEqual((level, name), (WARN, "delisting"))
+        self.assertIn("reconcile --apply", detail)
+
+    def test_an_installation_with_no_store_is_not_asked_about_one(self):
+        csv_only = caps_for(COREYARD_SOURCE="tabular:parts.csv")
+        self.assertEqual(doctor.check_delisting(caps=csv_only), [])
+
+    def test_the_scheduled_health_run_includes_it(self):
+        self.assertIn(doctor.check_delisting, doctor.PIPELINE)

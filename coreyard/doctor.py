@@ -62,6 +62,11 @@ ORDERS_STALE = timedelta(minutes=35)
 # so a failure that the next run clears never fires.
 ORDERS_STUCK = timedelta(minutes=20)
 
+# `reconcile` runs hourly and is the only thing that archives a part sold at the counter or
+# on eBay, so the storefront's worst case is one cycle behind the yard. Three missed cycles
+# is past any plausible slow run and still catches a stopped job the same morning.
+RECONCILE_STALE = timedelta(hours=3)
+
 # A job that dies before its first line of output leaves no traceback: the interpreter or
 # the shell says its piece on stderr and exits 1. That is exactly how the order poller
 # failed silently for a day — the storefront scripts moved into the CoreYard CLI, cron kept
@@ -479,6 +484,43 @@ def check_order_queue(queue_db=None) -> list[Result]:
              f"run `coreyard orders status`, then `orders retry --id <webhook-id>`")]
 
 
+def check_delisting(*, caps=None) -> list[Result]:
+    """Is anything still taking sold parts off the storefront?
+
+    `reconcile` is the only job that archives a product whose part has left the yard — sold
+    at the counter, sold on eBay out of the same stock pool, or simply pulled. While it is
+    not running the storefront keeps selling parts that are not there, and every symptom of
+    that is somewhere else: the poller is fine, the sync is fine, the catalogue looks fine,
+    and the first real evidence is a customer who has paid for something nobody can ship.
+
+    Asked as "when did it last *succeed*", not "when did it last run". A tick skipped
+    because another job holds `.sync.lock` records a run like any other, so the newest row
+    stays fresh for a job that has done nothing — which is exactly what happened from
+    2026-09-02 to 2026-09-06, when a wedged delta sync held the lock continuously and the
+    storefront went on listing sold parts for four days. Order #1012 was one of them.
+    """
+    caps = caps or capabilities.detect()
+    # Nothing to reconcile a store against without a store.
+    if not caps.enabled("shopify"):
+        return []
+    finished = ops.last_ok("reconcile")
+    if not finished:
+        return [(WARN, "delisting",
+                 "no successful reconcile on record — schedule "
+                 "`coreyard reconcile --apply --activate`, or the storefront will go on "
+                 "listing parts the yard has sold")]
+    try:
+        age = _age(datetime.fromisoformat(finished))
+    except ValueError:
+        return [(WARN, "delisting", f"unreadable reconcile timestamp {finished!r}")]
+    if age > RECONCILE_STALE:
+        return [(FAIL, "delisting",
+                 f"no reconcile has completed for {_span(age)} — parts sold at the counter "
+                 f"are still listed and can be sold twice; check whether another job is "
+                 f"holding .sync.lock")]
+    return [(OK, "delisting", f"reconciled {_span(age)} ago")]
+
+
 def check_alerting(*, caps=None) -> list[Result]:
     """Is anything actually going to tell somebody?
 
@@ -546,7 +588,7 @@ def check_logs(within=timedelta(hours=2), *, caps=None) -> list[Result]:
 INSTALLATION = (check_capabilities, check_environment, check_configuration)
 NETWORK = (check_liveness, check_publishing)
 PIPELINE = (check_freshness, check_orders, check_order_queue,
-            check_alerting, check_logs)
+            check_delisting, check_alerting, check_logs)
 
 
 def collect(checks, caps=None) -> list[Result]:

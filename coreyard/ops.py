@@ -235,6 +235,38 @@ def history(limit: int = 20, db: Path = DEFAULT_STATE_DB,
     return out
 
 
+def last_ok(command: str, scope: str | None = None,
+            db: Path = DEFAULT_STATE_DB) -> str | None:
+    """When the most recent *successful* run of a command finished, or None.
+
+    Distinct from :func:`last`, which answers "what happened last time" and so reports a
+    failure as the latest outcome. This answers "when did this last actually work", which is
+    the question a staleness check has to ask: a job skipped by a held lock records a run
+    like any other, and a check reading only the newest row would see a fresh timestamp for
+    a job that has done nothing for days. That is precisely how the hourly reconcile went
+    unnoticed from 2026-09-02 to 2026-09-06.
+
+    Asked in SQL rather than by scanning :func:`history`, because a job that runs every
+    minute floods the table and the row wanted here may be thousands back.
+    """
+    conn = None
+    try:
+        conn = _connect(db)
+        sql = ("SELECT finished FROM runs WHERE command = ? AND ok = 1"
+               " AND finished IS NOT NULL")
+        values: tuple = (command,)
+        if scope is not None:
+            sql += " AND scope = ?"
+            values += (scope,)
+        row = conn.execute(sql + " ORDER BY id DESC LIMIT 1", values).fetchone()
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+    return row[0] if row else None
+
+
 def last(command: str, scope: str | None = None,
          db: Path = DEFAULT_STATE_DB) -> dict | None:
     """The most recent *finished* run of one command (optionally one scope), or None."""
