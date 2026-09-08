@@ -104,6 +104,14 @@ _FORBIDDEN: dict[str, str] = {
         "a specific vendor's table or column name",
     "0391c46ac0d649515e1a204d3397b321f0cb91d61a72dc61c8212e8cc9faf026":
         "a specific vendor's table or column name",
+    "5d9ad16979934da10f723b069fd6237d2eb470e89e05c9c2711f06412a39ae11":
+        "a vendor's product or company name",
+    "8554871ef79b95d934ce0f6f98e337995bafc08118bf3ca1d13da27976bfc4e2":
+        "a vendor's product or company name",
+    "f0b9c03ad1826cff75a019b7ea9fb56e438056e293af79ac0d784912eaec0168":
+        "a vendor's product or company name",
+    "c0f8f49ea32577d0d05d14976a5075a94985d0e45630a994f46bec221d73e1b3":
+        "a vendor's product or company name",
 }
 
 # Lengths of the forbidden terms — the window sizes worth hashing. Publishing these
