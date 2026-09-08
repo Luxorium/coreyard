@@ -124,11 +124,7 @@ def check_sync(intervals: dict[str, int]) -> list[Alert]:
     Suppressed while one is running: a long full run is not a missing one, and this
     installation's runs legitimately take most of an hour.
     """
-    from coreyard.schedule import full_cycle_seconds
-
-    # "two of its own intervals" means the full sync's hour, not the five-minute catch-up
-    # that shares its lock name.
-    period = full_cycle_seconds("sync", 0) or intervals.get("sync")
+    period = intervals.get("sync")
     if not period:
         return []                       # nothing scheduled, so nothing is late
     last = ops.last("sync", "")
@@ -197,13 +193,7 @@ def check_delta(caps, intervals: dict[str, int]) -> list[Alert]:
         # an hour, a sync is almost always running, and "a sync is running" would then
         # explain a cursor frozen for five days as easily as one frozen for six minutes.
         # Past one full cycle plus the threshold, a run in flight is no longer the reason.
-        # The longest job on the lock, not the shortest `intervals` reports: the delta
-        # shares .sync.lock with the hourly full sync, so reading the shortest made this
-        # grace 35 minutes instead of 90 and fired while a full sync was legitimately
-        # working through a backlog. See `schedule.full_cycle_seconds`.
-        from coreyard.schedule import full_cycle_seconds
-
-        grace = timedelta(seconds=full_cycle_seconds("sync", 3600)) + limit
+        grace = timedelta(seconds=intervals.get("sync", 3600)) + limit
         if age <= grace:
             return []
     return [Alert("sync.delta.stale", FAIL,
@@ -296,6 +286,17 @@ def evaluate(caps=None, intervals: dict[str, int] | None = None) -> list[Alert]:
     if intervals is None:
         try:
             intervals = schedule.installed_intervals()
+            # `installed_intervals` reports the *shortest* schedule per task, which is right
+            # for "has this stopped?" — the most frequent job is the one whose silence is
+            # evidence. Both sync conditions below ask the opposite question: how long may a
+            # full run legitimately take? A task is keyed by its lock, and here the hourly
+            # sync, the reconcile and the five-minute delta all take .sync.lock, so the
+            # shortest reading made the delta grace 35 minutes instead of 90 and fired while
+            # a full sync was working through a backlog. Corrected once, here, rather than in
+            # each check — a check that reads the host's crontab itself cannot be tested
+            # against a schedule the host does not have.
+            if "sync" in intervals:
+                intervals["sync"] = schedule.full_cycle_seconds("sync", intervals["sync"])
         except Exception:
             intervals = {}
     found: list[Alert] = []
