@@ -25,8 +25,9 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from coreyard.doctor import (FAIL, OK, RANK, WARN, check_delisting,  # noqa: E402
-                             check_freshness, check_liveness, check_logs,
-                             check_order_queue, check_orders, collect, verdict)
+                             check_freshness, check_liveness, check_lock_budget,
+                             check_logs, check_order_queue, check_orders, collect,
+                             verdict)
 
 ALERT_STATE = REPO / "out" / ".healthcheck_state.json"
 
@@ -73,7 +74,8 @@ def main() -> int:
 
     # check_orders watches the poller; check_order_queue watches what the poller
     # banked. A fresh log and an unbooked sale look identical without both.
-    checks = [check_freshness, check_orders, check_order_queue, check_delisting]
+    checks = [check_freshness, check_orders, check_order_queue, check_delisting,
+              check_lock_budget]
     if not args.no_network:
         checks.append(check_liveness)
     checks.append(check_logs)

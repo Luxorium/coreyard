@@ -521,6 +521,48 @@ def check_delisting(*, caps=None) -> list[Result]:
     return [(OK, "delisting", f"reconciled {_span(age)} ago")]
 
 
+def check_lock_budget() -> list[Result]:
+    """A scheduled job whose deadline outlasts its own period.
+
+    Such a job can still be holding its lock when its next tick fires — every tick, without
+    ever finishing late enough for anything else to notice. Alone that only means it skips
+    its own runs. On a *shared* lock it silently stops every other job that wants it, and
+    the evidence is a log line saying the run was skipped, which reads like the lock working
+    correctly.
+
+    This is not hypothetical tuning advice. The delta sync ran every 5 minutes with a
+    4-minute deadline and shares `.sync.lock` with the hourly full sync and the half-hourly
+    reconcile; from 2026-09-02 to 2026-09-06 neither of those completed once. Reconcile is
+    what archives a part sold at the counter, so the storefront went on selling parts that
+    were gone, and order #1012 was one of them.
+
+    The rule it encodes is simply ``hold < period``, and the only place it can be checked is
+    the crontab — which no test, no diff and no code review can see.
+    """
+    try:
+        from coreyard.schedule import lock_budget
+
+        offenders = lock_budget()
+    except Exception as exc:
+        return [(WARN, "lock budget", f"could not read the schedule: {type(exc).__name__}")]
+    if not offenders:
+        return [(OK, "lock budget", "every scheduled job releases its lock before it runs again")]
+    out: list[Result] = []
+    for job in offenders:
+        hold, period = _span(timedelta(seconds=job["hold"])), _span(
+            timedelta(seconds=job["period"]))
+        if job["shared"]:
+            out.append((FAIL, "lock budget",
+                        f"{job['task']} may hold .{job['lock']}.lock for {hold} but runs "
+                        f"every {period}, starving everything else on that lock — "
+                        f"lower its --timeout below {period}"))
+        else:
+            out.append((WARN, "lock budget",
+                        f"{job['task']} may hold .{job['lock']}.lock for {hold} but runs "
+                        f"every {period}, so it skips its own ticks"))
+    return out
+
+
 def check_alerting(*, caps=None) -> list[Result]:
     """Is anything actually going to tell somebody?
 
@@ -588,7 +630,7 @@ def check_logs(within=timedelta(hours=2), *, caps=None) -> list[Result]:
 INSTALLATION = (check_capabilities, check_environment, check_configuration)
 NETWORK = (check_liveness, check_publishing)
 PIPELINE = (check_freshness, check_orders, check_order_queue,
-            check_delisting, check_alerting, check_logs)
+            check_delisting, check_lock_budget, check_alerting, check_logs)
 
 
 def collect(checks, caps=None) -> list[Result]:

@@ -310,6 +310,102 @@ def _cron_task(line: str) -> str | None:
     return tokens[0] if tokens else None
 
 
+def _hold_seconds(line: str) -> int | None:
+    """How long this crontab line can hold its lock.
+
+    ``--timeout`` is the graceful stop and normally what decides, since the tool banks its
+    work and exits. ``timeout(1)`` outside it is the backstop for a run wedged in a syscall
+    that no Python signal handler can free, so it is what bounds the hold when the tool has
+    no deadline of its own.
+    """
+    inner = re.search(r"--timeout\s+(\S+)", line)
+    outer = re.search(r"\btimeout\s+(?:--\S+\s+)*(\d+[smhd]?)\b", line)
+    for match in (inner, outer):
+        if not match:
+            continue
+        try:
+            return _seconds(match.group(1))
+        except ValueError:
+            continue
+    return None
+
+
+def _seconds(text: str) -> int:
+    """``45m`` / ``2h`` / ``90s`` / ``3600`` -> seconds. Mirrors ``cli._duration``."""
+    raw = str(text).strip().lower()
+    if not raw:
+        raise ValueError("empty duration")
+    if raw.isdigit():
+        return int(raw)
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    total, number = 0, ""
+    for char in raw:
+        if char.isdigit():
+            number += char
+        elif char in units and number:
+            total += int(number) * units[char]
+            number = ""
+        else:
+            raise ValueError(f"bad duration {text!r}")
+    if number:
+        raise ValueError(f"bad duration {text!r}")
+    return total
+
+
+def lock_budget() -> list[dict]:
+    """Scheduled jobs that can still be holding their lock when their next tick fires.
+
+    The configuration error behind four days of this installation's history, and one nothing
+    could see. The delta sync ran every 5 minutes with a 4-minute deadline, so a run that
+    used its whole budget was still holding ``.sync.lock`` when the next tick arrived, every
+    tick, forever. It shares that lock with the hourly full sync and the half-hourly
+    reconcile — deliberately, since a full run supersedes a catch-up — so both simply
+    stopped. Neither the jobs nor the logs looked wrong: the delta ran, the others logged
+    "Another run holds .sync.lock; skipping this one" and exited 0.
+
+    The threshold is half the period, not the whole of it, and the outage is why. The delta
+    never exceeded its own period — 4 minutes of every 5 — yet it starved the other two for
+    four days, because a contender does not wait: it takes the lock non-blockingly and logs
+    a skip if it cannot. Holding 80% of every window means an hourly job had a 20% chance of
+    ever running, and the two that fire once and twice an hour simply never won.
+
+    So the rule is that a job must leave its lock free for at least as long as it holds it:
+    anything firing at an arbitrary instant then has even odds each time, and near-certainty
+    over a few attempts. A job with the lock to itself is judged only against its own
+    period, since the sole cost there is skipping its own ticks.
+
+    The only place any of this is visible is the crontab, which no test and no diff can
+    reach. Reported per job as ``{lock, task, hold, period, shared}``.
+    """
+    if not shutil.which("crontab"):
+        return []
+    jobs = []
+    for line in _crontab_lines():
+        if line.lstrip().startswith("#"):
+            continue
+        lock = re.search(r"--lock\s+([A-Za-z0-9_-]+)", line)
+        if not lock:
+            continue
+        period, hold = cron_period(line), _hold_seconds(line)
+        if not period or not hold:
+            continue
+        jobs.append({"lock": lock.group(1), "task": _cron_task(line) or lock.group(1),
+                     "hold": hold, "period": period})
+    holders: dict[str, int] = {}
+    for job in jobs:
+        holders[job["lock"]] = holders.get(job["lock"], 0) + 1
+    out = []
+    for job in jobs:
+        shared = holders[job["lock"]] > 1
+        # Contended: must release for at least as long as it holds.
+        # Uncontended: only its own skipped ticks are at stake, so the whole period.
+        over = (job["hold"] * 2 > job["period"] if shared
+                else job["hold"] >= job["period"])
+        if over:
+            out.append({**job, "shared": shared})
+    return out
+
+
 def installed_intervals() -> dict[str, int]:
     """``{task: seconds}`` for the CoreYard jobs this host actually runs, or ``{}``.
 
