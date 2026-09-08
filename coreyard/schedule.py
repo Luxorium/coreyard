@@ -406,6 +406,39 @@ def lock_budget() -> list[dict]:
     return out
 
 
+def full_cycle_seconds(task: str, default: int) -> int:
+    """The **longest** interval any scheduled job runs this task's lock at.
+
+    :func:`installed_intervals` deliberately reports the shortest, because for "has this
+    stopped?" the most frequent job is the one whose silence is evidence. Asking "how long
+    may a run in flight legitimately explain a stale cursor?" is the opposite question and
+    needs the opposite answer: the full sync's hour, not the catch-up's five minutes.
+
+    They collapse into one key because a task is recognised by its lock, and on this
+    installation the hourly sync, the reconcile and the five-minute delta all take
+    ``.sync.lock``. Reading the shortest of those made the grace 35 minutes instead of 90,
+    so a full sync legitimately working through a large backlog tripped the very check that
+    exists to stay quiet while it does.
+    """
+    if not shutil.which("crontab"):
+        return default
+    longest = 0
+    for line in _crontab_lines():
+        if line.lstrip().startswith("#"):
+            continue
+        if _cron_task(line) != task:
+            continue
+        period = cron_period(line)
+        # Strictly less than a day. The morning deep pass shares this lock and runs once
+        # daily, and letting it set the cycle stretched the grace to 24 hours — which would
+        # explain a cursor frozen overnight as healthy, the same defect as the one being
+        # fixed, wearing the opposite face. Only a schedule that recurs within the day
+        # describes the loop a stale cursor is waiting on.
+        if period and period < 86400 and period > longest:
+            longest = period
+    return longest or default
+
+
 def installed_intervals() -> dict[str, int]:
     """``{task: seconds}`` for the CoreYard jobs this host actually runs, or ``{}``.
 

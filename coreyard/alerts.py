@@ -124,7 +124,11 @@ def check_sync(intervals: dict[str, int]) -> list[Alert]:
     Suppressed while one is running: a long full run is not a missing one, and this
     installation's runs legitimately take most of an hour.
     """
-    period = intervals.get("sync")
+    from coreyard.schedule import full_cycle_seconds
+
+    # "two of its own intervals" means the full sync's hour, not the five-minute catch-up
+    # that shares its lock name.
+    period = full_cycle_seconds("sync", 0) or intervals.get("sync")
     if not period:
         return []                       # nothing scheduled, so nothing is late
     last = ops.last("sync", "")
@@ -193,7 +197,13 @@ def check_delta(caps, intervals: dict[str, int]) -> list[Alert]:
         # an hour, a sync is almost always running, and "a sync is running" would then
         # explain a cursor frozen for five days as easily as one frozen for six minutes.
         # Past one full cycle plus the threshold, a run in flight is no longer the reason.
-        grace = timedelta(seconds=intervals.get("sync", 3600)) + limit
+        # The longest job on the lock, not the shortest `intervals` reports: the delta
+        # shares .sync.lock with the hourly full sync, so reading the shortest made this
+        # grace 35 minutes instead of 90 and fired while a full sync was legitimately
+        # working through a backlog. See `schedule.full_cycle_seconds`.
+        from coreyard.schedule import full_cycle_seconds
+
+        grace = timedelta(seconds=full_cycle_seconds("sync", 3600)) + limit
         if age <= grace:
             return []
     return [Alert("sync.delta.stale", FAIL,

@@ -158,3 +158,53 @@ class ALockHeldPastItsOwnPeriod(unittest.TestCase):
     def test_an_unreadable_duration_is_skipped_rather_than_guessed(self):
         line = "*/5 * * * * /srv/x/bin/coreyard --lock sync --timeout later sync delta"
         self.assertEqual(self.budget([line]), [])
+
+
+class TheGraceForARunningSyncUsesTheRightCycle(unittest.TestCase):
+    """A stale delta cursor is excused while a full sync runs — for one *full sync* cycle.
+
+    `installed_intervals` reports the shortest schedule per task, which is right for "has
+    this stopped?": the most frequent job is the one whose silence is evidence. The grace
+    asks the opposite question and needs the opposite answer.
+
+    They collapse into one key because a task is recognised by its lock, and here the hourly
+    sync, the reconcile and the five-minute delta all take `.sync.lock`. Reading the shortest
+    made the grace 35 minutes instead of 90, so a full sync working through 1,705 changed
+    prices tripped the very check that exists to stay quiet while it does exactly that.
+    """
+
+    LINES = [
+        "0 * * * * /srv/x/bin/coreyard --lock sync --timeout 25m sync --status ACTIVE",
+        "30 6 * * * /srv/x/bin/coreyard --lock sync --timeout 45m sync --deep",
+        "5-59/15 * * * * /srv/x/bin/coreyard --lock sync --timeout 5m reconcile --apply",
+        "2-57/5 * * * * /srv/x/bin/coreyard --lock sync --timeout 2m sync delta",
+        "*/10 * * * * /srv/x/bin/coreyard --lock orders --timeout 9m orders poll",
+    ]
+
+    def cycle(self, task, default, lines=None):
+        with mock.patch.object(schedule.shutil, "which", return_value="/usr/bin/crontab"), \
+                mock.patch.object(schedule, "_crontab_lines",
+                                  return_value=self.LINES if lines is None else lines):
+            return schedule.full_cycle_seconds(task, default)
+
+    def test_it_reports_the_hourly_sync_not_the_five_minute_delta(self):
+        self.assertEqual(self.cycle("sync", 3600), 3600)
+
+    def test_installed_intervals_still_reports_the_shortest(self):
+        """The two answers are deliberately different; neither is a bug."""
+        with mock.patch.object(schedule.shutil, "which", return_value="/usr/bin/crontab"), \
+                mock.patch.object(schedule, "_crontab_lines", return_value=self.LINES):
+            self.assertEqual(schedule.installed_intervals()["sync"], 300)
+
+    def test_a_once_daily_pass_does_not_set_the_cycle(self):
+        """The morning deep sync shares this lock. Letting it decide stretched the grace to
+        24 hours, which would call a cursor frozen overnight healthy — the same defect as
+        the one being fixed, wearing the opposite face."""
+        self.assertEqual(self.cycle("sync", 3600), 3600)
+        self.assertNotEqual(self.cycle("sync", 3600), 86400)
+
+    def test_a_task_with_nothing_scheduled_falls_back(self):
+        self.assertEqual(self.cycle("nosuchtask", 1234), 1234)
+
+    def test_a_commented_out_job_does_not_count(self):
+        self.assertEqual(self.cycle("sync", 3600, ["#" + self.LINES[0]] + self.LINES[2:]), 900)

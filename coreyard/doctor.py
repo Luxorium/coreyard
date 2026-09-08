@@ -334,9 +334,11 @@ def _suppression_grace() -> timedelta:
     the explanation, because a cursor is only written when a full run reaches its end.
     """
     try:
-        from coreyard.schedule import installed_intervals
+        from coreyard.schedule import full_cycle_seconds
 
-        period = installed_intervals().get("sync", 3600)
+        # The longest job on the lock, not the shortest: the full sync is what a stale
+        # cursor is waiting on, and the delta shares its lock name.
+        period = full_cycle_seconds("sync", 3600)
     except Exception:
         period = 3600
     return timedelta(seconds=period) + CURSOR_STALE
