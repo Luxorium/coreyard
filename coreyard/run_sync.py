@@ -287,6 +287,62 @@ def _enrich(conn, parts) -> None:
         print(f"  (enrichment skipped: {exc})")
 
 
+def _publish_batch(publisher, todo, needs_photos, revivals, bank):
+    """Publish each part, banking progress as it goes *and* however this loop is left.
+
+    ``bank(pending)`` records the parts published since it was last called. It runs at the
+    :data:`CHECKPOINT_EVERY` interval and, crucially, from a ``finally``: ``--timeout``
+    stops a run by raising ``SystemExit`` from a SIGALRM handler, so a "bank the remainder"
+    statement written *after* the loop is simply never reached.
+
+    Without that ``finally`` the count-based checkpoint is not enough on its own, because it
+    only fires once CHECKPOINT_EVERY parts are done. A run whose window is too short to
+    reach the threshold banks nothing at all, so the next tick rebuilds the identical batch
+    and discards it again — and since the backlog only grows, it never becomes small enough
+    to finish. The delta livelocked exactly that way on 2026-09-08 (15:32-15:57) and again
+    on 2026-09-09 (10:07-10:57): an ~80-part burst met its 2-minute budget, and ~50 parts
+    were published to Shopify and thrown away every five minutes until the hourly full sync
+    happened to clear the backlog.
+
+    Banking here can never skip a part. A fingerprint is recorded strictly after the publish
+    it describes returned cleanly, and the *cursor* is still advanced only on a clean
+    finish, so an interrupted run leaves a smaller snapshot, never a wrong one.
+
+    Returns ``(published_ok, revived)``.
+    """
+    published_ok: set[str] = set()
+    revived: set[str] = set()
+    banked: set[str] = set()
+
+    def flush() -> None:
+        pending = published_ok - banked
+        if not pending:
+            return
+        bank(pending)
+        banked.update(pending)
+
+    try:
+        for i, part in enumerate(todo, 1):
+            key = part.uid()
+            try:
+                publisher.publish(part, refresh_images=key in needs_photos,
+                                  revive_status=revivals.get(key))
+            except RuntimeError as exc:
+                # Leave this part out of the state update so the next run retries it.
+                print(f"  R#{key}: {exc}")
+                continue
+            published_ok.add(key)
+            if key in revivals:
+                revived.add(key)
+            if i % 25 == 0 or i == len(todo):
+                print(f"  {i}/{len(todo)}")
+            if len(published_ok) - len(banked) >= CHECKPOINT_EVERY:
+                flush()
+    finally:
+        flush()
+    return published_ok, revived
+
+
 def _delta_baseline():
     """The server clock to hand the next delta run, or None if this site has no delta mapping.
 
@@ -401,33 +457,16 @@ def cmd_delta(args) -> int:
         # A part whose photos moved needs its media rebuilt even when the fingerprint moved
         # for an unrelated reason, so both signals are unioned.
         needs_photos = _photo_refreshes(diff, args, todo_keys, todo) | changes.photo_changed
-        revived: set[str] = set()
-        published_ok: set[str] = set()
-        checkpointed: set[str] = set()
-        for i, part in enumerate(todo, 1):
-            key = part.uid()
-            try:
-                publisher.publish(part, refresh_images=key in needs_photos,
-                                  revive_status=revivals.get(key))
-            except RuntimeError as exc:
-                # Leave this part out of the state update so the next run retries it.
-                print(f"  R#{key}: {exc}")
-                continue
-            published_ok.add(key)
-            if key in revivals:
-                revived.add(key)
-            if i % 25 == 0 or i == len(todo):
-                print(f"  {i}/{len(todo)}")
-            # Bank progress here too. A delta run is normally a handful of parts, but it is
-            # scheduled on a short timeout, and a window it cannot finish inside that
-            # timeout would otherwise be republished in full on every tick forever — which
-            # is what happens after a long full sync has held the shared lock for an hour.
-            # The cursor still only advances at the end, so nothing is skipped.
-            if len(published_ok) - len(checkpointed) >= CHECKPOINT_EVERY:
-                banked = fp_subset(fingerprints, published_ok - checkpointed)
-                state.update(banked)
-                state.record_channel(CHANNEL, banked)
-                checkpointed |= published_ok
+        # Bank progress as the run goes. A delta is normally a handful of parts, but it is
+        # scheduled on a short timeout, and a window it cannot finish inside that timeout
+        # would otherwise be republished in full on every tick forever. The cursor still
+        # only advances at the end, so nothing is skipped.
+        def bank(pending: set[str]) -> None:
+            banked = fp_subset(fingerprints, pending)
+            state.update(banked)
+            state.record_channel(CHANNEL, banked)
+
+        published_ok, revived = _publish_batch(publisher, todo, needs_photos, revivals, bank)
         state.clear_retired(revived)
 
         retired: set[str] = set()
@@ -731,36 +770,17 @@ def cmd_sync(args) -> int:
                 todo = []
             print(f"Upserting {len(todo)} new/changed products to Shopify "
                   f"({len(needs_photos & {p.uid() for p in todo})} with changed photos) ...")
-            checkpointed: set[str] = set()
-            for i, part in enumerate(todo, 1):
-                key = part.uid()
-                try:
-                    publisher.publish(part, refresh_images=key in needs_photos,
-                                      revive_status=revivals.get(key))
-                except RuntimeError as exc:
-                    # Leave this part out of the state update so the next run retries it.
-                    print(f"  R#{key}: {exc}")
-                    continue
-                published_ok.add(key)
-                if key in revivals:
-                    revived.add(key)
-                if i % 25 == 0 or i == len(todo):
-                    print(f"  {i}/{len(todo)}")
-                # Bank the work so far. A run stopped by its timeout keeps everything it
-                # published instead of starting the same backlog again next hour.
-                if not args.dry_run and len(published_ok) - len(checkpointed) >= CHECKPOINT_EVERY:
-                    banked = _published_fingerprints(
-                        fingerprints, published_ok - checkpointed, state, args, diff
-                    )
-                    state.update(banked)
-                    state.record_channel(CHANNEL, banked)
-                    checkpointed |= published_ok
-            if published_ok - checkpointed and not args.dry_run:
-                banked = _published_fingerprints(
-                    fingerprints, published_ok - checkpointed, state, args, diff
-                )
+            # Bank the work so far. A run stopped by its timeout keeps everything it
+            # published instead of starting the same backlog again next hour.
+            def bank(pending: set[str]) -> None:
+                if args.dry_run:
+                    return
+                banked = _published_fingerprints(fingerprints, pending, state, args, diff)
                 state.update(banked)
                 state.record_channel(CHANNEL, banked)
+
+            published_ok, revived = _publish_batch(publisher, todo, needs_photos,
+                                                   revivals, bank)
             # Only after the upsert landed: a part whose revival failed must still be
             # remembered, or the retry would republish it as ARCHIVED.
             state.clear_retired(revived)
