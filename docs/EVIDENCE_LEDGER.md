@@ -26,8 +26,8 @@ Baseline commit: `e9c88ab` · offline suite: 1119 tests · Python 3.14.7 locally
 | Criterion | Title | Status | Evidence and outstanding work |
 |---|---|---|---|
 
-| `REL-01` | Supported product | IN PROGRESS | Matrix published: `docs/CAPABILITY_MATRIX.md` covers sources, outputs, photos, every sync mode, reconcile/repair/audit, setup, diagnostics, scheduling, all four order stages and the listing-portal channel, with prerequisites, limitations and per-row evidence. Unsupported combinations now refuse before side effects: `cli.unmet` checks declared requirements against resolved capabilities and exits 2 naming the capability, the reason and the configured source (`tests/test_command_inventory.py::UnsupportedCombinationsRefuseFirst`). Outstanding: no combination has live acceptance evidence, and no portal mapping is qualified.
-| `REL-02` | Optional features | IN PROGRESS | Order booking and the listing portal are `off` rather than `missing` when unconfigured, so neither reads as a broken install (`tests/test_capabilities.py::OptionalFeatures`). Nothing has been removed, deferred or relabelled. Outstanding: each optional feature still needs its own gates passed, which is what the rest of this ledger tracks.
+| `REL-01` | Supported product | IN PROGRESS | Matrix published: `docs/CAPABILITY_MATRIX.md` covers sources, outputs, photos, every sync mode, reconcile/repair/audit, setup, diagnostics, scheduling, all four order stages, with prerequisites, limitations and per-row evidence. Unsupported combinations now refuse before side effects: `cli.unmet` checks declared requirements against resolved capabilities and exits 2 naming the capability, the reason and the configured source (`tests/test_command_inventory.py::UnsupportedCombinationsRefuseFirst`). Outstanding: no combination has live acceptance evidence.
+| `REL-02` | Optional features | IN PROGRESS | Order booking is `off` rather than `missing` when unconfigured, so it does not read as a broken install (`tests/test_capabilities.py::OptionalFeatures`). The listing-portal channel was removed by an explicit scope decision (2026-09-08): the supported product is source database → Shopify → sales, and REL-02's no-reduction rule is satisfied by that decision being recorded rather than assumed. Nothing else has been removed, deferred or relabelled. Outstanding: each optional feature still needs its own gates passed, which is what the rest of this ledger tracks.
 | `REL-03` | Version and compatibility | PASS | `coreyard/__init__.py` is the single declaration; `pyproject.toml` reads it via setuptools dynamic metadata. No 1.0.0 artifact was ever distributed (no git tag, no GitHub release, no sdist/wheel), so no migration note is owed. `tests/test_inventory.py::VersionIsDeclaredOnce`; CI job `hygiene` compares the built wheel against `coreyard.__version__`. |
 | `REL-04` | Decision rule | NOT VERIFIED | No evidence collected. |
 | `REL-05` | Complete functionality inventory | IN PROGRESS | Inventory of all 55 CLI nodes generated from the live tree: `docs/INVENTORY.md`, `scripts/inventory.py`, CI job `inventory`. `cli.SUPPORT` gives every node an effect and its required capabilities; `tests/test_inventory.py` fails if the tree and the declarations disagree. The tree is walked by one implementation (`cli.tree`), used by both the preflight and the generator, so the document cannot describe a tree the code does not enforce. Outstanding: per-entry links to acceptance evidence, legacy entry-point coverage, and flag-interaction cases. |
@@ -81,7 +81,7 @@ Baseline commit: `e9c88ab` · offline suite: 1119 tests · Python 3.14.7 locally
 | `DOC-01` | Complete operator path | NOT VERIFIED | No evidence collected. |
 | `DOC-02` | Honest positioning | NOT VERIFIED | No evidence collected. |
 | `DOC-03` | Supportability | NOT VERIFIED | No evidence collected. |
-| `QA-01` | Continuous gates | IN PROGRESS | Offline suite: 1119 tests, no `.env`, credentials or network, on Python 3.10-3.13 in CI. CI now also checks the functionality inventory, tracked-file whitespace and built-artifact version. Example config validation added for `portal.example.json` and `schema.example.json`. Outstanding: installed-artifact demo and dependency-metadata jobs. |
+| `QA-01` | Continuous gates | IN PROGRESS | Offline suite: 1109 tests, no `.env`, credentials or network, on Python 3.10-3.13 in CI. CI now also checks the functionality inventory, tracked-file whitespace and built-artifact version. Example config validation added for `schema.example.json` (`tests/test_command_inventory.py`) and `store.example.json` (`tests/test_store_file.py`). Outstanding: installed-artifact demo and dependency-metadata jobs. |
 | `QA-02` | Evidence ledger | IN PROGRESS | This ledger, with `scripts/ledger.py` holding it level with the specification. Outstanding: owner, environment and redacted result link per row. |
 | `QA-03` | Final acceptance | NOT VERIFIED | No evidence collected. |
 | `QA-04` | Artifact provenance and withdrawal | NOT VERIFIED | No evidence collected. |
@@ -117,8 +117,7 @@ The specification's closing list, with what has moved:
 The three documents now say precisely what is unqualified, which makes the order obvious:
 
 - **Nothing has live acceptance evidence.** Every "Live: `NOT VERIFIED`" row in the matrix
-  needs a controlled environment — a test store, a disposable mapped database, a controlled
-  portal account. That is the bulk of sections 4 through 9 of the specification.
+  needs a controlled environment — a test store and a disposable mapped database. That is the bulk of sections 4 through 9 of the specification.
 
 - **Clean-install and recovery drills have not been run** (DIST-03, DIST-04, OPS-04,
   OPS-05), and `setuptools` is absent from the development venv, so the wheel build is

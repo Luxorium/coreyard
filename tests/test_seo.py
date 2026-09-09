@@ -797,9 +797,9 @@ class GradeAndMileageInATitle(unittest.TestCase):
 class AReviewedTitleKeepsItsFacts(unittest.TestCase):
     """An override carries facts the database does not hold, so it is extended, not replaced.
 
-    The engine titles reviewed through the listing portal state displacement, VIN code and
-    cylinder configuration for parts whose own note in the yard system is empty — those
-    facts came off the portal's detail page and cannot be rebuilt from the database. They
+    The reviewed engine titles state displacement, VIN code and cylinder configuration for
+    parts whose own note in the yard system is empty — facts that came from whoever reviewed
+    the title and cannot be rebuilt from the database. They
     are also deliberately narrower than fitment: one engine variant, not every model the
     interchange group covers. What they predate is the grade and the donor's mileage, and
     those are facts about this part rather than about the engine family.

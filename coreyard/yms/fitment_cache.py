@@ -4,7 +4,7 @@ Resolving fitment is one query per *interchange group*, not per part, and this i
 has 16,239 distinct groups behind 26,858 parts — a reuse factor of 1.65. So the resolver's
 in-memory cache saves about a third, and the remaining 16,239 round trips over the named
 pipe cost the better part of an hour. Every command that renders a title pays it again:
-a sync, a repair, an audit, the listing-portal daily pass.
+a sync, a repair, an audit.
 
 That cost buys nothing, because the applications table is the *catalogue vendor's reference
 data*. It describes which vehicles a part number fits, and it changes when the catalogue is

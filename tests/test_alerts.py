@@ -211,8 +211,8 @@ class RunsThatEndBadly(unittest.TestCase):
 
 class ConfigurationAndStorage(unittest.TestCase):
     def test_only_a_missing_capability_alerts_never_one_that_is_merely_off(self):
-        self.assertEqual(alerts.check_credentials(caps(portal=OFF, orders=OFF)), [])
-        found = alerts.check_credentials(caps(portal=OFF, shopify=MISSING))
+        self.assertEqual(alerts.check_credentials(caps(donor_photos=OFF, orders=OFF)), [])
+        found = alerts.check_credentials(caps(donor_photos=OFF, shopify=MISSING))
         self.assertEqual([a.key for a in found], ["config.missing"])
         self.assertIn("shopify", found[0].summary)
 

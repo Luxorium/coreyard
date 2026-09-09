@@ -266,7 +266,7 @@ class ParallelApply(unittest.TestCase):
                 applied.append(change.r_number)
                 seen_clients.add(id(client))
             if change.r_number in failing:
-                raise RuntimeError("portal refused")
+                raise RuntimeError("the store refused")
 
         todo = [self.Change(str(n)) for n in range(count)]
         reported = []

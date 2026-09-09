@@ -6,8 +6,8 @@ where none exists teaches people to stop reading checks.
 * A yard running ``COREYARD_SOURCE=tabular:parts.csv`` has no SMB credentials, no photo
   share and no ``schema.json``. ``doctor`` reported three FAIL lines and told the operator
   to fix an installation that was already correct.
-* Order booking and the listing portal are opt-in. Their absence is a choice, not a fault,
-  and a release that treats "off" as "broken" cannot ship an optional feature at all.
+* Order booking is opt-in. Its absence is a choice, not a fault, and a release that treats
+  "off" as "broken" cannot ship an optional feature at all.
 
 Every test runs against a synthetic environment with ``load=False``, so the site's real
 ``.env`` cannot decide the outcome.
@@ -153,7 +153,7 @@ class OptionalFeatures(unittest.TestCase):
     def test_a_capability_report_never_repeats_a_secret(self):
         caps = detect(**self.base, SHOPIFY_STORE="x.myshopify.com",
                       SHOPIFY_ADMIN_TOKEN="shpat_supersecret",
-                      SMB_PASSWORD="hunter2", EBAY_PORTAL_PASSWORD="hunter3")
+                      SMB_PASSWORD="hunter2", SOURCE_DB_PASSWORD="hunter3")
         printed = json.dumps(caps.summary())
         for secret in ("shpat_supersecret", "hunter2", "hunter3"):
             self.assertNotIn(secret, printed)

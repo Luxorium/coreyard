@@ -11,7 +11,7 @@ _NOT_MONEY = re.compile(r"[^0-9.\-]")
 def parse_money(value) -> Optional[Decimal]:
     """Read a price out of whatever an external system called a price.
 
-    Portal APIs return money as display strings — ``"$57.50"``,
+    External systems return money as display strings — ``"$57.50"``,
     ``"1,299.00"``, an empty cell for "unpriced". Returns None rather than raising for
     anything unreadable, because a single unparseable row must not stop a run over
     thousands of them; the caller decides whether a missing price is fatal.

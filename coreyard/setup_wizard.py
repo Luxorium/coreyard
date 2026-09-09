@@ -13,7 +13,7 @@ seven-part export, so the whole pipeline can be run — rendered, diffed, writte
 on a laptop with no database, no photo share and no credentials. That path exists because
 "try it" should cost a minute, not an afternoon.
 
-Nothing here writes to a store, a portal, or a database. It writes two local files.
+Nothing here writes to a store or a database. It writes two local files.
 """
 
 from __future__ import annotations

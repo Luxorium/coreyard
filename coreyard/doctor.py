@@ -63,7 +63,7 @@ ORDERS_STALE = timedelta(minutes=35)
 ORDERS_STUCK = timedelta(minutes=20)
 
 # `reconcile` runs hourly and is the only thing that archives a part sold at the counter or
-# on eBay, so the storefront's worst case is one cycle behind the yard. Three missed cycles
+# on another channel, so the storefront's worst case is one cycle behind the yard. Three missed cycles
 # is past any plausible slow run and still catches a stopped job the same morning.
 RECONCILE_STALE = timedelta(hours=3)
 
@@ -490,10 +490,11 @@ def check_delisting(*, caps=None) -> list[Result]:
     """Is anything still taking sold parts off the storefront?
 
     `reconcile` is the only job that archives a product whose part has left the yard — sold
-    at the counter, sold on eBay out of the same stock pool, or simply pulled. While it is
-    not running the storefront keeps selling parts that are not there, and every symptom of
-    that is somewhere else: the poller is fine, the sync is fine, the catalogue looks fine,
-    and the first real evidence is a customer who has paid for something nobody can ship.
+    at the counter, sold on another channel out of the same stock pool, or simply pulled.
+    While it is not running the storefront keeps selling parts that are not there, and every
+    symptom of that is somewhere else: the poller is fine, the sync is fine, the catalogue
+    looks fine, and the first real evidence is a customer who has paid for something nobody
+    can ship.
 
     Asked as "when did it last *succeed*", not "when did it last run". A tick skipped
     because another job holds `.sync.lock` records a run like any other, so the newest row

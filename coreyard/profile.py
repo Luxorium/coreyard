@@ -135,8 +135,8 @@ class CatalogProfile:
     title_include_oem: bool = False
 
     # How many vehicles a title may name, or **0 for "as many as the character budget
-    # holds"**. The budget is the destination's: 255 on Shopify, 80 on the listing portal,
-    # so one setting fills a long title and still fits a short one.
+    # holds"**. The budget is the destination's: 255 characters on Shopify, and as few as
+    # 80 somewhere stricter, so one setting fills a long title and still fits a short one.
     #
     # The default is a count rather than the budget because raising it rewrites every
     # multi-vehicle title a site has published, and that is an installation's decision to

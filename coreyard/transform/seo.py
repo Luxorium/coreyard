@@ -890,9 +890,9 @@ def title_qualifiers(part: Part, max_phrases: int = 5, max_chars: int = 55) -> l
 # refinement, dropped worst-first when a marketplace's character budget binds. The order
 # is the drop order, so raising a rank makes a segment more expendable, never less.
 #
-# This exists because eBay allows 80 characters where Shopify allows 255. That is a
-# difference in budget, not a difference in what the part is, so it is a parameter here
-# rather than a second title builder somewhere else.
+# This exists because destinations differ: Shopify allows 255 characters where another
+# might allow 80. That is a difference in budget, not a difference in what the part is,
+# so it is a parameter here rather than a second title builder somewhere else.
 _TITLE_RANKS = {
     "years": 1, "models": 1, "part_type": 1,
     "side": 2, "spec": 3, "condition": 3, "grade": 3, "mileage": 3,
@@ -1023,8 +1023,8 @@ def compose_title(segments: list[tuple[str, str, int]], limit: int = TITLE_MAX,
                   measure=len) -> tuple[str, list[str]]:
     """Join ``segments`` in written order, dropping the most expendable until it fits.
 
-    ``measure`` is how the destination counts characters: eBay's portal escapes a title
-    before eBay sees it, so ``&`` costs five characters there and one here. Returns the
+    ``measure`` is how the destination counts characters: one that escapes a title before
+    storing it makes ``&`` cost five characters there and one here. Returns the
     title and the names of whatever had to go, so a caller can report the loss instead of
     discovering it in a published listing.
     """

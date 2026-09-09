@@ -29,8 +29,10 @@ out/*.csv
 # Site-specific source-schema mapping — never commit
 schema.json
 
-# Site-specific listing-portal map (endpoints, field and action ids) — never commit.
-# Same rule as schema.json: those identifiers belong to the portal's vendor, not here.
+# Leftover from the listing-portal channel, removed 2026-09-08 when the supported product
+# became source database -> Shopify -> sales. The file still exists on installations that
+# ran it, and its endpoints and field ids belong to that vendor, so the rule stays whether
+# or not anything reads the file.
 portal.json
 
 # Portal session cookies
