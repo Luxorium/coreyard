@@ -93,3 +93,60 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run install.sh
         run: ./install.sh --no-deps --yes
+      # DIST-03. The installer finishing is not the same as the installation working, and
+      # the two commands the README prints next are the ones a new customer runs first.
+      # Both were broken on a clean machine while this job was green: install.sh seeded a
+      # .env that made `init` refuse, and `sync` then asked a CSV source for a database.
+      - name: The documented quickstart, on the installation it just made
+        run: |
+          set -euo pipefail
+          bin/coreyard init --demo
+          bin/coreyard sync --sink csv --dry-run
+          home="${XDG_DATA_HOME:-$HOME/.local/share}/coreyard"
+          test -s "$home/out/products.csv"
+
+  packaged:
+    name: the built wheel runs the quickstart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # QA-01/DIST-03/DIST-04: "a passing source checkout alone is insufficient". This job
+      # exists because every earlier check ran inside a tree that already had a schema.json,
+      # a .env and a photo share sitting beside the code — so four database requirements on
+      # the documented CSV path went unnoticed for as long as they did.
+      - name: Build the wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist/ .
+      - name: Install it into a clean environment
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet dist/*.whl
+      - name: The wheel carries its own example yard and config templates
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" - <<'PROBE'
+          from coreyard.config import bundled
+          for name in ("parts.csv", "schema.example.json", "store.example.json"):
+              path = bundled(name)
+              assert path.is_file(), f"{name} is not in the wheel: {path}"
+          print("bundled files present")
+          PROBE
+      - name: Run the quickstart from a directory with no checkout in it
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/home" "$RUNNER_TEMP/elsewhere"
+          cd "$RUNNER_TEMP/elsewhere"
+          export COREYARD_HOME="$RUNNER_TEMP/home"
+          "$RUNNER_TEMP/venv/bin/coreyard" --version
+          "$RUNNER_TEMP/venv/bin/coreyard" init --demo
+          "$RUNNER_TEMP/venv/bin/coreyard" sync --sink csv --dry-run
+          "$RUNNER_TEMP/venv/bin/python" - <<'COUNT'
+          import csv, os, pathlib
+          path = pathlib.Path(os.environ["COREYARD_HOME"], "out", "products.csv")
+          rows = list(csv.DictReader(path.open(encoding="utf-8")))
+          assert len(rows) == 7, f"expected the seven-part example yard, got {len(rows)}"
+          print("rendered", len(rows), "products")
+          COUNT

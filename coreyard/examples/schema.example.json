@@ -1,8 +1,8 @@
 {
   "_comment": [
-    "Copy to schema.json and replace every PLACEHOLDER with your own database's names.",
+    "Copy to schema.json and replace every name ending in _TABLE or _COLUMN with your own.",
     "This project ships no vendor schema; the mapping is yours and stays local.",
-    "Run `python -m coreyard.yms.discover_schema` to list your tables and columns.",
+    "Run `coreyard schema` to list your tables and columns.",
     "Keys starting with _ are ignored, since JSON has no comments."
   ],
   "_select": "Output field -> SQL expression. r_number, part_type and price are required. Wrap fixed-length CHAR/NCHAR columns in RTRIM(CAST(x AS varchar(n))) and bits in CAST(x AS int) \u2014 see README 'Driver quirks'.",

@@ -67,7 +67,7 @@ CoreYard 0.1.0 — 43 commands.
 
 ## Flags, by command
 
-- **`coreyard init`** — `--city` `--demo` `--env` `--force` `--handle-prefix` `--require-images` `--source` `--store` `--vendor` `--warranty` `--yes`
+- **`coreyard init`** — `--city` `--demo` `--env` `--force` `--handle-prefix` `--require-images` `--source` `--store` `--vendor` `--warranty` `--write-schema` `--yes`
 - **`coreyard status`** — `--deep` `--json`
 - **`coreyard counts`** — `--apply`
 - **`coreyard doctor`** — `--install-only` `--json` `--no-network` `--quiet`

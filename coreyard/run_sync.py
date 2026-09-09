@@ -602,7 +602,8 @@ def cmd_sync(args) -> int:
             "names belong to your yard system's vendor, not to this project.\n\n"
             f"  cp {bundled('schema.example.json')} \\\n     {DATA_ROOT / 'schema.json'}\n"
             f"  {cli_name()} schema                      # lists your tables/columns\n\n"
-            "then replace each PLACEHOLDER. See docs/SETUP.md, 'Map your database'.",
+            "then replace every name ending in _TABLE or _COLUMN with your own.\n"
+            "See docs/SETUP.md, 'Map your database'.",
             file=sys.stderr,
         )
         return 2

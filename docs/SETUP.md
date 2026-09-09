@@ -19,15 +19,25 @@ cd coreyard
 ```
 
 That's the whole thing. The installer detects your package manager (apt, dnf, yum, pacman,
-zypper, or apk), installs Python 3.10+ and `smbclient`, builds a virtualenv, seeds a `.env`,
-installs a `bin/coreyard` launcher, and verifies the result by running the offline test suite.
-It asks before touching anything with `sudo`.
+zypper, or apk), installs Python 3.10+ and `smbclient`, builds a virtualenv, installs CoreYard
+into it, writes a `bin/coreyard` launcher, offers to put `coreyard` on your PATH, and verifies
+the result by running the offline test suite. It asks before touching anything with `sudo`.
 
 ```bash
-./install.sh --no-deps   # system packages already present
-./install.sh --yes       # never prompt (for scripted installs)
+./install.sh --no-deps    # system packages already present
+./install.sh --yes        # never prompt (for scripted installs)
+./install.sh --home DIR   # where this installation's own files live
 ./install.sh --help
 ```
+
+**Code and data are separate.** The checkout holds the code; configuration, state, locks and
+output live under the *data home*. That is the checkout itself when it already holds an
+installation — so re-running the installer on a running yard moves nothing — and
+`$XDG_DATA_HOME/coreyard` otherwise. Give each installation its own `--home` to run several on
+one host.
+
+The installer does **not** write `.env`; `coreyard init` does, and it refuses to overwrite an
+existing one. Run the installer, then `coreyard init`.
 
 If your distro ships Python with `ensurepip` stripped out, the installer detects the failed
 `venv` creation and bootstraps `pip` itself — no manual workaround needed.
@@ -39,10 +49,13 @@ no third-party packages at all.
 ### Manual install
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp .env.example .env && chmod 600 .env
+python3 -m venv .venv && .venv/bin/pip install -e .
+.venv/bin/coreyard init
 ```
-You will also need `smbclient` from your distro's Samba client package.
+You will also need `smbclient` from your distro's Samba client package. A non-editable
+`pip install .` works too — the wheel carries the example yard and both config templates — but
+from a checkout prefer `-e`, because a copy into `site-packages` moves this installation's data
+home to `$XDG_DATA_HOME/coreyard` unless you set `COREYARD_HOME` yourself.
 
 ## One-time setup
 
@@ -81,11 +94,20 @@ knowing:
 management system, so you supply them locally — exactly like `.env`, and also gitignored.
 
 ```bash
-cp schema.example.json schema.json
-python -m coreyard.yms.discover_schema   # lists your tables, columns and row counts
+coreyard init --write-schema   # copies the bundled template to <data home>/schema.json
+coreyard schema                # lists your tables, columns and row counts
 ```
 
-Then edit `schema.json`, replacing each `PLACEHOLDER` with your own names. The mapping is
+The template ships inside the package rather than at the top of the checkout, so this works
+whether you cloned CoreYard or installed it. It is a separate command rather than part of
+`init` on purpose: the template is full of `_TABLE`/`_COLUMN` placeholders, and a
+`schema.json` created
+without being asked for looks like a configured installation right up until it fails with a
+SQL error naming a table you do not have. `--write-schema` tells you how many placeholders
+are left.
+
+Then edit `schema.json`, replacing every name ending in `_TABLE` or `_COLUMN` with your own.
+The mapping is
 expressed as SQL fragments rather than a rigid model, because real installations differ in ways
 a fixed model can't capture:
 
@@ -114,7 +136,8 @@ parser mangles fixed-length `CHAR`/`NCHAR` columns and can truncate a result set
 string `'NULL'`, which the extract coerces away for you.
 
 ### 3. Configure `.env`
-`./install.sh` creates it for you; otherwise `cp .env.example .env`. Fill in `YMS_DB_NAME`, the
+`coreyard init` writes it (mode 600) and asks for what it needs; `.env.example` in the checkout
+is the full reference if you would rather write one by hand. Fill in `YMS_DB_NAME`, the
 `SMB_*` values, and the Shopify block — every one of them is required and has no default.
 Every host, account, and credential is read from `.env` — nothing site-specific is baked into
 the code. `SMB_SERVER_NAME` must be the database host's NetBIOS name; SMB session setup

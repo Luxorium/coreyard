@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -226,6 +227,34 @@ def write(answers: dict, env_path: Path, store_path: Path, *,
     return [str(env_path), str(store_path)]
 
 
+def install_schema_template(data_root: Path = DATA_ROOT) -> Path:
+    """Copy the bundled schema template into ``data_root`` and return where it landed.
+
+    Deliberately explicit rather than part of a plain `init`. The template is a file of
+    ``PLACEHOLDER`` values: created automatically it would look like a configured
+    installation and then fail with a SQL error naming a table nobody has, which is why the
+    installer has always refused to write one. Asked for by name it is exactly what someone
+    mapping a database wants, and the caller is told what remains to be done.
+    """
+    target = data_root / "schema.json"
+    if target.exists():
+        raise FileExistsError(f"{target} already exists; edit it or move it aside")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(bundled("schema.example.json"), target)
+    return target
+
+
+# What "still needs filling in" looks like in the template: `PART_ID_COLUMN`, `MAKE_TABLE`.
+# The template's own comment used to say "replace every PLACEHOLDER", a word that appears
+# nowhere in the file it describes, so anyone searching for it found one line — the comment.
+PLACEHOLDER = re.compile(r"[A-Z][A-Z0-9_]*_(?:COLUMN|TABLE)")
+
+
+def placeholder_names(path: Path) -> set:
+    """The distinct placeholder identifiers still present in a schema mapping."""
+    return set(PLACEHOLDER.findall(path.read_text(encoding="utf-8")))
+
+
 def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     ap.description = "Write a working .env and store.json for this installation."
     ap.add_argument("--demo", action="store_true",
@@ -241,6 +270,8 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
                     help="'database' (default) or 'tabular:<path>'")
     ap.add_argument("--require-images", action="store_true",
                     help="only publish parts that have a photograph")
+    ap.add_argument("--write-schema", action="store_true",
+                    help="copy the bundled schema template to <data home>/schema.json")
     ap.add_argument("--env", type=Path, default=DATA_ROOT / ".env")
     ap.add_argument("--store", type=Path, default=DATA_ROOT / "store.json")
     ap.set_defaults(func=run)
@@ -248,6 +279,19 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
 
 def run(args) -> int:
+    if getattr(args, "write_schema", False):
+        try:
+            written = install_schema_template(Path(args.env).parent)
+        except FileExistsError as exc:
+            print(f"Refused: {exc}", file=sys.stderr)
+            return 1
+        names = placeholder_names(written)
+        print(f"Wrote {written}")
+        print(f"\nEvery name ending in _TABLE or _COLUMN is a placeholder — {len(names)} of "
+              f"them — and\nthe mapping will not work until each is replaced with a name from "
+              f"your own\ndatabase. `{cli_name()} schema` lists your tables and columns.")
+        return 0
+
     interactive = not (args.yes or args.demo) and sys.stdin.isatty()
     if not interactive and not (args.demo or args.vendor or args.yes):
         print("Refusing to guess: pass --demo to try CoreYard on the bundled example, "

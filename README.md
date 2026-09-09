@@ -59,9 +59,11 @@ cd coreyard
 ./install.sh
 ```
 
-The installer sets up Python and `smbclient`, builds a private virtualenv, seeds a `.env`,
-installs the `coreyard` launcher and runs the offline test suite to prove the install.
-Then `coreyard init` asks what it needs and `coreyard doctor` says what is still missing.
+The installer sets up Python and `smbclient`, builds a private virtualenv, installs CoreYard
+into it, offers to put `coreyard` on your PATH, and runs the offline test suite to prove the
+install. Then `coreyard init` asks what it needs and `coreyard doctor` says what is still
+missing. Code stays in the checkout; configuration, state and output live under a separate
+data home the installer names.
 [Full setup instructions](docs/SETUP.md) — database access, schema mapping, storefront
 policy and the Shopify token.
 
