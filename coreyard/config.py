@@ -282,14 +282,27 @@ def _smb_from_env(*, required: bool = True) -> SmbConfig:
     )
 
 
-def source_is_database() -> bool:
-    """Whether this installation's inventory comes from the source database.
+def source_traits():
+    """What the configured source can do, as its own adapter declares it.
 
-    Parsed from ``COREYARD_SOURCE`` here rather than by asking :mod:`coreyard.source`, which
-    imports this module. Only the kind is needed, and the kind is the part before the colon.
+    Imported lazily because :mod:`coreyard.source` reads configuration. Reading traits does
+    not construct the source or connect to anything, so this is safe from here.
+
+    An unknown ``COREYARD_SOURCE`` is reported as a source that needs nothing rather than
+    raised: configuration loading is not where a typo should surface, and
+    ``capabilities.detect`` says so clearly with the key that decides it.
     """
-    spec = str(_get("COREYARD_SOURCE", "database") or "database").strip()
-    return (spec.split(":", 1)[0].strip().lower() or "database") == "database"
+    from coreyard.source import SourceTraits, traits
+
+    try:
+        return traits()
+    except ValueError:
+        spec = str(_get("COREYARD_SOURCE", "database") or "").strip()
+        return SourceTraits(kind=spec.split(":", 1)[0].strip().lower() or "unknown",
+                            needs_schema_mapping=False, needs_database_config=False,
+                            needs_smb=False, carries_own_photos=True,
+                            supports_delta=False, supports_fitment=False,
+                            supports_order_booking=False)
 
 
 def load_settings() -> Settings:
@@ -302,7 +315,7 @@ def load_settings() -> Settings:
     database assumption on a path a CSV source is documented to support.
     """
     load_env()
-    needs_db = source_is_database()
+    needs_db = source_traits().needs_database_config
     db = DbConfig(
         host=_get("YMS_DB_HOST", "", required=needs_db),
         port=int(_get("YMS_DB_PORT", "1433")),
@@ -325,7 +338,7 @@ def uses_smb() -> bool:
     makes it required. A tabular source whose photographs are a local directory — or absent —
     reaches no file server, and the image resolver it builds is the local one.
     """
-    return source_is_database() or bool(_get("SMB_IMAGES_SHARE", ""))
+    return source_traits().needs_smb or bool(_get("SMB_IMAGES_SHARE", ""))
 
 
 def load_smb_config() -> SmbConfig:

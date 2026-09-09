@@ -24,6 +24,8 @@ side effect rather than as a traceback halfway through a run (REL-01).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
+from coreyard.source import SourceTraits
 from pathlib import Path
 
 # The three states a capability can be in. `MISSING` is the only one that is anybody's
@@ -61,6 +63,10 @@ class Capabilities:
     source_kind: str
     source_argument: str
     items: dict[str, Capability] = field(default_factory=dict)
+    #: What the configured source declares it can do. Carried on the snapshot so a caller
+    #: that already has the capabilities does not resolve the source a second time — and so
+    #: `doctor` and `status` can ask what a source *is* instead of what it is called.
+    traits: "SourceTraits | None" = None
 
     def __getitem__(self, name: str) -> Capability:
         return self.items[name]
@@ -88,9 +94,11 @@ class Capabilities:
     def tabular(self) -> bool:
         """True when inventory comes from a file rather than the source database.
 
-        A tabular source has no named pipe, no `schema.json` and no SMB share, and cannot
-        support database order booking or database deltas. Callers ask this rather than
-        comparing strings so a third source kind does not have to be found by grep.
+        Kept because it reads well where the distinction really is "a file, specifically".
+        For anything else — does this source need a schema mapping, an SMB server, its own
+        photo share, a change cursor — ask :attr:`traits`, which the adapter declares. This
+        property could not answer those for a third source kind, and the code that used it
+        as though it could was comparing strings in five modules.
         """
         return self.source_kind == "tabular"
 
@@ -149,37 +157,32 @@ def detect(load: bool = True) -> Capabilities:
     kind = kind.strip().lower() or "database"
     argument = argument.strip()
 
+    # What this source can do, declared by its own adapter. Everything below that used to
+    # compare `kind` against "database" asks here instead, so registering a third yard
+    # system does not mean finding every comparison in this file and the four others that
+    # had their own.
+    from coreyard.config import source_traits
+
+    traits = source_traits()
+
     items: dict[str, Capability] = {}
 
     def add(name: str, state: str, detail: str, keys: tuple[str, ...] = ()) -> None:
         items[name] = Capability(name, state, detail, keys)
 
     # -- where parts come from ---------------------------------------------------
-    if kind == "tabular":
-        # Against the data root, exactly as the source itself resolves it. Checked against
-        # the process directory instead, `coreyard doctor` and `coreyard sync` disagreed
-        # about whether the file exists depending on which directory they were run from —
-        # and the installed `coreyard init --demo` reported its own freshly written example
-        # yard as missing.
-        path = data_path(argument) if argument else None
-        if not argument:
-            add("source", MISSING, "COREYARD_SOURCE=tabular: needs a file path",
-                ("COREYARD_SOURCE",))
-        elif path is not None and not path.is_file():
-            add("source", MISSING, f"{path} does not exist", ("COREYARD_SOURCE",))
-        else:
-            add("source", ON, f"tabular file {argument}", ("COREYARD_SOURCE",))
-    elif kind == "database":
-        missing = [key for key in ("SMB_HOST", "SMB_USER", "SMB_PASSWORD")
-                   if not _text(key)]
-        if missing:
-            add("source", MISSING, f"missing {', '.join(missing)}",
-                ("SMB_HOST", "SMB_USER", "SMB_PASSWORD"))
-        else:
-            add("source", ON, f"source database at {_text('SMB_HOST')}",
-                ("SMB_HOST", "SMB_USER", "SMB_PASSWORD"))
+    # Asked of the adapter, which is the only thing that knows what "reachable" means for
+    # its own kind: a file that exists, or credentials that are filled in. This used to be
+    # a chain of `elif kind ==` here, so a new yard system had to be added to this function
+    # as well as to the registry — and its absence showed up as "unknown source".
+    from coreyard import source as source_module
+
+    try:
+        state, detail, keys = source_module.probe(spec)
+    except ValueError as exc:
+        add("source", MISSING, str(exc), ("COREYARD_SOURCE",))
     else:
-        add("source", MISSING, f"unknown source {kind!r}", ("COREYARD_SOURCE",))
+        add("source", state, detail, keys)
 
     # `schema.json` maps the source database's tables. A tabular source *is* its own
     # mapping — the column names are Part field names — so demanding one there is asking
@@ -189,12 +192,12 @@ def detect(load: bool = True) -> Capabilities:
     # share. Both are meaningless against a CSV export, and "the source is configured" is
     # true there — so the coarser capability would wave them through into a confusing
     # failure further in.
-    add("database", ON if (kind == "database" and items["source"].enabled) else OFF,
-        "source database is the configured source" if kind == "database"
+    add("database", ON if (traits.needs_schema_mapping and items["source"].enabled) else OFF,
+        "source database is the configured source" if traits.needs_schema_mapping
         else f"the configured source is {kind}, not a database")
 
-    mapping = _mapping() if kind == "database" else None
-    if kind == "database":
+    mapping = _mapping() if traits.needs_schema_mapping else None
+    if traits.needs_schema_mapping:
         if mapping is not None:
             add("schema", ON, f"mapped by {_schema_path().name}", ("COREYARD_SCHEMA",))
         elif _schema_path().exists():
@@ -206,10 +209,10 @@ def detect(load: bool = True) -> Capabilities:
                 "unmapped — run `coreyard schema`, or see README 'Map your database'",
                 ("COREYARD_SCHEMA",))
     else:
-        add("schema", OFF, "not used by a tabular source", ("COREYARD_SCHEMA",))
+        add("schema", OFF, f"a {kind} source is its own mapping", ("COREYARD_SCHEMA",))
 
     # -- photographs -------------------------------------------------------------
-    if kind == "database":
+    if not traits.carries_own_photos:
         share = _text("SMB_IMAGES_SHARE")
         add("photos", ON if share else OFF,
             f"SMB share {share}" if share else "no SMB_IMAGES_SHARE configured",
@@ -231,7 +234,7 @@ def detect(load: bool = True) -> Capabilities:
     add("donor_photos", ON if donor else OFF,
         "donor_images query mapped" if donor
         else "no donor_images query in schema.json"
-             if kind == "database" else "not available for a tabular source")
+             if traits.needs_schema_mapping else f"not available for a {kind} source")
 
     # -- where parts go ----------------------------------------------------------
     store, token = _text("SHOPIFY_STORE"), _text("SHOPIFY_ADMIN_TOKEN")
@@ -270,7 +273,7 @@ def detect(load: bool = True) -> Capabilities:
     mapped = mapping is not None and mapping.order_write is not None
     if kind != "database":
         add("order_booking", OFF,
-            "a tabular source cannot book a work order in a source database",
+            f"a {kind} source cannot book a work order in a source database",
             ("YMS_WRITE_ORDERS",))
     elif requested and mapped:
         add("order_booking", ON, "YMS_WRITE_ORDERS=1 and order_write is mapped",
@@ -296,10 +299,11 @@ def detect(load: bool = True) -> Capabilities:
         ("COREYARD_ALERT_COMMAND",))
 
     # -- source-side capabilities that follow from the mapping -------------------
-    delta = bool(mapping is not None and mapping.supports_delta)
+    delta = bool(traits.supports_delta and mapping is not None and mapping.supports_delta)
     add("delta", ON if delta else OFF,
         "modified-at column mapped" if delta
-        else "no delta query in schema.json" if kind == "database"
-             else "a tabular source has no row-level change cursor")
+        else "no delta query in schema.json" if traits.supports_delta
+             else f"a {kind} source has no row-level change cursor")
 
-    return Capabilities(source_kind=kind, source_argument=argument, items=items)
+    return Capabilities(source_kind=kind, source_argument=argument, items=items,
+                        traits=traits)

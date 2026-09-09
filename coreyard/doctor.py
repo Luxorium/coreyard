@@ -150,7 +150,7 @@ def check_environment(*, caps=None) -> list[Result]:
     # Only the SMB photo path shells out to smbclient. Demanding it from an installation
     # that reads its photographs off a local directory is asking for a package that will
     # never be called.
-    if caps.source_kind == "database" and caps.enabled("photos"):
+    if caps.traits and not caps.traits.carries_own_photos and caps.enabled("photos"):
         if shutil.which("smbclient"):
             out.append((OK, "smbclient", "on PATH"))
         else:
@@ -242,7 +242,7 @@ def check_liveness(*, caps=None) -> list[Result]:
     photos = caps.get("photos")
     if photos.state == MISSING:
         out.append((FAIL, "photos", photos.detail))
-    elif photos.enabled and caps.source_kind == "database":
+    elif photos.enabled and caps.traits and not caps.traits.carries_own_photos:
         try:
             from coreyard.yms.images import SmbImageStore
 

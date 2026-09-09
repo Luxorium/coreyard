@@ -9,7 +9,8 @@ sale with no photographs, a sale booked twice. Read it before changing anything 
 `coreyard/`. Each rule says what went wrong when it was learned, because a rule without its
 failure is one somebody deletes as redundant.
 
-[← back to the README](../README.md)
+[← back to the README](../README.md) · adding a yard system is its own document:
+[SOURCES.md](SOURCES.md)
 
 ## Repo layout
 

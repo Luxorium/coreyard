@@ -63,7 +63,7 @@ def gather(deep: bool = False) -> dict:
         f"Source ({caps.source_kind})",
         lambda: str(__import__("coreyard.source", fromlist=["load"])
                     .load(caps.source_spec).ping()).splitlines()[0][:48]))
-    if caps.enabled("photos") and caps.source_kind == "database":
+    if caps.enabled("photos") and caps.traits and not caps.traits.carries_own_photos:
         report["reachability"].append(_probe("Photo share", lambda: (
             __import__("coreyard.yms.images", fromlist=["SmbImageStore"])
             .SmbImageStore().list_inventory_images("0") is not None and "OK")))

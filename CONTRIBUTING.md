@@ -118,6 +118,10 @@ PR so nobody is surprised by a six-hour sync.
   interrupted and repeated installs, documented exit codes, dry-run non-mutation proofs.
 - **A second source system.** The `Source` seam (`coreyard/source/`) exists so a yard system
   other than the one this was built against is an adapter rather than a fork. A CSV or SQLite
-  export already works; a second real database dialect is the interesting work.
+  export already works; a second real transport is the interesting work.
+  [`docs/SOURCES.md`](docs/SOURCES.md) is the contract, and a new adapter's whole test file
+  is a subclass with a factory in it. Read the first section before starting: if the system
+  you have in mind is SQL Server over the same named pipe, it is a `schema.json`, not an
+  adapter.
 - **Rendering and SEO.** `coreyard/transform/` is pure, synthetic-fixture-tested, and where
   the storefront's quality actually comes from.

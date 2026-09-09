@@ -24,10 +24,56 @@ Two ship today:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Protocol, runtime_checkable
 
 from coreyard.models import Part
+
+
+@dataclass(frozen=True)
+class SourceTraits:
+    """What a source can and cannot do, declared by the adapter that knows.
+
+    The alternative — and what CoreYard did until this existed — is for the rest of the
+    program to compare ``COREYARD_SOURCE`` against the string ``"database"`` wherever a
+    decision depends on the answer. That reached about twenty-five comparisons across five
+    modules, every one of them phrased as a binary: database, or not. A yard system that is
+    neither the one this was written against nor a flat file has to be correct in all of
+    them, which is another way of saying it has to be a fork.
+
+    Each field is a question some other module actually asks. Adding a source means
+    answering them once, here, rather than being found by grep.
+    """
+
+    #: What ``COREYARD_SOURCE`` names, and what diagnostics print.
+    kind: str
+
+    #: Does the site supply table and column names in ``schema.json``? A source whose
+    #: columns are already ``Part`` field names is its own mapping.
+    needs_schema_mapping: bool
+
+    #: Does the ``YMS_DB_*`` block name this source's server? Separate from
+    #: :attr:`needs_smb` because a second SQL dialect could want a database block without
+    #: reaching it over a named pipe.
+    needs_database_config: bool
+
+    #: Is it reached over the SMB named pipe? Decides whether the ``SMB_*`` block is
+    #: required configuration or meaningless noise.
+    needs_smb: bool
+
+    #: Does it attach ``part.images`` itself? A source that does has no photo share to
+    #: list, and asking it to list one shells out to `smbclient` for nothing.
+    carries_own_photos: bool
+
+    #: Can it answer "what changed since"? Requires a server clock to anchor a cursor to.
+    supports_delta: bool
+
+    #: Can it resolve interchange fitment — which vehicles a part number fits?
+    supports_fitment: bool
+
+    #: Can a storefront sale be written back to it as a work order?
+    supports_order_booking: bool
 
 
 @runtime_checkable
@@ -55,6 +101,72 @@ class Source(Protocol):
     def ping(self) -> str:
         """A short human-readable liveness line, for ``doctor``."""
 
+    @classmethod
+    def probe(cls, argument: str) -> tuple[str, str, tuple[str, ...]]:
+        """Can this source be reached *in principle*, judged from configuration alone?
+
+        Returns ``(state, detail, keys)`` for :mod:`coreyard.capabilities`: one of its
+        ``ON``/``OFF``/``MISSING`` states, a line explaining the verdict, and the settings
+        that decide it, so a diagnostic can name what to fix.
+
+        Cheap and offline, always. This runs before every command to decide whether the
+        command can run at all, so it may look at configuration and at the filesystem but
+        must not open a connection, authenticate or query. ``ping`` is where reaching the
+        server belongs.
+        """
+
+
+# The one place a yard system is registered. `kind -> (module, class name)`, imported on
+# demand so selecting a CSV source does not import the database transport, and so the
+# traits of a source can be read without constructing one.
+_ADAPTERS: dict[str, tuple[str, str]] = {
+    "database": ("coreyard.source.database", "DatabaseSource"),
+    "tabular": ("coreyard.source.tabular", "TabularSource"),
+}
+
+
+def kinds() -> list[str]:
+    """Every registered source kind, for error messages and diagnostics."""
+    return sorted(_ADAPTERS)
+
+
+def _split(spec: Optional[str] = None) -> tuple[str, str]:
+    """``COREYARD_SOURCE`` as ``(kind, argument)``, defaulting to the database."""
+    from coreyard.config import _get
+
+    text = str(spec if spec is not None else _get("COREYARD_SOURCE", "database")).strip()
+    kind, _, argument = text.partition(":")
+    return (kind.strip().lower() or "database"), argument.strip()
+
+
+def _adapter(kind: str) -> type:
+    try:
+        module_name, class_name = _ADAPTERS[kind]
+    except KeyError:
+        raise ValueError(
+            f"unknown source {kind!r}; expected one of {', '.join(kinds())}"
+        ) from None
+    import importlib
+
+    return getattr(importlib.import_module(module_name), class_name)
+
+
+def probe(spec: Optional[str] = None) -> tuple[str, str, tuple[str, ...]]:
+    """Ask the configured source's adapter whether it is reachable in principle."""
+    kind, argument = _split(spec)
+    return _adapter(kind).probe(argument)
+
+
+def traits(spec: Optional[str] = None) -> SourceTraits:
+    """What the configured source can do, without connecting to it or constructing it.
+
+    Read from the adapter class rather than the instance so this is safe to call from
+    configuration and diagnostics — including when the source is misconfigured, which is
+    exactly when something needs to know whether the `SMB_*` block was supposed to be
+    filled in.
+    """
+    return _adapter(_split(spec)[0]).TRAITS
+
 
 def load(spec: Optional[str] = None) -> Source:
     """The configured source. ``spec`` is ``database`` (default) or ``tabular:<path>``.
@@ -63,20 +175,10 @@ def load(spec: Optional[str] = None) -> Source:
     without the environment, and so an installation that never sets ``COREYARD_SOURCE``
     keeps the database it has always used.
     """
-    from coreyard.config import _get
-
-    spec = str(spec or _get("COREYARD_SOURCE", "database")).strip()
-    kind, _, argument = spec.partition(":")
-    kind = kind.strip().lower() or "database"
-
-    if kind == "database":
-        from coreyard.source.database import DatabaseSource
-        return DatabaseSource()
-    if kind == "tabular":
-        from coreyard.source.tabular import TabularSource
-        if not argument:
-            raise ValueError(
-                "a tabular source needs a path: COREYARD_SOURCE=tabular:/path/parts.csv"
-            )
-        return TabularSource(argument.strip())
-    raise ValueError(f"unknown source {kind!r}; expected 'database' or 'tabular:<path>'")
+    kind, argument = _split(spec)
+    adapter = _adapter(kind)
+    if kind == "tabular" and not argument:
+        raise ValueError(
+            "a tabular source needs a path: COREYARD_SOURCE=tabular:/path/parts.csv"
+        )
+    return adapter(argument) if argument else adapter()

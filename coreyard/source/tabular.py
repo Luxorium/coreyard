@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from coreyard.models import Part
+from coreyard.source import SourceTraits
 
 _INTS = {"year", "quantity", "part_type_code", "mileage", "weight_grams"}
 _DECIMALS = {"price"}
@@ -109,6 +110,37 @@ def row_to_part(row: dict[str, Any], images: Optional[list[str]] = None) -> Opti
 
 class TabularSource:
     """Parts from a CSV file or a SQLite database, with photographs from a directory."""
+
+    TRAITS = SourceTraits(
+        kind="tabular",
+        needs_schema_mapping=False,     # the columns are already Part field names
+        needs_database_config=False,    # there is no server
+        needs_smb=False,                # a local file, and photographs from a local dir
+        carries_own_photos=True,        # part.images is filled in while the rows are read
+        supports_delta=False,           # a file has no clock to anchor a cursor to
+        supports_fitment=False,         # no interchange catalogue travels with an export
+        supports_order_booking=False,   # nothing here to write a work order into
+    )
+
+    @classmethod
+    def probe(cls, argument: str) -> tuple[str, str, tuple[str, ...]]:
+        """Does the file exist? Resolved against the data root, as the source resolves it.
+
+        Checked against the process directory instead, `coreyard doctor` and `coreyard sync`
+        disagreed about whether the file exists depending on which directory they were run
+        from — and the installed `coreyard init --demo` reported its own freshly written
+        example yard as missing.
+        """
+        from coreyard.capabilities import MISSING, ON
+        from coreyard.config import data_path
+
+        keys = ("COREYARD_SOURCE",)
+        if not argument:
+            return MISSING, "COREYARD_SOURCE=tabular: needs a file path", keys
+        path = data_path(argument)
+        if path is not None and not path.is_file():
+            return MISSING, f"{path} does not exist", keys
+        return ON, f"tabular file {argument}", keys
 
     def __init__(self, path: str | Path, *, images_dir: str | Path | None = None,
                  table: str = "parts") -> None:

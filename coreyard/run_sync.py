@@ -124,9 +124,9 @@ def _carried_photos(image_base_url: str | None) -> "Photos | None":
     its own name, and inventing a second spelling here would mark every part changed on the
     first run that used it. Donor photographs are a database capability and stay absent.
     """
-    from coreyard.config import source_is_database
+    from coreyard.config import source_traits
 
-    if source_is_database():
+    if not source_traits().carries_own_photos:
         return None
 
     base = image_base_url.rstrip("/") if image_base_url else None
@@ -294,13 +294,12 @@ def _delta_baseline():
     failure to read the clock must not fail the run — it only means the next delta run has
     no fresher cursor to start from.
     """
-    from coreyard.config import source_is_database
+    from coreyard.config import source_traits
 
-    # A delta cursor is a database capability: it is anchored to the source server's own
-    # clock. A tabular source has no such clock, so there is nothing to fail at — and
-    # reporting the failure told a demo user their missing vendor schema was a problem when
-    # nothing on their path needs one.
-    if not source_is_database():
+    # A delta cursor is anchored to the source server's own clock, so a source without one
+    # has nothing to fail at — and reporting the failure told a demo user their missing
+    # vendor schema was a problem when nothing on their path needs one.
+    if not source_traits().supports_delta:
         return None
     try:
         from coreyard.yms import schema as schema_mod
