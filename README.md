@@ -11,7 +11,7 @@ products, photos, fitment, weights and inventory levels. It reads an existing ya
 system's SQL Server database and its part-photo file share, both over SMB, because the
 database host commonly exposes no SQL TCP port.
 
-It is a backend integration engine, not a storefront: extraction, product rendering, catalog
+It is a self-hosted backend integration engine, not a storefront: extraction, product rendering, catalog
 synchronization, orders, reconciliation, catalog repair and operational automation. Everything
 specific to a site — storefront design, business policy, hosts, credentials, schema, copy —
 is supplied through local configuration, never hardcoded here.
@@ -104,6 +104,14 @@ product, not to a specific variant, which is fine while every part is a single-v
   in `coreyard/yms/orders.py` is the sole source-database write path.
 - No hostnames, IP addresses, or account names appear in this repository; they all come from
   your local `.env`.
+
+## Support
+
+Bugs and feature requests go to [GitHub
+issues](https://github.com/luxorium/coreyard/issues); anything that does not suit a public
+issue can go to **parts@abmotorsla.com**. Security reports have their own route —
+see [SECURITY.md](SECURITY.md). CoreYard is maintained by people who also run a yard, so
+replies are best-effort rather than same-day.
 
 ## Contributing
 

@@ -3,3 +3,6 @@ contact_links:
   - name: Security vulnerability
     url: https://github.com/luxorium/coreyard/security/advisories/new
     about: Please report security issues privately, not as a public issue.
+  - name: Email the maintainers
+    url: mailto:parts@abmotorsla.com
+    about: For anything that does not suit a public issue.

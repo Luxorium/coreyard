@@ -5,8 +5,11 @@
 Please report security issues privately via GitHub's **Report a vulnerability** button under the
 Security tab, rather than opening a public issue.
 
+If you cannot use GitHub, email **parts@abmotorsla.com** instead.
+
 Include what you found, how to reproduce it, and what an attacker could do with it. You'll get an
-acknowledgement within a few days.
+acknowledgement within a few days. CoreYard is maintained by people who also run a yard, so
+please allow for that in the response time — but a report will not be ignored.
 
 ## Scope
 

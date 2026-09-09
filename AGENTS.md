@@ -206,7 +206,7 @@ failed payloads may remain only in the owner-only queue for the bounded retry wi
 - Admin API 2026-07 removed older media mutations; introspect before adding one.
 - Sale booking is idempotent on the stored order reference, not only webhook ID.
   Keep `order_write.line_items_taxable` false when the storefront remits tax; see
-  `CLAUDE.md` before changing order or tax behavior.
+  `docs/ARCHITECTURE.md` before changing order or tax behavior.
 - Reviewed titles reach Shopify only as `STORE_CATALOG_OVERRIDES_FILE`, read by the one
   renderer and keyed by R#. Never put prices in that file or patch a product price directly:
   the next sync must restore the source amount.

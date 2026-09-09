@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import hashlib
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -118,6 +119,23 @@ _FORBIDDEN: dict[str, str] = {
 # reveals only how long the words are.
 _LENGTHS = frozenset({5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 17})
 
+# The maintaining installation's own identity is forbidden above, and that ban would also
+# reach the address people use to report a bug or a vulnerability. A public project nobody
+# can contact is worse than one whose maintainer is named, so exactly one address is allowed,
+# in exactly the files whose purpose is to carry a contact.
+#
+# It is written here in plain text rather than hashed, because the decision to put it in
+# `README.md` and `SECURITY.md` is what publishes it — hashing the same string here would
+# hide it from nobody and only make this exception harder to audit. The address is removed
+# from a line before that line is scanned, so the words inside it remain forbidden
+# everywhere else, including on every other line of these same four files.
+CONTACT = "parts@abmotorsla.com"
+# This file is in the list because it is scanned like every other, and the line above would
+# otherwise fail the rule it is defining. Only that exact address is redacted, so every other
+# forbidden term still trips here — which is what caught the first draft of this exception.
+CONTACT_FILES = {"README.md", "SECURITY.md", "CONTRIBUTING.md",
+                 ".github/ISSUE_TEMPLATE/config.yml", "scripts/check_neutrality.py"}
+
 SKIP_DIRS = {".git", ".venv", "out", "__pycache__", "node_modules", ".github/workflows"}
 SKIP_FILES = {"schema.json", "portal.json", ".env"}
 TEXT_SUFFIXES = {".py", ".md", ".txt", ".json", ".sh", ".yml", ".yaml", ".toml",
@@ -141,6 +159,18 @@ def offending_reason(line: str) -> str | None:
             if reason:
                 return reason
     return None
+
+
+def offending_reason_in(line: str, rel: str) -> str | None:
+    """As :func:`offending_reason`, for a line in the file at ``rel``.
+
+    The only difference is the permitted contact, which is removed from the line before it
+    is scanned and only for the files that are allowed to carry it. Everything else about
+    the rule is unchanged, which is the property ``tests/test_neutrality.py`` pins down.
+    """
+    if rel in CONTACT_FILES:
+        line = re.sub(re.escape(CONTACT), "", line, flags=re.I)
+    return offending_reason(line)
 
 
 def tracked_files() -> list[pathlib.Path] | None:
@@ -196,7 +226,7 @@ def main() -> int:
         except (UnicodeDecodeError, OSError):
             continue
         for lineno, line in enumerate(text.splitlines(), start=1):
-            reason = offending_reason(line)
+            reason = offending_reason_in(line, rel.as_posix())
             if reason:
                 failures.append(f"{rel}:{lineno}: contains {reason}")
 
