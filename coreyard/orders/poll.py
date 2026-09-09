@@ -27,6 +27,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from typing import Iterator, Optional
 
+from coreyard.config import cli_name
 from coreyard.orders.pipeline import (EventQueue, OrderWorker, _order_key,
                                       booking_attempts, drain)
 
@@ -202,5 +203,5 @@ def run(args) -> int:
         if latest and not args.since:
             state.set_cursor(CURSOR_NAME, latest)
             print(f"Cursor advanced to {latest}.")
-    print("Check `bin/coreyard orders status` for any stage that failed.")
+    print(f"Check `{cli_name()} orders status` for any stage that failed.")
     return 0

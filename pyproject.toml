@@ -24,3 +24,10 @@ version = { attr = "coreyard.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["coreyard*"]
+
+# The demo yard and the two config templates ship inside the package, not beside it.
+# `coreyard init --demo` is the advertised way to try CoreYard and "copy the example and fill
+# it in" is the first step of a real setup; an installed wheel that cannot find either can
+# only offer both to someone who also happens to have the checkout.
+[tool.setuptools.package-data]
+coreyard = ["examples/*"]

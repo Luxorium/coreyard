@@ -163,9 +163,9 @@ class Validation(unittest.TestCase):
 class ShippedExample(unittest.TestCase):
     def test_the_bundled_example_validates(self):
         """The file a newcomer copies must pass this project's own validator."""
-        from coreyard.config import REPO_ROOT
+        from coreyard.config import bundled
         from coreyard.validate import Result, check_store
         store.forget()
         result = Result()
-        check_store(str(REPO_ROOT / "store.example.json"), result)
+        check_store(str(bundled("store.example.json")), result)
         self.assertTrue(result.ok, result.errors)

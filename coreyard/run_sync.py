@@ -19,11 +19,11 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NamedTuple, Optional
 
 from coreyard import ops
-from coreyard.config import load_settings, out_dir
+from coreyard.config import DATA_ROOT, bundled, cli_name, load_settings, out_dir
 from coreyard.state import DEFAULT_STATE_DB, SyncState, fingerprints_all
 
 # The channel this pipeline publishes to. Recorded alongside the canonical
@@ -109,6 +109,40 @@ def _photo_view(inventory_entries, vehicle_entries, donors: dict, base: str | No
     return Photos(resolve, stamps)
 
 
+def _carried_photos(image_base_url: str | None) -> "Photos | None":
+    """The photo view for a source that carries its own image lists, or None for the database.
+
+    A tabular source attaches ``part.images`` while it reads its rows — from an ``images``
+    column, or by globbing a local directory named by ``COREYARD_SOURCE_IMAGES``. There is
+    no share to list, so listing one is not merely wasted work: it made `sync` shell out to
+    `smbclient` on an installation that has no file server, no credentials and, in the
+    demo's case, no photographs at all. That was the last thing standing between a clean
+    install and the quickstart on the front page.
+
+    Stamps are the same strings as the references. A local file's size and modification time
+    would be a stronger stamp, but only the SMB manifest can see a photo overwritten under
+    its own name, and inventing a second spelling here would mark every part changed on the
+    first run that used it. Donor photographs are a database capability and stay absent.
+    """
+    from coreyard.config import source_is_database
+
+    if source_is_database():
+        return None
+
+    base = image_base_url.rstrip("/") if image_base_url else None
+
+    def names(part) -> list[str]:
+        return [PurePosixPath(str(name)).name for name in (part.images or [])]
+
+    def resolve(part) -> list[str]:
+        found = names(part)
+        if base:
+            return [f"{base}/{part.image_key()}/{name}" for name in found]
+        return found
+
+    return Photos(resolve, names)
+
+
 def _make_resolver(image_base_url: str | None, scan_images: bool = True) -> Photos:
     """Resolve each part's photos, for both the CSV rows and the change fingerprint.
 
@@ -123,6 +157,10 @@ def _make_resolver(image_base_url: str | None, scan_images: bool = True) -> Phot
     """
     if not scan_images:
         return Photos(lambda part: [], lambda part: [])
+
+    carried = _carried_photos(image_base_url)
+    if carried is not None:
+        return carried
 
     from coreyard.yms.images import SmbImageStore
 
@@ -148,6 +186,10 @@ def _make_part_resolver(image_base_url: str | None) -> Photos:
     order — because these strings land in the stored fingerprint, and a delta run that spelled
     them differently would mark every part it touched as changed.
     """
+    carried = _carried_photos(image_base_url)
+    if carried is not None:
+        return carried
+
     from coreyard.yms.images import SmbImageStore
     from coreyard.yms.inventory import donor_image_keys
 
@@ -252,6 +294,14 @@ def _delta_baseline():
     failure to read the clock must not fail the run — it only means the next delta run has
     no fresher cursor to start from.
     """
+    from coreyard.config import source_is_database
+
+    # A delta cursor is a database capability: it is anchored to the source server's own
+    # clock. A tabular source has no such clock, so there is nothing to fail at — and
+    # reporting the failure told a demo user their missing vendor schema was a problem when
+    # nothing on their path needs one.
+    if not source_is_database():
+        return None
     try:
         from coreyard.yms import schema as schema_mod
 
@@ -550,9 +600,9 @@ def cmd_sync(args) -> int:
         print(
             "No schema mapping yet — CoreYard ships none, because the table and column\n"
             "names belong to your yard system's vendor, not to this project.\n\n"
-            "  cp schema.example.json schema.json\n"
-            "  python -m coreyard.yms.discover_schema   # lists your tables/columns\n\n"
-            "then replace each PLACEHOLDER in schema.json. See README 'Map your database'.",
+            f"  cp {bundled('schema.example.json')} \\\n     {DATA_ROOT / 'schema.json'}\n"
+            f"  {cli_name()} schema                      # lists your tables/columns\n\n"
+            "then replace each PLACEHOLDER. See docs/SETUP.md, 'Map your database'.",
             file=sys.stderr,
         )
         return 2

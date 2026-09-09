@@ -137,6 +137,8 @@ def detect(load: bool = True) -> Capabilities:
     and test paths pass ``load=False`` so the site's real ``.env`` cannot leak into them —
     the same rule the render-path config gates follow.
     """
+    from coreyard.config import data_path
+
     if load:
         from coreyard.config import load_env
 
@@ -154,7 +156,12 @@ def detect(load: bool = True) -> Capabilities:
 
     # -- where parts come from ---------------------------------------------------
     if kind == "tabular":
-        path = Path(argument).expanduser() if argument else None
+        # Against the data root, exactly as the source itself resolves it. Checked against
+        # the process directory instead, `coreyard doctor` and `coreyard sync` disagreed
+        # about whether the file exists depending on which directory they were run from —
+        # and the installed `coreyard init --demo` reported its own freshly written example
+        # yard as missing.
+        path = data_path(argument) if argument else None
         if not argument:
             add("source", MISSING, "COREYARD_SOURCE=tabular: needs a file path",
                 ("COREYARD_SOURCE",))
@@ -212,7 +219,7 @@ def detect(load: bool = True) -> Capabilities:
         if not directory:
             add("photos", OFF, "no COREYARD_SOURCE_IMAGES directory configured",
                 ("COREYARD_SOURCE_IMAGES",))
-        elif not Path(directory).expanduser().is_dir():
+        elif not (data_path(directory) or Path(directory)).is_dir():
             add("photos", MISSING, f"{directory} is not a directory",
                 ("COREYARD_SOURCE_IMAGES",))
         else:

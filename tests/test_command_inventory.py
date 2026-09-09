@@ -143,10 +143,10 @@ class ExampleConfigurationIsGeneric(unittest.TestCase):
     """
 
     def test_the_example_schema_loads(self):
-        from coreyard.config import REPO_ROOT
+        from coreyard.config import bundled
         from coreyard.yms import schema
 
-        mapping = schema.load(REPO_ROOT / "schema.example.json")
+        mapping = schema.load(bundled("schema.example.json"))
         self.assertTrue(mapping.build_query(limit=1))
 
 

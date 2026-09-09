@@ -112,7 +112,13 @@ class TabularSource:
 
     def __init__(self, path: str | Path, *, images_dir: str | Path | None = None,
                  table: str = "parts") -> None:
-        self.path = Path(path).expanduser()
+        # Against the data root, not the process directory: `COREYARD_SOURCE=tabular:
+        # examples/parts.csv` has to mean the same file to a cron job with no `cd` in front
+        # of it as it does to a shell sitting in the installation. This is the same rule
+        # `config.data_path` applies to every other configured path, and the source was the
+        # one that still resolved against wherever the process happened to start.
+        from coreyard.config import data_path
+        self.path = data_path(path) or Path(path).expanduser()
         self.table = table
         if images_dir is None:
             from coreyard.config import _get

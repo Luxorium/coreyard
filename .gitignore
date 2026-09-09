@@ -12,6 +12,13 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
+# Build artifacts. `pip wheel .` and `python -m build` leave these in the tree, and the
+# generated PKG-INFO embeds the README — so an unignored egg-info made the neutrality check
+# fail on a copy of a file that had already passed it.
+build/
+dist/
+*.egg-info/
+
 # Generated output (images, CSVs, schema dumps, state db)
 out/images/
 out/schema/

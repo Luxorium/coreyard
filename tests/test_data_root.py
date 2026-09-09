@@ -143,12 +143,22 @@ class TwoInstallationsOnOneHost(unittest.TestCase):
 
 class CodeAndDataAreSeparate(unittest.TestCase):
     def test_the_launcher_and_bundled_examples_stay_with_the_code(self):
-        """`REPO_ROOT` is not obsolete — it is now only ever the installation."""
-        from coreyard import schedule
-        from coreyard.yms import schema
+        """`REPO_ROOT` is not obsolete — it is now only ever the installation.
 
-        self.assertTrue(str(schema.EXAMPLE_PATH).startswith(str(REPO_ROOT)))
-        self.assertTrue(str(schedule.launcher()).startswith(str(REPO_ROOT)))
+        The bundled files are anchored to the *package* rather than to the checkout, which
+        is the whole reason an installed wheel can find its own example yard and config
+        templates. Anchoring them to the checkout again would pass every test in a clone and
+        fail for every customer who installed the package.
+        """
+        import coreyard
+        from coreyard.config import bundled
+
+        package = Path(coreyard.__file__).resolve().parent
+        for name in ("parts.csv", "schema.example.json", "store.example.json"):
+            path = bundled(name)
+            self.assertTrue(path.is_file(), f"{name} is not shipped with the package")
+            self.assertTrue(str(path).startswith(str(package)),
+                            f"{name} must travel with the code, not with the checkout")
 
     def test_no_module_anchors_a_writable_path_to_the_installation(self):
         """A regression guard with teeth: the sweep that moved these is easy to undo one

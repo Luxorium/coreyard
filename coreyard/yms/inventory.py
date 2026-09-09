@@ -31,7 +31,21 @@ FETCH_PAGE_SIZE = 250
 
 
 def is_configured() -> bool:
-    """True once this installation has supplied its own ``schema.json``."""
+    """True once this installation can read its source.
+
+    For the database that means the site has supplied its own ``schema.json``, because
+    CoreYard ships no vendor schema. A tabular source carries its own mapping — the columns
+    are named after ``Part`` fields — so it needs no ``schema.json`` and never did.
+
+    Asking every source for one is why the quickstart on the front page could not work on a
+    clean install: `init --demo` writes a tabular source, and `sync` then refused with
+    "No schema mapping yet" and told the reader to map a database they had not got. It went
+    unnoticed because every checkout that ran it already had a real `schema.json` beside the
+    code, so the guard passed for the wrong reason. `fetch_parts` has dispatched on the
+    configured source since tabular sources were added; only this guard did not.
+    """
+    if _elsewhere() is not None:
+        return True
     return schema.is_configured()
 
 

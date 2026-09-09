@@ -35,7 +35,7 @@ from datetime import datetime, timedelta, timezone
 
 from coreyard import __version__, capabilities, ops
 from coreyard.capabilities import MISSING, ON
-from coreyard.config import out_dir
+from coreyard.config import cli_name, out_dir
 from coreyard.ops import RUN_HEADER
 from coreyard.state import DEFAULT_STATE_DB
 
@@ -323,7 +323,7 @@ def check_unpublished(client) -> list[Result]:
         return [(OK, "unpublished", "no ACTIVE product is missing its sales channel")]
     return [(FAIL, "unpublished",
              f"{'at least ' if at_least else ''}{count} ACTIVE product(s) are on no sales "
-             f"channel and return 404 — run `bin/coreyard reconcile --apply`")]
+             f"channel and return 404 — run `{cli_name()} reconcile --apply`")]
 
 
 # ----------------------------------------------------------------- liveness --

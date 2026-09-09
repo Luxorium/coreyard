@@ -20,13 +20,38 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
 
-from coreyard.config import DATA_ROOT
+from coreyard.config import DATA_ROOT, bundled, cli_name
 
-DEMO_SOURCE = "tabular:examples/parts.csv"
+# Where the demo yard lands in *this installation*, and what `.env` therefore names. The CSV
+# itself ships inside the package; an installed wheel has no checkout to point at, and a data
+# root that is not the checkout would not find one anyway.
+DEMO_RELATIVE = Path("examples") / "parts.csv"
+DEMO_SOURCE = f"tabular:{DEMO_RELATIVE.as_posix()}"
+
+
+def bundled_demo_csv() -> Path:
+    """The example yard as shipped with the package."""
+    return bundled("parts.csv")
+
+
+def install_demo_source(data_root: Path = DATA_ROOT) -> Path:
+    """Copy the bundled example yard into ``data_root`` and return where it landed.
+
+    Copied rather than referenced in place so the demo behaves like a real source: it sits
+    with the installation's own files, it can be opened and edited to see what a column does,
+    and nothing points into a package directory that an upgrade replaces. An existing file is
+    left alone — someone who edited the example meant to.
+    """
+    target = data_root / DEMO_RELATIVE
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(bundled_demo_csv(), target)
+    return target
 
 # Only the keys a site genuinely has to decide. The rest keep their documented defaults,
 # and `.env.example` remains the full reference — a generated file nobody can read is not
@@ -230,6 +255,8 @@ def run(args) -> int:
               file=sys.stderr)
         return 2
     answers = collect(args, interactive=interactive)
+    if args.demo:
+        install_demo_source(Path(args.env).parent)
     try:
         written = write(answers, Path(args.env), Path(args.store), force=args.force)
     except FileExistsError as exc:
@@ -239,15 +266,19 @@ def run(args) -> int:
     print("Wrote:")
     for path in written:
         print(f"  {path}")
+    cli = cli_name()
     print("\nNext:")
     if str(answers.get("source", "")).startswith("tabular"):
-        print("  bin/coreyard validate                        # check the config")
-        print("  bin/coreyard sync --sink csv --dry-run       # render the example yard")
+        print(f"  {cli} validate                        # check the config")
+        print(f"  {cli} sync --sink csv --dry-run       # render the example yard")
     else:
-        print("  cp schema.example.json schema.json           # then fill it in")
-        print("  bin/coreyard schema                          # introspect and rank tables")
-        print("  bin/coreyard doctor                          # check connectivity")
-        print("  bin/coreyard sync --dry-run                  # a full pass, writing nothing")
+        # The bundled path, not a bare filename: an installed CoreYard has no checkout to
+        # copy from, and the instruction has to work where it is printed.
+        print(f"  cp {bundled('schema.example.json')} \\\n     {DATA_ROOT / 'schema.json'}")
+        print("                                               # then fill in each PLACEHOLDER")
+        print(f"  {cli} schema                          # introspect and rank tables")
+        print(f"  {cli} doctor                          # check connectivity")
+        print(f"  {cli} sync --dry-run                  # a full pass, writing nothing")
     return 0
 
 

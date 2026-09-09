@@ -51,11 +51,23 @@ def parse_every(text: str) -> int:
 
 
 def launcher() -> Path:
-    """The CLI entry point, preferring the generated launcher."""
+    """The CLI entry point a scheduled run should invoke.
+
+    In preference order, with the reason for each: the generated launcher in a checkout,
+    because it pins the virtualenv and `-u` (a block-buffered log is indistinguishable from
+    a dead job to the staleness checks); then a `coreyard` on PATH, which is what an
+    installed package provides; then an interpreter, since `python -m coreyard` is an entry
+    point too. The last step matters — the previous version ended at a virtualenv path
+    inside the checkout, so an installed CoreYard scheduled a command that did not exist.
+    """
     candidate = REPO_ROOT / "bin" / "coreyard"
     if candidate.exists():
         return candidate
-    return REPO_ROOT / ".venv" / "bin" / "python"
+    found = shutil.which("coreyard")
+    if found:
+        return Path(found)
+    venv_python = REPO_ROOT / ".venv" / "bin" / "python"
+    return venv_python if venv_python.exists() else Path(sys.executable)
 
 
 def command_for(task: str) -> str:

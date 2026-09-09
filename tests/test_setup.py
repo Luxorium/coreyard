@@ -140,9 +140,31 @@ class DemoAnswers(unittest.TestCase):
 
     def test_the_bundled_export_named_by_the_demo_exists(self):
         """The one path a newcomer takes first must not be a broken promise."""
-        from coreyard.config import REPO_ROOT
-        relative = setup_wizard.DEMO_SOURCE.split(":", 1)[1]
-        self.assertTrue((REPO_ROOT / relative).is_file())
+        self.assertTrue(setup_wizard.bundled_demo_csv().is_file())
+
+    def test_the_demo_source_names_where_the_demo_is_installed(self):
+        """`.env` says `tabular:examples/parts.csv`; something has to put a file there.
+
+        The two used to be joined only by the launcher's `cd` into the checkout. Installed
+        as a package there is no checkout to cd into, so the demo has to place its own file
+        under the data root the configuration is resolved against.
+        """
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            written = setup_wizard.install_demo_source(root)
+            relative = setup_wizard.DEMO_SOURCE.split(":", 1)[1]
+            self.assertEqual(written, root / relative)
+            self.assertTrue(written.is_file())
+            self.assertEqual(written.read_bytes(),
+                             setup_wizard.bundled_demo_csv().read_bytes())
+
+    def test_installing_the_demo_twice_keeps_the_first_copy(self):
+        """Someone who edited the example to see what a column does meant to."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            written = setup_wizard.install_demo_source(root)
+            written.write_text("edited", encoding="utf-8")
+            self.assertEqual(setup_wizard.install_demo_source(root).read_text(), "edited")
 
     def test_flags_win_over_demo_defaults(self):
         answers = setup_wizard.collect(

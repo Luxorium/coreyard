@@ -24,10 +24,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from coreyard.config import DATA_ROOT, REPO_ROOT, _get, load_env
+from coreyard.config import DATA_ROOT, _get, bundled, cli_name, load_env
 
 SCHEMA_PATH = DATA_ROOT / "schema.json"
-EXAMPLE_PATH = REPO_ROOT / "schema.example.json"
+
+# Named in error messages, never opened. It was a path under the checkout, which resolved to
+# a file inside `site-packages` once CoreYard was installed as a package rather than run from
+# a clone — a path that does not exist, printed as the place to look.
+EXAMPLE_NAME = "schema.example.json"
 
 # Fields the transform layer expects the extract query to alias. Anything absent simply
 # comes back as None and the renderer omits it.
@@ -141,7 +145,7 @@ class OrderWrite:
         if missing:
             raise SchemaError(
                 "schema 'order_write' is incomplete; missing: " + ", ".join(missing) +
-                f". See 'order_write' in {EXAMPLE_PATH.name}."
+                f". See 'order_write' in {EXAMPLE_NAME}."
             )
         raw = data.get("defaults") or {}
         defaults = OrderDefaults(
@@ -236,7 +240,7 @@ class SourceSchema:
             raise SchemaError(
                 "this mapping has no 'order_status' query, so CoreYard cannot tell which "
                 "storefront orders the source system has progressed. Add one (see "
-                f"{EXAMPLE_PATH.name}) or skip order status sync."
+                f"{EXAMPLE_NAME}) or skip order status sync."
             )
         return self.order_status
 
@@ -260,7 +264,7 @@ class SourceSchema:
         if absent:
             raise SchemaError(
                 f"schema 'select' must map these fields: {', '.join(absent)}. "
-                f"See {EXAMPLE_PATH.name}."
+                f"See {EXAMPLE_NAME}."
             )
         if DELTA_SCOPE_FIELD in select:
             # The delta query appends this as a computed column; a mapped field of the same
@@ -463,10 +467,10 @@ def load(path: Path | None = None) -> SourceSchema:
     if not target.exists():
         raise SchemaError(
             f"No schema mapping at {target}.\n"
-            f"This project ships no vendor schema. Create one from {EXAMPLE_PATH.name}:\n"
-            f"    cp {EXAMPLE_PATH.name} {target.name}\n"
+            f"This project ships no vendor schema. Create one from the bundled template:\n"
+            f"    cp {bundled(EXAMPLE_NAME)} \\\n       {target}\n"
             f"then fill in your own table and column names — "
-            f"`python -m coreyard.yms.discover_schema` will list them."
+            f"`{cli_name()} schema` will list them."
         )
     try:
         data = json.loads(target.read_text(encoding="utf-8"))

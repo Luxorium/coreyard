@@ -31,6 +31,28 @@ from coreyard.transform.weights import load as load_weight_rules
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+# Files that ship *inside* the package: the example yard and the two config templates. They
+# live here rather than at the top of the checkout because an installed wheel has no checkout,
+# and "copy the example and fill it in" is the first instruction a new installation follows.
+BUNDLED_DIR = Path(__file__).resolve().parent / "examples"
+
+
+def bundled(name: str) -> Path:
+    """The path to a file shipped with the package."""
+    return BUNDLED_DIR / name
+
+
+def cli_name() -> str:
+    """How to spell the CLI in instructions *this* installation prints.
+
+    A checkout runs `bin/coreyard`; an installed package puts `coreyard` on PATH and has no
+    `bin/` at all. Printing one spelling for both means half of all installations are told to
+    run a command they do not have, at the exact moment they are least able to tell a typo
+    in the instructions from a broken install.
+    """
+    return "bin/coreyard" if (REPO_ROOT / "bin" / "coreyard").exists() else "coreyard"
+
+
 def _data_root() -> Path:
     """Where this installation's own files live: `.env`, config, state, locks, `out/`.
 
@@ -237,47 +259,85 @@ class Settings:
     out_dir: Path
 
 
-def _smb_from_env() -> SmbConfig:
+def _smb_from_env(*, required: bool = True) -> SmbConfig:
     """Build SmbConfig from the environment.
 
     Host, server name, credentials, and share name are deliberately **required** with no
     fallbacks — no site's network details or vendor paths are baked into this repo. Only the
     generic subdirectory names keep defaults.
+
+    ``required`` is lowered only for an installation that reaches no SMB server at all: a
+    tabular source with either no photographs or a local directory of them. Demanding a file
+    server from a yard that exported a CSV is not a safety check, it is a wall in front of
+    the only path that needs no infrastructure.
     """
     return SmbConfig(
-        host=_get("SMB_HOST", required=True),
-        server_name=_get("SMB_SERVER_NAME", required=True),
-        user=_get("SMB_USER", required=True),
-        password=_get("SMB_PASSWORD", required=True),
-        images_share=_get("SMB_IMAGES_SHARE", required=True),
+        host=_get("SMB_HOST", "", required=required),
+        server_name=_get("SMB_SERVER_NAME", "", required=required),
+        user=_get("SMB_USER", "", required=required),
+        password=_get("SMB_PASSWORD", "", required=required),
+        images_share=_get("SMB_IMAGES_SHARE", "", required=required),
         inventory_subdir=_get("SMB_INVENTORY_SUBDIR", "Inventory"),
         vehicle_subdir=_get("SMB_VEHICLE_SUBDIR", "Vehicle"),
     )
 
 
+def source_is_database() -> bool:
+    """Whether this installation's inventory comes from the source database.
+
+    Parsed from ``COREYARD_SOURCE`` here rather than by asking :mod:`coreyard.source`, which
+    imports this module. Only the kind is needed, and the kind is the part before the colon.
+    """
+    spec = str(_get("COREYARD_SOURCE", "database") or "database").strip()
+    return (spec.split(":", 1)[0].strip().lower() or "database") == "database"
+
+
 def load_settings() -> Settings:
     """Assemble Settings from the environment. Everything site-specific comes from ``.env``;
-    a missing key raises rather than silently falling back to someone else's server."""
+    a missing key raises rather than silently falling back to someone else's server.
+
+    The database block is required only when the database is actually the source. A tabular
+    installation has no server to name, and demanding one anyway is what turned the
+    quickstart on the front page into ``Missing required config 'YMS_DB_HOST'`` — the third
+    database assumption on a path a CSV source is documented to support.
+    """
     load_env()
+    needs_db = source_is_database()
     db = DbConfig(
-        host=_get("YMS_DB_HOST", required=True),
+        host=_get("YMS_DB_HOST", "", required=needs_db),
         port=int(_get("YMS_DB_PORT", "1433")),
-        database=_get("YMS_DB_NAME", required=True),
+        database=_get("YMS_DB_NAME", "", required=needs_db),
         user=_get("YMS_DB_USER", ""),
         password=_get("YMS_DB_PASSWORD", ""),  # unused: DB auth is Windows/NTLM via SMB creds
     )
     return Settings(
         db=db,
-        smb=_smb_from_env(),
+        smb=_smb_from_env(required=uses_smb()),
         store=load_store(),
         out_dir=out_dir(),
     )
 
 
+def uses_smb() -> bool:
+    """Whether this installation reaches an SMB server at all.
+
+    SMB is the transport for the source database *and* for the photo share, so either one
+    makes it required. A tabular source whose photographs are a local directory — or absent —
+    reaches no file server, and the image resolver it builds is the local one.
+    """
+    return source_is_database() or bool(_get("SMB_IMAGES_SHARE", ""))
+
+
 def load_smb_config() -> SmbConfig:
-    """SMB-only settings (image work needs no database config present)."""
+    """SMB-only settings (image work needs no database config present).
+
+    Required on the same condition as everywhere else. Unconditionally required, this was
+    the last of four database assumptions standing between a clean install and the
+    quickstart: building an image resolver demanded a file server from an installation with
+    no photographs at all.
+    """
     load_env()
-    return _smb_from_env()
+    return _smb_from_env(required=uses_smb())
 
 
 def load_store() -> StoreProfile:

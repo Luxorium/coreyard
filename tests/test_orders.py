@@ -13,13 +13,14 @@ import json
 import unittest
 from decimal import Decimal
 
+from coreyard.config import bundled
 from coreyard.models import Part
 from coreyard.yms import schema
 from coreyard.yms.orders import (
     MAX, OrderLine, OrderWriteError, SalesOrder, build_batch, from_shopify,
 )
 
-WRITE = schema.load(schema.EXAMPLE_PATH).order_write
+WRITE = schema.load(bundled("schema.example.json")).order_write
 
 ORDER = SalesOrder(
     reference="#1042",
@@ -44,7 +45,8 @@ class ExampleMapping(unittest.TestCase):
         self.assertIn("INSERT", batch())
 
     def test_tax_flags_require_real_json_booleans(self):
-        raw = json.loads(schema.EXAMPLE_PATH.read_text(encoding="utf-8"))["order_write"]
+        raw = json.loads(bundled("schema.example.json")
+                         .read_text(encoding="utf-8"))["order_write"]
         for key in ("line_items_taxable", "recalculate_taxes",
                     "apply_customer_tax_rate"):
             with self.subTest(key=key):

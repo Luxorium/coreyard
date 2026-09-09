@@ -11,6 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from coreyard import source
+from coreyard.config import bundled
 from coreyard.source.tabular import TabularSource, _canonical
 
 HEADER = ("r_number,part_type,part_type_code,make,model,year,price,quantity,"
@@ -163,7 +164,7 @@ class SqliteSource(unittest.TestCase):
 class ShippedExample(unittest.TestCase):
     def test_the_bundled_export_reads(self):
         """The file a newcomer runs first must never be broken."""
-        example = Path(__file__).resolve().parent.parent / "examples" / "parts.csv"
+        example = bundled("parts.csv")
         parts = TabularSource(example).parts()
         self.assertGreaterEqual(len(parts), 5)
         self.assertTrue(all(p.r_number and p.price for p in parts))

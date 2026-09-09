@@ -37,7 +37,7 @@ Each is `on` when configured, `off` when this installation simply does not use i
 | Source | `COREYARD_SOURCE` | Prerequisites | Supported | Not supported | Evidence |
 |---|---|---|---|---|---|
 | Source database over SMB | `database` (default) | `SMB_HOST`, `SMB_USER`, `SMB_PASSWORD`; a mapped `schema.json`; SQL Server reachable on the `\\sql\query` named pipe | Everything below that names `database` | — | Offline: mapping, query building and coercion (`tests/test_inventory.py`). Live behaviour on a customer database: `NOT VERIFIED` |
-| CSV export | `tabular:/path/parts.csv` | A readable file whose columns are named after `Part` fields | Extract, render, CSV and Shopify output, full and scoped sync, reconcile, repair, audit, counts | Database deltas, `coreyard schema`, `coreyard images`, donor photos, database order booking | Offline: `tests/test_source.py`, `tests/test_capabilities.py`. Live: `NOT VERIFIED` |
+| CSV export | `tabular:/path/parts.csv` | A readable file whose columns are named after `Part` fields | Extract, render, CSV and Shopify output, full and scoped sync, reconcile, repair, audit, counts | Database deltas, `coreyard schema`, `coreyard images`, donor photos, database order booking | Offline: `tests/test_source.py`, `tests/test_capabilities.py`, `tests/test_clean_install.py` (the documented quickstart, on a data root with nothing in it). Live: `NOT VERIFIED` |
 | SQLite export | `tabular:/path/parts.sqlite3` | As CSV; rows come from the `parts` table | As CSV | As CSV | As CSV |
 
 A tabular source's "clock" is the file's modification time, which is what `server_now()`
