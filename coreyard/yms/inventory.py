@@ -63,6 +63,13 @@ def photos_required(mapping: Optional[schema.SourceSchema] = None) -> bool:
     """
     if not require_images():
         return False
+    # A source that carries its own mapping applies this policy itself, against the `Part`
+    # it has already built. There is no SQL filter to add and no `images_filter` to demand,
+    # so asking for one would raise on an installation that is configured correctly.
+    from coreyard.config import source_traits
+
+    if not source_traits().needs_schema_mapping:
+        return True
     mapping = mapping or schema.load()
     if not mapping.supports_images_filter:
         raise schema.SchemaError(
@@ -197,6 +204,14 @@ def fetch_parts(limit: Optional[int] = None, images_only: Optional[bool] = None)
     """
     other = _elsewhere()
     if other is not None:
+        # Resolved *before* the hand-off. Below, `images_only=None` picks up this
+        # installation's photo policy a few lines further down — but that code is on the
+        # database path, so a source reached here was handed the raw None and never learned
+        # the policy at all. A yard with STORE_REQUIRE_IMAGES=true and a CSV export
+        # published every part with no photographs, silently, on both the sync and the
+        # reconciliation side.
+        if images_only is None:
+            images_only = photos_required()
         return other.parts(limit=limit, images_only=images_only)
     mapping = schema.load()
     if images_only is None:
@@ -260,6 +275,8 @@ def listable_r_numbers(images_only: Optional[bool] = None) -> set[str]:
     """
     other = _elsewhere()
     if other is not None:
+        if images_only is None:
+            images_only = photos_required()
         return other.listable_r_numbers(images_only=images_only)
     mapping = schema.load()
     if images_only is None:

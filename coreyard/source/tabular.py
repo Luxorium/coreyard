@@ -208,6 +208,15 @@ class TabularSource:
         for part in self._parts():
             if not part.is_listable():
                 continue
+            # Availability, which `Part.is_listable` deliberately does not check: its
+            # docstring says availability "is enforced upstream in the SQL WHERE clause",
+            # and an export has no WHERE clause, so for this source it was enforced nowhere.
+            # A CSV listing a sold part published it as an ACTIVE product that reconciliation
+            # then kept active forever, because the source went on calling it listable.
+            # Absent means unknown, not zero — a two-column export that names no quantity is
+            # a list of parts the yard has, and the database path defaults the same way.
+            if part.quantity is not None and part.quantity <= 0:
+                continue
             if images_only and not part.images:
                 continue
             found.append(part)

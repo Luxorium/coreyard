@@ -137,11 +137,95 @@ class SourceContract:
         self.assertTrue(line.strip(), "ping returned nothing for `doctor` to show")
 
 
-class TabularSourceContract(SourceContract, unittest.TestCase):
+class ListablePolicyContract:
+    """DATA-02: every source applies the *same* documented listable policy.
+
+    A source decides what reaches the storefront at all, so two sources that disagree about
+    one row build two different catalogues from the same yard. Both divergences this pins
+    down were real, and both were found by writing it:
+
+    * `STORE_REQUIRE_IMAGES=true` was ignored by any source that was not the database,
+      because `fetch_parts` defaulted `images_only` from the site's photo policy *after*
+      handing off — so a CSV yard published every part with no photographs.
+    * A part with quantity 0 was published, because `Part.is_listable` checks price and
+      identity but not availability: its docstring says availability is enforced upstream in
+      the SQL WHERE clause, and an export has no WHERE clause.
+
+    Subclass alongside :class:`SourceContract` and implement :meth:`source_from_rows` for any
+    adapter that can be built over arbitrary rows. An adapter that cannot — the database one
+    needs a yard — simply does not mix this in.
+    """
+
+    def source_from_rows(self, rows: "list[dict]"):
+        raise NotImplementedError("build an adapter over these rows, or omit this mixin")
+
+    def listed(self, rows, **kwargs) -> set:
+        return {p.r_number for p in self.source_from_rows(rows).parts(**kwargs)}
+
+    def test_a_positively_priced_available_part_is_listed(self):
+        self.assertEqual(
+            self.listed([{"r_number": "1", "part_type": "Engine", "price": "100"}]), {"1"})
+
+    def test_price_must_be_positive(self):
+        for price in ("0", "0.00", "-5", "", "not a number"):
+            with self.subTest(price=price):
+                self.assertEqual(
+                    self.listed([{"r_number": "1", "part_type": "Engine", "price": price}]),
+                    set(), f"a part priced {price!r} reached the storefront")
+
+    def test_a_part_with_no_identity_is_dropped(self):
+        """R# is the SKU, the handle and the state key. A row without one cannot be managed."""
+        self.assertEqual(
+            self.listed([{"r_number": "", "part_type": "Engine", "price": "100"}]), set())
+
+    def test_a_sold_part_is_not_listed(self):
+        self.assertEqual(
+            self.listed([{"r_number": "1", "part_type": "Engine", "price": "100",
+                          "quantity": "0"}]), set())
+
+    def test_a_missing_quantity_means_unknown_not_zero(self):
+        """A two-column export naming no quantity is a list of parts the yard has."""
+        self.assertEqual(
+            self.listed([{"r_number": "1", "part_type": "Engine", "price": "100"}]), {"1"})
+
+    def test_the_photo_requirement_excludes_unphotographed_parts(self):
+        rows = [{"r_number": "1", "part_type": "Engine", "price": "100"}]
+        self.assertEqual(self.listed(rows, images_only=True), set())
+        self.assertEqual(self.listed(rows, images_only=False), {"1"})
+
+    def test_the_two_views_agree_on_every_edge_case(self):
+        """Whatever the policy decides, `listable_r_numbers` must decide it identically."""
+        rows = [
+            {"r_number": "1", "part_type": "Engine", "price": "100", "quantity": "1"},
+            {"r_number": "2", "part_type": "Door", "price": "0", "quantity": "1"},
+            {"r_number": "3", "part_type": "Hood", "price": "50", "quantity": "0"},
+            {"r_number": "", "part_type": "Wheel", "price": "50", "quantity": "1"},
+        ]
+        source = self.source_from_rows(rows)
+        self.assertEqual(source.listable_r_numbers(),
+                         {p.r_number for p in source.parts()})
+        self.assertEqual(source.listable_r_numbers(), {"1"})
+
+
+class TabularSourceContract(SourceContract, ListablePolicyContract, unittest.TestCase):
     """The bundled example yard, read as a CSV export."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
 
     def source(self):
         return TabularSource(EXAMPLE)
+
+    def source_from_rows(self, rows):
+        columns = sorted({key for row in rows for key in row})
+        path = Path(self.tmp.name) / f"rows-{len(list(Path(self.tmp.name).iterdir()))}.csv"
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=columns)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({column: row.get(column, "") for column in columns})
+        return TabularSource(path)
 
 
 class TabularSourceFromSqlite(SourceContract, unittest.TestCase):

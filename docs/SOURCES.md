@@ -57,6 +57,24 @@ part and what is it" for a part that has just sold, which is exactly when it sto
 listable. An identity it cannot find is simply absent from the result — not an exception, and
 not a blank `Part`.
 
+**The listable policy is one definition, and every source applies all of it.** A part
+reaches the storefront only if it has an identity, a positive price, and available stock —
+and, where the site sets `STORE_REQUIRE_IMAGES`, at least one photograph. `Part.is_listable()`
+enforces the first two for everyone. The other two are the source's job, because the original
+adapter enforces them in its SQL `WHERE` clause and an export has no `WHERE` clause: a source
+that does not apply them itself applies them nowhere. Both halves of that were wrong until
+2026-09-08 — a CSV yard with `STORE_REQUIRE_IMAGES=true` published every part unphotographed,
+and a CSV row with quantity `0` was published as an ACTIVE product that reconciliation then
+kept active forever, because the source went on calling it listable.
+
+Absent is not zero. An export that names no quantity column is a list of parts the yard has,
+and both shipped adapters read it that way.
+
+**`parts` and `listable_r_numbers` must not disagree about any of that either** — see above.
+The `ListablePolicyContract` mixin in `tests/test_source_contract.py` checks the whole policy,
+including the two views agreeing on every edge case; mix it in alongside `SourceContract` and
+implement `source_from_rows`.
+
 **Every part needs an `r_number`.** It is the Shopify SKU, the handle key, the photo stem and
 the state key at once. A part without one cannot be published, retired or looked up again.
 
