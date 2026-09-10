@@ -29,7 +29,7 @@ from coreyard.config import StoreProfile
 from coreyard.models import Part
 from coreyard.transform import seo
 from coreyard.transform.pricing import money_str
-from coreyard.transform.shipping import ShippingGroup
+from coreyard.transform.shipping import ShippingGroup, ShippingPolicyError
 from coreyard.transform.weights import GRAMS_PER_UNIT, Weight
 
 # Shopify's product title maximum. Enforced by the SEO builder; restated here because the
@@ -292,9 +292,25 @@ def resolve_weight(part: Part, store: StoreProfile, product_type: str = "") -> O
     return store.weights.lookup(product_type or None, part.part_type)
 
 
-def resolve_shipping(part: Part, store: StoreProfile,
-                     product_type: str = "") -> Optional[ShippingGroup]:
-    """Which shipping class this part falls in, or None if the site configured none."""
+def resolve_shipping(part: Part, store: StoreProfile, product_type: str = "",
+                     override: str = "") -> Optional[ShippingGroup]:
+    """Which shipping class this part falls in, or None if the site configured none.
+
+    A reviewed per-part ``ship`` override wins over the part-type table, because it was a
+    decision somebody made about this exact part and the table is an estimate about its
+    whole type. An override naming a group the policy does not define raises rather than
+    falling back: falling back would publish the part at its part type's rate, which is the
+    very thing the override exists to prevent, and it would do it silently.
+    """
+    if override:
+        group = store.shipping.by_id(override)
+        if group is None:
+            known = ", ".join(sorted(g.id for g in store.shipping.groups)) or "none"
+            raise ShippingPolicyError(
+                f"R#{part.r_number} overrides shipping to group {override!r}, which the "
+                f"shipping policy does not define. Known groups: {known}."
+            )
+        return group
     return store.shipping.classify(product_type or None, part.part_type)
 
 
@@ -320,7 +336,7 @@ def render(
     # Classified here, not by a later pass over the catalogue: a product that is live and
     # sellable before anything has said how it ships is a product that can be bought with
     # the wrong shipping attached to it.
-    shipping = resolve_shipping(part, store, product_type)
+    shipping = resolve_shipping(part, store, product_type, override.ship)
     tags = list(seo.build_tags(part, store))
     if shipping:
         tags.append(shipping.tag)
