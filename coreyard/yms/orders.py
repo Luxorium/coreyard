@@ -400,6 +400,24 @@ def create(order: SalesOrder, *, dry_run: bool = False) -> OrderResult:
 
 
 # ------------------------------------------------------- Shopify payload -> order ---
+
+# Shopify's ``source_name`` for a sale rung up in person rather than on the storefront: the
+# POS app, and the "quick sale" tile that a phone-as-card-terminal tap comes through as. The
+# older POS app reported the device it ran on instead, which is why those two are here too.
+IN_STORE_SOURCES = frozenset({"pos", "quick_sale", "iphone", "android"})
+
+# What to call a walk-in on the work order. A counter sale carries no shipping address and
+# usually no customer record, so :func:`from_shopify`'s ``who`` has nothing to return and the
+# name column lands empty — which reads at the counter as a work order belonging to nobody
+# rather than as a sale already paid for, waiting on somebody to go pull the part.
+IN_STORE_CUSTOMER = "In-Store Shopify Customer"
+
+
+def is_in_store(payload: dict) -> bool:
+    """True when the sale was rung up in person rather than on the storefront."""
+    return str(payload.get("source_name") or "").strip().lower() in IN_STORE_SOURCES
+
+
 def from_shopify(payload: dict, parts: dict) -> tuple[SalesOrder, list[str]]:
     """Map a Shopify order webhook payload onto a :class:`SalesOrder`.
 
@@ -414,10 +432,14 @@ def from_shopify(payload: dict, parts: dict) -> tuple[SalesOrder, list[str]]:
     email = payload.get("email") or customer.get("email") or ""
     phone = payload.get("phone") or customer.get("phone") or ""
 
+    in_store = is_in_store(payload)
+
     def who(addr: dict) -> str:
         name = " ".join(v for v in (addr.get("first_name") or customer.get("first_name"),
                                     addr.get("last_name") or customer.get("last_name")) if v)
-        return name.strip() or email
+        # A named walk-in keeps their name; the label is only for the usual counter sale
+        # that has no name to keep.
+        return name.strip() or email or (IN_STORE_CUSTOMER if in_store else "")
 
     lines: list[OrderLine] = []
     skipped: list[str] = []
@@ -449,6 +471,7 @@ def from_shopify(payload: dict, parts: dict) -> tuple[SalesOrder, list[str]]:
     # The buyer's own note is the part somebody actually needs to read ("leave at side door"),
     # so it goes first and the order reference follows it.
     buyer_note = (payload.get("note") or "").strip()
+    origin = f"Shopify {reference}" + (" in-store" if in_store else "")
     order = SalesOrder(
         reference=reference,
         lines=lines,
@@ -472,7 +495,7 @@ def from_shopify(payload: dict, parts: dict) -> tuple[SalesOrder, list[str]]:
         bill_email=email,
         ship_via=(shipping_lines[0].get("title") or "") if shipping_lines else "",
         freight=freight,
-        note=f"{buyer_note} [Shopify {reference}]" if buyer_note else f"Shopify {reference}",
+        note=f"{buyer_note} [{origin}]" if buyer_note else origin,
     )
     return order, skipped
 

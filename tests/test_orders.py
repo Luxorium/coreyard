@@ -233,6 +233,54 @@ class FromShopify(unittest.TestCase):
         self.assertEqual(order.lines, [])
         self.assertEqual(len(skipped), 3)
 
+    def test_a_storefront_order_is_not_labelled_in_store(self):
+        self.assertEqual(self.order.note, "Shopify #1042")
+
+
+class InStoreSale(unittest.TestCase):
+    """A counter sale: paid on the phone, no address, nobody's name on the order."""
+
+    PAYLOAD = {
+        "name": "#1016",
+        "source_name": "quick_sale",
+        "line_items": [{"sku": "51", "title": "2015 Ford Mustang Air Cleaner Box",
+                        "quantity": 1, "price": "50.00"}],
+    }
+    PARTS = {"51": Part(r_number="51", part_type="AIR CLEANER",
+                        interchange_number="319-06446", price=Decimal("50.00"))}
+
+    def order(self, **overrides):
+        return from_shopify({**self.PAYLOAD, **overrides}, self.PARTS)[0]
+
+    def test_a_walk_in_with_no_name_is_labelled_rather_than_left_blank(self):
+        """An empty name column reads as a work order nobody owns."""
+        order = self.order()
+        self.assertEqual(order.ship_name, "In-Store Shopify Customer")
+        self.assertEqual(order.bill_name, "In-Store Shopify Customer")
+
+    def test_the_note_records_that_the_sale_was_rung_up_in_person(self):
+        self.assertEqual(self.order().note, "Shopify #1016 in-store")
+
+    def test_a_named_walk_in_keeps_their_own_name(self):
+        """The label stands in for a missing name; it does not overwrite a real one."""
+        order = self.order(customer={"first_name": "Dana", "last_name": "Ruiz"})
+        self.assertEqual(order.ship_name, "Dana Ruiz")
+        self.assertEqual(order.note, "Shopify #1016 in-store")
+
+    def test_the_buyers_own_note_still_comes_first(self):
+        order = self.order(note="hold at counter")
+        self.assertEqual(order.note, "hold at counter [Shopify #1016 in-store]")
+
+    def test_every_point_of_sale_source_counts_as_in_store(self):
+        for source in ("pos", "quick_sale", "iphone", "android", "QUICK_SALE"):
+            with self.subTest(source=source):
+                self.assertEqual(self.order(source_name=source).ship_name,
+                                 "In-Store Shopify Customer")
+
+    def test_a_web_order_with_no_address_is_still_not_a_walk_in(self):
+        """Guessing "in-store" from a missing address would mislabel a real shipment."""
+        self.assertEqual(self.order(source_name="web").ship_name, "")
+
 
 if __name__ == "__main__":
     unittest.main()
