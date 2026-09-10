@@ -287,6 +287,22 @@ def detect(load: bool = True) -> Capabilities:
             "off (read-only); enable with --write-orders or YMS_WRITE_ORDERS=1",
             ("YMS_WRITE_ORDERS",))
 
+    # Promoting a booked order into an invoice is a separate capability, and deliberately
+    # not gated on YMS_WRITE_ORDERS: a site can book orders for months and still invoice by
+    # hand. Mapping `invoice_write` is the whole opt-in, because supplying that SQL is a
+    # decision somebody makes once, on purpose.
+    invoiceable = mapping is not None and mapping.invoice_write is not None
+    if kind != "database":
+        add("order_invoicing", OFF,
+            f"a {kind} source cannot raise an invoice in a source database", ())
+    elif invoiceable:
+        add("order_invoicing", ON,
+            "invoice_write is mapped; `orders invoice --apply` promotes shipped orders", ())
+    else:
+        add("order_invoicing", OFF,
+            "off; schema.json has no 'invoice_write' section, so invoicing stays manual",
+            ())
+
     # -- telling somebody ---------------------------------------------------------
     # Deliberately not `missing` when unset. Alerting is opt-in, and a site whose operator
     # watches the pipeline another way has not failed to configure anything. It is still

@@ -1,6 +1,7 @@
 """Write a sales order back into the source database.
 
-This is the **only** module in CoreYard that writes to the yard system, and it exists
+This is one of the two modules in CoreYard that write to the yard system — the other is
+:mod:`coreyard.yms.invoices`, which promotes what this books — and it exists
 because a storefront sale has to become a real order in the system of record or the yard
 is running two sets of books. Everything else in ``coreyard.yms`` is SELECT-only and must
 stay that way.
@@ -414,8 +415,15 @@ IN_STORE_CUSTOMER = "In-Store Shopify Customer"
 
 
 def is_in_store(payload: dict) -> bool:
-    """True when the sale was rung up in person rather than on the storefront."""
-    return str(payload.get("source_name") or "").strip().lower() in IN_STORE_SOURCES
+    """True when the sale was rung up in person rather than on the storefront.
+
+    Accepts either spelling of the field, because the same value reaches us two ways: the
+    REST order payload calls it ``source_name`` and GraphQL calls it ``sourceName``.
+    """
+    source = payload.get("source_name")
+    if source is None:
+        source = payload.get("sourceName")
+    return str(source or "").strip().lower() in IN_STORE_SOURCES
 
 
 def from_shopify(payload: dict, parts: dict) -> tuple[SalesOrder, list[str]]:

@@ -95,6 +95,7 @@ SUPPORT: dict[str, tuple[str, tuple[str, ...], str]] = {
     "orders status": (READS, (), ""),
     "orders poll": (SOURCE, ("shopify",), "--write-orders"),
     "orders sync-status": (STORE, ("shopify",), "--apply"),
+    "orders invoice": (SOURCE, ("shopify",), "--apply"),
     "alert": (LOCAL, (), ""),
     "images": (LOCAL, ("database", "photos"), "--delete --apply"),
     "part-types": (READS, ("source",), ""),
@@ -131,7 +132,8 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("audit", "coreyard.audit.cli",
      "read-only listing-quality report"),
     ("orders", "coreyard.webhook",
-     "orders: serve / poll / register / retry / replay / status / sync-status"),
+     "orders: serve / poll / register / retry / replay / status / sync-status / "
+     "invoice"),
     ("images", "coreyard.yms.images",
      "list or fetch one part's photos from the share"),
     ("part-types", "coreyard.yms.part_types",

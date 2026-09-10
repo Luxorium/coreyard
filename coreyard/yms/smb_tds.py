@@ -192,10 +192,10 @@ class SmbTds(tds.MSSQL):
 
         Retried *here and only here*. Establishing the connection is the one step that can
         be repeated with no consequence, because nothing has been sent yet. A pipe that
-        breaks mid-statement is not retried at any layer above this: the single write path
-        (``yms/orders.py``) is a money transaction, and re-running a batch whose outcome is
-        unknown could book a work order twice. It already handles that its own way, by
-        making the write idempotent at the source.
+        breaks mid-statement is not retried at any layer above this: the write paths
+        (``yms/orders.py``, ``yms/invoices.py``) are money transactions, and re-running a
+        batch whose outcome is unknown could book a work order — or raise an invoice —
+        twice. Each handles that its own way, by making the write idempotent at the source.
         """
         attempts = _positive_int("COREYARD_SMB_CONNECT_ATTEMPTS", DEFAULT_CONNECT_ATTEMPTS)
         backoff = _positive_float("COREYARD_SMB_CONNECT_BACKOFF", DEFAULT_CONNECT_BACKOFF)

@@ -351,6 +351,12 @@ def _sync_status(args) -> int:
     return run(args)
 
 
+def _invoice(args) -> int:
+    from coreyard.orders.promote import run
+
+    return run(args)
+
+
 def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """Populate a parser with the order transports and their flags.
 
@@ -445,6 +451,16 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     y.add_argument("--apply", action="store_true",
                    help="write the tags, note and any fulfillment (default: plan)")
     y.set_defaults(func=_sync_status)
+
+    # The opposite direction to sync-status: that one tells the storefront what the yard
+    # did, this one lets the storefront's own shipping close the work order out.
+    v = sub.add_parser("invoice",
+                       help="invoice work orders whose parts the storefront has shipped")
+    v.add_argument("--apply", action="store_true",
+                   help="write the invoices (default: plan)")
+    v.add_argument("--verbose", action="store_true",
+                   help="also say why each booked order was left alone")
+    v.set_defaults(func=_invoice)
     return ap
 
 

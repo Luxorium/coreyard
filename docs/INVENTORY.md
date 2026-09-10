@@ -17,7 +17,7 @@ run without. `coreyard doctor` reports which of them this installation has. A bl
 means the command works on any supported installation.
 
 
-CoreYard 0.1.0 — 43 commands.
+CoreYard 0.1.0 — 44 commands.
 
 | Command | What it does | Effect | Unlocked by | Needs |
 |---|---|---|---|---|
@@ -43,7 +43,7 @@ CoreYard 0.1.0 — 43 commands.
 | `coreyard repair fingerprints` | record the current render as the sync baseline (no Shopify writes) — only when the store is already correct | local files | `--apply` | source |
 | `coreyard audit` | read-only listing-quality report | read-only |  | shopify |
 | `coreyard audit catalog` | listing-quality report | read-only |  | shopify |
-| `coreyard orders` | orders: serve / poll / register / retry / replay / status / sync-status | read-only |  |  |
+| `coreyard orders` | orders: serve / poll / register / retry / replay / status / sync-status / invoice | read-only |  |  |
 | `coreyard orders serve` | run the receiver | source database | `--write-orders` | orders |
 | `coreyard orders register` | subscribe the store to order webhooks | Shopify |  | orders, shopify |
 | `coreyard orders list` | show the store's webhook subscriptions | read-only |  | shopify |
@@ -53,6 +53,7 @@ CoreYard 0.1.0 — 43 commands.
 | `coreyard orders status` | recent deliveries | read-only |  |  |
 | `coreyard orders poll` | pull new orders instead of receiving webhooks | source database | `--write-orders` | shopify |
 | `coreyard orders sync-status` | mark Shopify orders the source system has progressed | Shopify | `--apply` | shopify |
+| `coreyard orders invoice` | invoice work orders whose parts the storefront has shipped | source database | `--apply` | shopify |
 | `coreyard images` | list or fetch one part's photos from the share | local files | `--delete --apply` | database, photos |
 | `coreyard part-types` | every part type the yard can inventory, and where its wording runs out | read-only |  | source |
 | `coreyard schema` | introspect the source database and rank likely tables | read-only |  | database |
@@ -95,6 +96,7 @@ CoreYard 0.1.0 — 43 commands.
 - **`coreyard orders status`** — `--limit`
 - **`coreyard orders poll`** — `--check` `--include-unpaid` `--limit` `--no-retire` `--no-write-orders` `--since` `--write-orders`
 - **`coreyard orders sync-status`** — `--apply`
+- **`coreyard orders invoice`** — `--apply` `--verbose`
 - **`coreyard images`** — `--apply` `--delete` `--dest` `--fetch`
 - **`coreyard part-types`** — `--catalogue` `--gaps` `--out` `--parts`
 - **`coreyard schema`** — _(no options)_

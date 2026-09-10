@@ -8,7 +8,8 @@ Auth uses the SMB credentials; no separate SQL login exists on the installed sys
 
 Everything here issues SELECT only, and ``query`` must not be reused for a write: impacket
 reports server errors as reply tokens rather than raising, so a failed statement is
-indistinguishable from one that returned no rows. The single write path, ``yms/orders.py``,
+indistinguishable from one that returned no rows. The write paths, ``yms/orders.py`` and
+``yms/invoices.py``,
 carries its own strict executor for that reason.
 """
 

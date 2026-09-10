@@ -170,6 +170,79 @@ class OrderWrite:
 
 
 @dataclass(frozen=True)
+class InvoiceDefaults:
+    """Which drawer, employee and tender a promoted storefront invoice is written under."""
+
+    store: int = 1
+    yard: int = 1
+    employee: int = 0
+    drawer: int = 1
+    # The yard system's own id for the tender the storefront collected with. Zero means the
+    # site never named one, which :meth:`InvoiceWrite.from_dict` refuses: an invoice booked
+    # under the wrong tender is a reconciliation problem somebody finds at month end.
+    payment_type: int = 0
+
+
+@dataclass(frozen=True)
+class InvoiceWrite:
+    """SQL for promoting a work order the storefront already collected on into an invoice.
+
+    Optional and absent by default, like :class:`OrderWrite`, and separate from it because
+    the two answer different questions: that one turns a sale into a pullable order, this
+    one closes that order out once the part has actually gone. A site can book orders
+    without ever letting CoreYard invoice.
+
+    Every fragment is a promotion of rows that already exist — the amounts come from the
+    work order, never recomputed from the storefront — so the only values these templates
+    interpolate are ids the writer allocated and the carrier's tracking number.
+    """
+
+    defaults: InvoiceDefaults
+
+    order_lookup: str               # sets @order_id from @order_number, under lock
+    duplicate_check: str            # sets @existing from the work order's invoices
+    line_count: str                 # sets @li_count: the lines still to invoice
+    counter_invoice_id: str         # each: UPDATE ... OUTPUT INSERTED.<col> INTO @out
+    counter_invoice_number: str
+    counter_line_block: str         # allocates @li_count ids at once, returns the last
+    exists_invoice_id: str          # each: a SELECT the writer wraps in IF EXISTS (...)
+    exists_invoice_number: str
+    header_insert: str
+    lines_insert: str
+    order_close: str                # the work order is finished once it is invoiced
+    lines_close: str
+
+    _REQUIRED = ("order_lookup", "duplicate_check", "line_count", "counter_invoice_id",
+                 "counter_invoice_number", "counter_line_block", "exists_invoice_id",
+                 "exists_invoice_number", "header_insert", "lines_insert", "order_close",
+                 "lines_close")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "InvoiceWrite":
+        missing = [k for k in cls._REQUIRED if not (data.get(k) or "").strip()]
+        if missing:
+            raise SchemaError(
+                "schema 'invoice_write' is incomplete; missing: " + ", ".join(missing) +
+                f". See 'invoice_write' in {EXAMPLE_NAME}."
+            )
+        raw = data.get("defaults") or {}
+        defaults = InvoiceDefaults(
+            store=int(raw.get("store", 1)),
+            yard=int(raw.get("yard", 1)),
+            employee=int(raw.get("employee", 0)),
+            drawer=int(raw.get("drawer", 1)),
+            payment_type=int(raw.get("payment_type", 0)),
+        )
+        if defaults.payment_type < 1:
+            raise SchemaError(
+                "schema 'invoice_write.defaults.payment_type' is required: it names the "
+                "tender the storefront collected with, and an invoice booked under the "
+                "wrong one is only found when the books are reconciled."
+            )
+        return cls(defaults=defaults, **{k: data[k].strip() for k in cls._REQUIRED})
+
+
+@dataclass(frozen=True)
 class SourceSchema:
     """One installation's view of its own database."""
 
@@ -181,6 +254,8 @@ class SourceSchema:
     interchange_applications: str = ""   # {part_type_code} {interchange_code} placeholders
     interchange_makes: str = ""
     order_write: "OrderWrite | None" = None   # None => this site cannot write orders
+    # None => this site books orders but never promotes them; invoicing stays at the counter.
+    invoice_write: "InvoiceWrite | None" = None
 
     # --- optional delta (incremental catch-up) support ----------------------------------
     # A SQL expression for "when was this row last touched". Supplying it lets a run ask
@@ -275,6 +350,7 @@ class SourceSchema:
                 f"the delta query computes that column itself."
             )
         write = data.get("order_write") or None
+        invoice = data.get("invoice_write") or None
         return cls(
             select=dict(select),
             source=data["source"].strip(),
@@ -291,6 +367,7 @@ class SourceSchema:
             vehicle_details=(data.get("vehicle_details") or "").strip(),
             donor_images=(data.get("donor_images") or "").strip(),
             order_write=OrderWrite.from_dict(write) if write else None,
+            invoice_write=InvoiceWrite.from_dict(invoice) if invoice else None,
         )
 
     def build_lookup_query(self, r_numbers: list[str], with_scope: bool = False,
