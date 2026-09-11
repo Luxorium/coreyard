@@ -1,7 +1,8 @@
 """Write a sales order back into the source database.
 
-This is one of the two modules in CoreYard that write to the yard system — the other is
-:mod:`coreyard.yms.invoices`, which promotes what this books — and it exists
+This is one of the three modules in CoreYard that write to the yard system — the others are
+:mod:`coreyard.yms.invoices`, which promotes what this books, and
+:mod:`coreyard.yms.backlinks`, which puts the storefront address on the part — and it exists
 because a storefront sale has to become a real order in the system of record or the yard
 is running two sets of books. Everything else in ``coreyard.yms`` is SELECT-only and must
 stay that way.

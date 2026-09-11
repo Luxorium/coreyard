@@ -17,7 +17,7 @@ run without. `coreyard doctor` reports which of them this installation has. A bl
 means the command works on any supported installation.
 
 
-CoreYard 0.1.0 — 44 commands.
+CoreYard 0.1.0 — 45 commands.
 
 | Command | What it does | Effect | Unlocked by | Needs |
 |---|---|---|---|---|
@@ -32,6 +32,7 @@ CoreYard 0.1.0 — 44 commands.
 | `coreyard sync photos` | media only: parts whose photo set moved on the share | Shopify |  | source, photos |
 | `coreyard sync catalog` | copy only: parts whose rendered text, tags, weight or metafields moved | Shopify |  | source |
 | `coreyard reconcile` | compare the yard with the live store and close the safe differences | Shopify | `--apply` | source, shopify |
+| `coreyard links` | write each published part's storefront address back into the yard record | source database | `--apply` | source, shopify |
 | `coreyard repair` | rewrite catalog output an older renderer produced | read-only |  | shopify |
 | `coreyard repair titles` | repair titles | Shopify | `--apply` | source, shopify |
 | `coreyard repair tags` | repair tags | Shopify | `--apply` | source, shopify |
@@ -78,6 +79,7 @@ CoreYard 0.1.0 — 44 commands.
 - **`coreyard sync photos`** — `--check` `--deep` `--delta` `--dry-run` `--force-retire` `--image-base-url` `--limit` `--max-retire-fraction` `--no-image-scan` `--out` `--r-number` `--reconcile` `--retire-only` `--sink` `--status`
 - **`coreyard sync catalog`** — `--check` `--deep` `--delta` `--dry-run` `--force-retire` `--image-base-url` `--limit` `--max-retire-fraction` `--no-image-scan` `--out` `--r-number` `--reconcile` `--retire-only` `--sink` `--status`
 - **`coreyard reconcile`** — `--activate` `--apply` `--dry-run` `--force-retire` `--max-retire-fraction` `--no-retire` `--repair-state`
+- **`coreyard links`** — `--apply` `--limit` `--r-number` `--show-sql`
 - **`coreyard repair titles`** — `--apply` `--dry-run` `--limit` `--show` `--status` `--workers`
 - **`coreyard repair tags`** — `--apply` `--dry-run` `--limit` `--show` `--status` `--workers`
 - **`coreyard repair seo`** — `--apply` `--dry-run` `--limit` `--show` `--status` `--workers`

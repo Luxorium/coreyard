@@ -28,7 +28,7 @@ Each is `on` when configured, `off` when this installation simply does not use i
 | `shopify` | `SHOPIFY_STORE` **and** `SHOPIFY_ADMIN_TOKEN` | The Admin API sink, reconcile, repair, audit, counts, bulk, order lifecycle |
 | `publications` | `STORE_PUBLICATIONS` names at least one sales channel | Publication; without it a new product is ACTIVE on no channel and returns 404 |
 | `orders` | `SHOPIFY_WEBHOOK_SECRET` or `SHOPIFY_CLIENT_SECRET` | Webhook receipt only — polling deliberately needs neither |
-| `order_booking` | `YMS_WRITE_ORDERS=1` **and** a complete `order_write` mapping | Booking a sale as a work order — one of the two write paths into the source database |
+| `order_booking` | `YMS_WRITE_ORDERS=1` **and** a complete `order_write` mapping | Booking a sale as a work order — one of the three write paths into the source database |
 | `order_invoicing` | A complete `invoice_write` mapping | Promoting a shipped work order into an invoice; deliberately not gated on `YMS_WRITE_ORDERS`, because a site can book orders and still invoice by hand |
 | `delta` | A modified-at column is mapped | `sync delta` |
 | `alerting` | `COREYARD_ALERT_COMMAND` names a notifier | `coreyard alert` delivery; without it alerts are evaluated and printed but nobody is told |
@@ -104,9 +104,10 @@ receive orders without booking them, and can book without letting CoreYard fulfi
 |---|---|---|---|---|
 | Webhook receipt | `orders` | `SHOPIFY_WEBHOOK_SECRET` or `SHOPIFY_CLIENT_SECRET`; an inbound HTTPS route | Raw-body HMAC verified in constant time; payloads are never logged | Offline: `tests/test_webhook.py`. Deployment: `NOT VERIFIED` (SEC-02) |
 | Polling | — (needs `shopify` only) | Admin API credentials | Latency includes the configured interval; deliberately needs no webhook secret | Offline: `tests/test_orders_poll.py` |
-| Work-order booking | `order_booking` | `database` source, a complete `order_write` mapping, **and** `YMS_WRITE_ORDERS=1` or `--write-orders` | One of two write paths into the source database; one transaction, `SET XACT_ABORT ON`, no `DELETE` | Offline: `tests/test_orders.py`. Actual SQL behaviour on a disposable mapped database: `NOT VERIFIED` (ORD-02) |
+| Work-order booking | `order_booking` | `database` source, a complete `order_write` mapping, **and** `YMS_WRITE_ORDERS=1` or `--write-orders` | One of three write paths into the source database; one transaction, `SET XACT_ABORT ON`, no `DELETE` | Offline: `tests/test_orders.py`. Actual SQL behaviour on a disposable mapped database: `NOT VERIFIED` (ORD-02) |
 | Invoice promotion | `order_invoicing` | `database` source, a complete `invoice_write` mapping; `--apply` (the default is a plan) | Promotes a work order the storefront has shipped; amounts are `SELECT`ed from the work order, never recomputed; touches no inventory, because booking already did | Offline: `tests/test_invoices.py`. Compiled against the live schema under `SET NOEXEC ON`. Actual SQL behaviour when executed: `NOT VERIFIED` (ORD-03) |
 | Lifecycle updates | — (needs `shopify`) | `STORE_ORDER_POLICY_FILE` to do more than tag and note | Fulfilment is created only where site policy says nothing else will close the order | Offline: `tests/test_order_lifecycle.py` |
+| Storefront backlinks | — (needs `source`, `shopify`) | `database` source, a complete `backlink_write` mapping; `--apply` (the default is a plan) | One of three write paths into the source database, and the only one that writes a display field rather than a document. One column, one set-based statement per batch; both fragments must restrict themselves to rows holding nothing or an address CoreYard wrote, so wording somebody typed is never overwritten. Expect a burst on any outbound inventory feed the application logs row changes for | Offline: `tests/test_backlinks.py`. Executed against a live mapped database: 27,204 parts stamped, 1 hand-written description correctly skipped |
 
 A tabular source cannot book a work order: there is no database to write to. The capability
 reports `off` with that reason, and `--write-orders` on such an installation is a

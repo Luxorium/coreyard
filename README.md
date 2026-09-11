@@ -92,7 +92,7 @@ product, not to a specific variant, which is fine while every part is a single-v
 | | |
 |---|---|
 | [Setup](docs/SETUP.md) | Install, database access, schema mapping, storefront policy, Shopify token |
-| [Operations](docs/OPERATIONS.md) | The daily loop, sync modes, reconcile and repair, orders, scheduling |
+| [Operations](docs/OPERATIONS.md) | The daily loop, sync modes, reconcile and repair, storefront links, orders, scheduling |
 | [Architecture](docs/ARCHITECTURE.md) | Repo layout, the canonical rendering, data-model mapping |
 | [Adding a yard system](docs/SOURCES.md) | The source contract: what an adapter must do, and what it may decline |
 | [Capability matrix](docs/CAPABILITY_MATRIX.md) | What is supported per source and feature, with limitations |

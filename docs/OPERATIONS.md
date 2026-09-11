@@ -156,6 +156,42 @@ bin/coreyard audit catalog                   # missing SKU, no photos, zero weig
 bin/coreyard audit catalog --show 20 --json out/audit.json
 ```
 
+### Finding the listing from the part
+
+Everything above runs from the storefront's side. `links` runs the other way: it writes each
+published part's storefront address back onto the part in the yard system, so whoever has the
+record open — the counter, the phones — can reach the listing without searching the store for
+a title they would have to guess.
+
+```bash
+bin/coreyard links                           # plan only
+bin/coreyard links --apply                   # write the addresses into the yard
+bin/coreyard links --apply --limit 25        # a cautious first pass
+bin/coreyard links --apply --r-number 44004  # one part
+bin/coreyard links --apply --show-sql        # print the batches instead of running them
+```
+
+It is a reconciliation, so re-running is how it stays true: newly listed parts are stamped,
+addresses already right are left alone, and a part whose listing has gone has its address
+cleared — nobody is sent to a page that 404s. Only a product a shopper can actually open
+earns an address; the store is asked, rather than the address being assumed from the handle.
+
+Two things it will not do. It will not overwrite a description somebody at the yard typed —
+those rows are reported as `skipped` and left exactly as written — and what it writes never
+reaches a shopper: the renderer drops a bare address on the way back out, so no listing is
+republished to say nothing new.
+
+Which field it writes is `backlink_write` in `schema.json`, and choosing it is the decision
+worth thinking about. A plain text column the application only displays is the right kind of
+target. A grid backed by another integration's table is not, however conveniently it renders
+a hyperlink — those rows belong to that integration, which may act on one it did not create.
+
+**Expect a burst on any outbound feed your system runs.** Applications of this kind log every
+row they see change for their own inventory exports, and a first full pass changes tens of
+thousands of rows at once. Nothing is wrong with what it sends — each part's data is
+unchanged — but the queue drains for a while afterwards, so run the first pass when a burst
+on that feed does not matter. Later runs stamp only what was newly listed, which is a handful.
+
 ### How a part ships, and the tag that says so
 
 A storefront has to tell a shopper *before* checkout that a door is pickup-only, and it

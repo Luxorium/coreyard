@@ -226,5 +226,38 @@
     "order_close": "UPDATE dbo.WORKORDER\n   SET WorkOrderStatus = 'C'\n WHERE WorkOrderID = @order_id",
     "lines_close": "UPDATE dbo.WORKORDER_LINEITEM\n   SET LineItemStatus = 'I'\n WHERE WorkOrderID = @order_id AND LineItemStatus = 'O'"
   },
-  "donor_images": "SELECT RTRIM(CAST(v.STOCK_NUMBER_COLUMN AS varchar(20))) AS stock_number, RTRIM(CAST(v.VEHICLE_PHOTO_KEY_COLUMN AS varchar(20))) AS donor_key FROM dbo.VEHICLE_TABLE v WHERE CAST(v.VEHICLE_HAS_IMAGES_COLUMN AS int) = 1 AND v.VEHICLE_PHOTO_KEY_COLUMN IS NOT NULL"
+  "donor_images": "SELECT RTRIM(CAST(v.STOCK_NUMBER_COLUMN AS varchar(20))) AS stock_number, RTRIM(CAST(v.VEHICLE_PHOTO_KEY_COLUMN AS varchar(20))) AS donor_key FROM dbo.VEHICLE_TABLE v WHERE CAST(v.VEHICLE_HAS_IMAGES_COLUMN AS int) = 1 AND v.VEHICLE_PHOTO_KEY_COLUMN IS NOT NULL",
+  "_backlink_write": [
+    "OPTIONAL, and the smallest of the three write paths. Omit it and CoreYard never writes",
+    "a storefront address back; the only way from a part to its listing stays a manual search.",
+    "",
+    "It stamps each published part's storefront address onto the part itself, in whatever",
+    "field your application already shows beside the part \u2014 an e-commerce description or a",
+    "free-text note \u2014 so whoever has the record open can open the listing from it.",
+    "",
+    "Pick that field carefully. A plain text column the application only displays is the",
+    "right kind of target. A grid backed by another integration's table is not, however",
+    "conveniently it renders a hyperlink: rows there are that integration's to write, and it",
+    "may act on one it did not create.",
+    "",
+    "CoreYard owns the batching, the quoting and the width check. You own the names, and you",
+    "own the guard: {ours} is the LIKE pattern for addresses CoreYard itself wrote, and both",
+    "'stamp' and 'clear' MUST restrict themselves with it, or a run overwrites wording",
+    "somebody at your yard typed by hand. CoreYard refuses a fragment that leaves it out.",
+    "",
+    "  current: returns r_number + backlink for every row whose column holds anything.",
+    "  stamp:   {rows} is (R#, address) pairs as a table-value constructor.",
+    "  clear:   {r_numbers} is a quoted list, for listings that have gone.",
+    "  limit:   the column's width. An address longer than this is refused, not truncated.",
+    "",
+    "Expect the parts this touches to look changed to your next incremental sync, if your",
+    "application stamps its own last-modified column. That costs an extract and nothing else:",
+    "the renderer drops a backlink on the way back out, so no listing is republished."
+  ],
+  "backlink_write": {
+    "limit": 255,
+    "current": "SELECT p.PART_ID_COLUMN AS r_number,\n       RTRIM(CAST(p.ECOM_DESCRIPTION_COLUMN AS varchar(255))) AS backlink\n  FROM dbo.PART_TABLE p\n WHERE p.ECOM_DESCRIPTION_COLUMN IS NOT NULL\n   AND LTRIM(RTRIM(p.ECOM_DESCRIPTION_COLUMN)) <> ''",
+    "stamp": "UPDATE p\n   SET p.ECOM_DESCRIPTION_COLUMN = v.backlink\n  FROM dbo.PART_TABLE p\n  JOIN (VALUES {rows}) AS v(r_number, backlink)\n    ON p.PART_ID_COLUMN = CAST(v.r_number AS int)\n WHERE p.ECOM_DESCRIPTION_COLUMN IS NULL\n    OR LTRIM(RTRIM(p.ECOM_DESCRIPTION_COLUMN)) = ''\n    OR p.ECOM_DESCRIPTION_COLUMN LIKE {ours}",
+    "clear": "UPDATE dbo.PART_TABLE\n   SET ECOM_DESCRIPTION_COLUMN = NULL\n WHERE PART_ID_COLUMN IN ({r_numbers})\n   AND ECOM_DESCRIPTION_COLUMN LIKE {ours}"
+  }
 }

@@ -146,8 +146,27 @@ def _clean_note(value: Any) -> Optional[str]:
     return text or None
 
 
+def _is_backlink(text: Optional[str]) -> bool:
+    """True when a description field holds nothing but a hyperlink.
+
+    ``coreyard links`` writes each published part's storefront address into the yard's own
+    e-commerce description column, because that is where somebody at the counter can see
+    it. The renderer has to ignore it again on the way back out, for two reasons: a bare
+    URL is a pointer, not prose, and it has no business in a shopper-facing description;
+    and a value that reached the renderer would move every stamped part's fingerprint, so
+    the first backlink run would republish the whole catalogue to say nothing new.
+
+    Deliberately narrow. Only a field that is *entirely* one address is dropped, so a
+    description that happens to mention a link keeps every word of it — and no store
+    configuration is consulted, because the render path must stay answerable without one.
+    """
+    return bool(text) and re.fullmatch(r"https?://\S+", str(text).strip()) is not None
+
+
 def row_to_part(row: dict[str, Any]) -> Part:
     part_type = _clean(row.get("part_type")) or "Auto Part"
+    ecom = _clean(row.get("ecom_desc"))
+    described = None if _is_backlink(ecom) else _clean_note(ecom)
     # Side is carried separately, not appended to part_type: it lets the renderer say
     # "Driver Side Left" and keeps part_type matching the expansion table.
     side = _LR.get((_clean(row.get("left_right")) or "").upper())
@@ -168,7 +187,7 @@ def row_to_part(row: dict[str, Any]) -> Part:
         grade=_clean(row.get("grade")),
         mileage=_to_int(row.get("mileage")),
         location=_clean(row.get("location")),
-        description=_clean_note(row.get("ecom_desc")) or _clean_note(row.get("notes")),
+        description=described or _clean_note(row.get("notes")),
     )
     return part
 

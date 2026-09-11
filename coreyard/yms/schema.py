@@ -243,6 +243,65 @@ class InvoiceWrite:
 
 
 @dataclass(frozen=True)
+class BacklinkWrite:
+    """SQL for writing each published part's storefront address into the yard record.
+
+    The smallest of the three write paths, and the only one that changes a field a person
+    reads rather than a document the business runs on: it puts the storefront link on the
+    part, so somebody at the counter can open the listing from the record already in front
+    of them instead of searching the store for it.
+
+    Three fragments, and the guard is the whole design:
+
+    * ``current`` reads back every part whose column holds anything at all — the planner
+      diffs against that, and it is also how a dry run can say what it would change.
+    * ``stamp`` sets the column from a list of (R#, address) pairs, ``{rows}``.
+    * ``clear`` empties it for parts named in ``{r_numbers}``, for listings that have gone.
+
+    ``stamp`` and ``clear`` must both restrict themselves to rows holding either nothing or
+    an address matching ``{ours}`` — the LIKE pattern for this installation's own product
+    addresses. Whatever else is in that column was typed by somebody at this yard, and a
+    backlink is not worth overwriting a person's own words for. The templates own that
+    predicate rather than the writer, because only the site knows which column it is.
+    """
+
+    current: str                    # -> rows of (r_number, backlink)
+    stamp: str                      # {rows} (R#, address) pairs, {ours} LIKE pattern
+    clear: str                      # {r_numbers}, {ours}
+
+    #: The column's width. A truncated address is a link that goes nowhere, so the writer
+    #: refuses to stamp one longer than this rather than letting the server cut it.
+    limit: int = 255
+
+    _REQUIRED = ("current", "stamp", "clear")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "BacklinkWrite":
+        missing = [k for k in cls._REQUIRED if not (data.get(k) or "").strip()]
+        if missing:
+            raise SchemaError(
+                "schema 'backlink_write' is incomplete; missing: " + ", ".join(missing) +
+                f". See 'backlink_write' in {EXAMPLE_NAME}."
+            )
+        fragments = {k: data[k].strip() for k in cls._REQUIRED}
+        for name in ("stamp", "clear"):
+            if "{ours}" not in fragments[name]:
+                raise SchemaError(
+                    f"schema 'backlink_write.{name}' must restrict itself with the "
+                    f"{{ours}} pattern, or it would overwrite descriptions somebody at "
+                    f"this yard typed by hand."
+                )
+        if "{rows}" not in fragments["stamp"]:
+            raise SchemaError("schema 'backlink_write.stamp' must interpolate {rows}.")
+        if "{r_numbers}" not in fragments["clear"]:
+            raise SchemaError("schema 'backlink_write.clear' must interpolate {r_numbers}.")
+        limit = int(data.get("limit", 255) or 255)
+        if limit < 1:
+            raise SchemaError("schema 'backlink_write.limit' must be a positive width.")
+        return cls(limit=limit, **fragments)
+
+
+@dataclass(frozen=True)
 class SourceSchema:
     """One installation's view of its own database."""
 
@@ -256,6 +315,9 @@ class SourceSchema:
     order_write: "OrderWrite | None" = None   # None => this site cannot write orders
     # None => this site books orders but never promotes them; invoicing stays at the counter.
     invoice_write: "InvoiceWrite | None" = None
+    # None => this site publishes to the storefront but never writes the address back, so
+    # the only way from a part to its listing is to search the store for it.
+    backlink_write: "BacklinkWrite | None" = None
 
     # --- optional delta (incremental catch-up) support ----------------------------------
     # A SQL expression for "when was this row last touched". Supplying it lets a run ask
@@ -351,6 +413,7 @@ class SourceSchema:
             )
         write = data.get("order_write") or None
         invoice = data.get("invoice_write") or None
+        backlink = data.get("backlink_write") or None
         return cls(
             select=dict(select),
             source=data["source"].strip(),
@@ -368,6 +431,7 @@ class SourceSchema:
             donor_images=(data.get("donor_images") or "").strip(),
             order_write=OrderWrite.from_dict(write) if write else None,
             invoice_write=InvoiceWrite.from_dict(invoice) if invoice else None,
+            backlink_write=BacklinkWrite.from_dict(backlink) if backlink else None,
         )
 
     def build_lookup_query(self, r_numbers: list[str], with_scope: bool = False,
