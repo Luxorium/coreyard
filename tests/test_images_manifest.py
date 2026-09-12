@@ -155,6 +155,95 @@ class FakeClient:
         return {}
 
 
+class MediaIsUploadedOnce(unittest.TestCase):
+    """Publishing a product that already has its photos must not re-send them.
+
+    ``productSet``'s ``files`` has replace semantics, so a catalogue-only change that
+    restaged media would tear down and re-upload every photograph on the store to correct a
+    title — thousands of uploads, and a window in which each product has no photographs at
+    all. The rule is that media moves only when the *manifest* says the photo set moved.
+    """
+
+    def _publisher(self, client, media_ids, staged_calls):
+        from coreyard.config import StoreProfile
+        from coreyard.sink.shopify_write import ShopifyPublisher
+
+        publisher = ShopifyPublisher.__new__(ShopifyPublisher)
+        publisher.client = client
+        publisher.store = StoreProfile()
+        publisher.status = "DRAFT"
+        publisher.retire_status = "ARCHIVED"
+        publisher.publications = []
+        publisher.location = "gid://Location/1"
+        publisher.require_images = False
+        publisher.images = None
+        publisher.donor_files = None
+        publisher._find = lambda handle: (
+            "gid://Product/1", list(media_ids), "ACTIVE", [], [])
+        publisher._prune_metafields = lambda *a, **k: None
+
+        def staged(part, alt_for):
+            staged_calls.append(part.uid())
+            return [{"originalSource": "https://example.invalid/a.jpg"}]
+
+        publisher._staged_files = staged
+        return publisher
+
+    def _part(self):
+        from decimal import Decimal
+
+        from coreyard.models import Part
+
+        return Part(r_number="51", part_type="Door", price=Decimal("100.00"), quantity=1)
+
+    def test_a_product_that_has_its_photos_stages_nothing(self):
+        staged: list[str] = []
+        client = FakeClient()
+        publisher = self._publisher(client, ["gid://File/old"], staged)
+
+        publisher.publish(self._part())
+
+        self.assertEqual(staged, [])
+        self.assertNotIn("stage", client.calls)
+        self.assertNotIn("files", client.variables["productSet"]["input"])
+
+    def test_a_product_with_no_media_gets_its_photos(self):
+        """The other half: a new product has to be given them once."""
+        staged: list[str] = []
+        publisher = self._publisher(FakeClient(), [], staged)
+
+        publisher.publish(self._part())
+
+        self.assertEqual(staged, ["51"])
+
+    def test_a_detected_photo_change_restages(self):
+        staged: list[str] = []
+        publisher = self._publisher(FakeClient(), ["gid://File/old"], staged)
+
+        publisher.publish(self._part(), refresh_images=True)
+
+        self.assertEqual(staged, ["51"])
+
+    def test_photos_come_from_the_part_asked_for(self):
+        """Exact matching, at the one place a mismatch would attach another part's car."""
+        from decimal import Decimal
+        from unittest.mock import MagicMock
+
+        from coreyard.models import Part
+        from coreyard.sink.shopify_write import ShopifyPublisher
+
+        publisher = ShopifyPublisher.__new__(ShopifyPublisher)
+        publisher.images = MagicMock()
+        publisher.images.fetch.return_value = []
+        publisher.require_images = False
+        publisher.donor_files = None
+        part = Part(r_number="1", part_type="Door", price=Decimal("1.00"), quantity=1)
+
+        publisher._staged_files(part, lambda i: "alt")
+
+        self.assertEqual(publisher.images.fetch.call_args.args[0], "1")
+
+
 class FailureSafeRefresh(unittest.TestCase):
     """A refresh that cannot finish must leave the product's existing photos alone."""
 

@@ -252,6 +252,21 @@ class DonorFrameUploadedOnce(unittest.TestCase):
         self.assertNotEqual(original, files[0]["id"])
         self.assertEqual("changed stamp", self.state.donor_file("15", "15_01.jpg")[1])
 
+    def test_a_failed_upload_is_not_remembered(self):
+        """Stored media state has to describe a *successful* publication. A remembered id
+        that was never created attaches nothing to every part that trusts it afterwards,
+        and nothing would ever try to upload the frame again."""
+        class Refuses(self.Client):
+            def graphql(self, query, variables=None):
+                if "fileCreate" in query:
+                    raise RuntimeError("fileCreate: throttled")
+                return super().graphql(query, variables)
+
+        publisher = self._publisher(self.images, Refuses(), self.state)
+        with self.assertRaises(RuntimeError):
+            publisher._staged_files(self._part(), lambda i: f"alt {i}")
+        self.assertEqual(self.state.donor_file("15", "15_01.jpg"), ("", ""))
+
     def test_the_next_part_off_that_donor_uploads_nothing(self):
         self.pub._staged_files(self._part(), lambda i: f"alt {i}")
         before = self.client.created
