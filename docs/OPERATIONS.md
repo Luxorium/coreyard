@@ -526,6 +526,11 @@ Two properties make it safe to run unattended:
 A delta run is a catch-up, not a replacement. Only a full sync sets the cursor, because only
 a full sync has just reconciled the whole yard; keep both scheduled.
 
+It also cannot be narrowed: `sync delta --r-number ...` and `sync delta --limit ...` exit 2
+without reading anything. The cursor advances past the whole window, so publishing a slice
+of it would leave the rest unpublished — and, once the cursor has moved, no longer
+detectable as changed. Use `sync --r-number` when you want specific parts.
+
 ## Ongoing sync (scheduled)
 
 State in `coreyard_sync_state.sqlite3` makes the sync incremental: only new/changed parts are

@@ -116,7 +116,18 @@ def plan(
         candidates = sorted(r for r, p in shop.items()
                             if p.status == ACTIVE and r not in wanted)
         active_now = sum(1 for p in shop.values() if p.status == ACTIVE)
-        if candidates and active_now:
+        if candidates and not wanted:
+            # Nothing listable at all is not a yard that sold out, it is a read that did not
+            # work: over the named-pipe transport a statement the server refused comes back
+            # as no rows (see `coreyard.yms.db`). Forcing does not lift this — it is for
+            # "that 15% really did sell", and there is no evidence here to be sure about.
+            actions.refused = (
+                f"REFUSING to retire {len(candidates)} active product(s): the yard reported "
+                f"no listable parts at all. Fix the source and re-run; --force-retire does "
+                f"not lift this."
+            )
+            candidates = []
+        elif candidates and active_now:
             share = len(candidates) / active_now
             if share > max_retire_fraction and not force_retire:
                 actions.refused = (

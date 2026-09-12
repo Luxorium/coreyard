@@ -7,9 +7,12 @@ must never read absence as a sale, because absence is the only evidence retireme
 """
 
 import argparse
+import contextlib
+import io
 import sqlite3
 import tempfile
 import unittest
+import unittest.mock
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -202,6 +205,44 @@ class RetirementGuards(unittest.TestCase):
             diff, sync_args(["--force-retire"]))[0]), 50)
         self.assertEqual(run_sync._retirement_plan(
             diff, sync_args(["--force-retire", "--limit", "5"]))[0], [])
+
+
+class ANarrowedDelta(unittest.TestCase):
+    """A delta is defined by its window, not by a selection.
+
+    Both flags used to be accepted and ignored here, which is the worst of the three
+    options: `--r-number` promises in its own help that it acts on those parts only and
+    retires nothing, and a delta run did neither. Honouring them is not available either —
+    the cursor advances past the whole window, so publishing a slice of it would leave the
+    rest unpublished and, from the next run's point of view, unchanged.
+    """
+
+    def refusal(self, argv):
+        out = io.StringIO()
+        with contextlib.redirect_stderr(out):
+            code = run_sync.cmd_delta(sync_args(argv))
+        return code, out.getvalue()
+
+    def test_selecting_parts_is_refused(self):
+        code, text = self.refusal(["delta", "--r-number", "51"])
+        self.assertEqual(code, 2)
+        self.assertIn("cannot be narrowed", text)
+        self.assertIn("--r-number", text)
+
+    def test_limiting_is_refused(self):
+        code, text = self.refusal(["delta", "--limit", "25"])
+        self.assertEqual(code, 2)
+        self.assertIn("cannot be narrowed", text)
+
+    def test_the_refusal_says_what_to_run_instead(self):
+        _, text = self.refusal(["delta", "--r-number", "51"])
+        self.assertIn("sync --r-number", text)
+
+    def test_it_refuses_before_reading_anything(self):
+        """No source, no cursor, no lock: this is an argument error, not an outcome."""
+        with unittest.mock.patch("coreyard.yms.inventory.is_configured") as configured:
+            self.refusal(["delta", "--limit", "25"])
+        configured.assert_not_called()
 
 
 class PartialView(unittest.TestCase):

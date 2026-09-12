@@ -74,15 +74,31 @@ class RetirementGuards(unittest.TestCase):
     def test_a_mass_retirement_is_refused(self):
         """A yard database that answered partially looks exactly like a sell-out."""
         live = {str(i): product(str(i)) for i in range(100)}
-        actions = plan([], live)
+        actions = plan(["0", "1"], live)
         self.assertEqual(actions.retire, [])
         self.assertIn("REFUSING", actions.refused)
 
     def test_force_overrides_the_fraction(self):
         live = {str(i): product(str(i)) for i in range(100)}
-        actions = plan([], live, force_retire=True)
-        self.assertEqual(len(actions.retire), 100)
+        actions = plan(["0", "1"], live, force_retire=True)
+        self.assertEqual(len(actions.retire), 98)
         self.assertEqual(actions.refused, "")
+
+    def test_a_yard_that_reported_nothing_is_refused_even_under_force(self):
+        """Not a sell-out: on the named-pipe transport a refused statement and a query that
+        matched no rows arrive as the same empty answer, so there is nothing to be sure of."""
+        live = {str(i): product(str(i)) for i in range(100)}
+        for forced in (False, True):
+            with self.subTest(force_retire=forced):
+                actions = plan([], live, force_retire=forced)
+                self.assertEqual(actions.retire, [])
+                self.assertIn("no listable parts at all", actions.refused)
+
+    def test_the_last_part_selling_is_still_reachable_deliberately(self):
+        """The guard is about an empty *source*, not about a small one."""
+        live = {"1": product("1"), "2": product("2")}
+        actions = plan(["1"], live, force_retire=True)
+        self.assertEqual(actions.retire, ["2"])
 
     def test_the_fraction_is_configurable(self):
         live = {str(i): product(str(i)) for i in range(10)}

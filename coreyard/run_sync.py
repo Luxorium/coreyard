@@ -248,6 +248,12 @@ def _retirement_plan(diff, args) -> tuple[list[str], str]:
       that archived parts would be taking a decision it did not gather evidence for.
     * A removal fraction above the threshold is treated as a fault, not as a sale. Real
       sales trickle; a sudden majority means the extract, not the yard, changed.
+    * An extract that saw *nothing* is refused outright, and ``--force-retire`` does not
+      lift it. The transport makes this the likely shape of a broken read rather than an
+      exotic one: impacket reports server errors as reply tokens, so a statement the server
+      refused is indistinguishable from one that matched no rows (:mod:`coreyard.yms.db`).
+      Forcing is for "this 15% really did sell"; it cannot supply facts a run never had,
+      which is the same reason it does not override ``--limit``.
     """
     if args.sink != "api" or not diff.removed:
         return [], ""
@@ -258,7 +264,14 @@ def _retirement_plan(diff, args) -> tuple[list[str], str]:
     partial = _partial_view(args)
     if partial:
         return [], (f"  NOT retiring {len(diff.removed)} missing part(s): {partial}.")
-    known = len(diff.removed) + len(diff.added) + len(diff.changed) + len(diff.unchanged)
+    seen = len(diff.added) + len(diff.changed) + len(diff.unchanged)
+    if not seen:
+        return [], (f"  NOT retiring {len(diff.removed)} part(s): this run saw no listable "
+                    f"parts at all. That is what a source which answered with nothing looks "
+                    f"like, and absence cannot be evidence when there was nothing to be "
+                    f"absent from. Fix the source and re-run; --force-retire does not lift "
+                    f"this.")
+    known = len(diff.removed) + seen
     share = len(diff.removed) / known if known else 0.0
     if share > args.max_retire_fraction and not args.force_retire:
         return [], (f"  REFUSING to retire {len(diff.removed)} part(s) — {share:.0%} of the "
@@ -353,6 +366,65 @@ def _publish_batch(publisher, todo, needs_photos, revivals, bank, fail=None):
     return published_ok, revived
 
 
+def _retire_batch(publisher, retire, record_prior) -> set[str]:
+    """Take each part off sale, and return only the ones that actually came off.
+
+    The return value is the whole point. A part this run could not retire must stay in the
+    snapshot, because the snapshot is what the next diff reads: forgetting a part that is
+    still live on the storefront means nothing ever proposes retiring it again, and the
+    shopper keeps seeing a part the yard no longer has. One stubborn product must not
+    strand the rest of the batch either, so a refusal is reported and stepped over.
+
+    A skipped draft *is* retired for this purpose. It is already invisible, archiving it
+    would destroy the difference between "not ready" and "gone", and keeping it in the
+    snapshot would re-propose the same no-op on every future run.
+
+    Shared by the full and catch-up runs so the rule cannot hold in one and not the other.
+    """
+    retired: set[str] = set()
+    skipped_drafts = 0
+    for i, r_number in enumerate(retire, 1):
+        try:
+            outcome = publisher.retire(r_number, record_prior=record_prior, skip_draft=True)
+            retired.add(r_number)
+            skipped_drafts += outcome == "draft"
+        except RuntimeError as exc:
+            print(f"  R#{r_number}: {exc}")
+        if i % 25 == 0 or i == len(retire):
+            print(f"  {i}/{len(retire)}")
+    if skipped_drafts:
+        print(f"  ({skipped_drafts} already-draft product(s) left alone)")
+    return retired
+
+
+def _delta_retirement_plan(changes, published, args) -> tuple[list[str], str]:
+    """Which parts a catch-up run may retire, and why not when it may not.
+
+    A delta retires on evidence rather than on absence: ``left_scope`` is the set of rows
+    the source itself reported as no longer listable. That is why the guards differ from
+    :func:`_retirement_plan` — there is no "the run only saw a slice" failure mode when
+    nothing is being inferred from what the run did not see.
+
+    What does still apply is the fraction: a catch-up window that claims a tenth of the
+    catalogue left scope is describing a mapping change or a broken read, not an afternoon's
+    trade. And a truncated read retires nothing at all, because it is no longer a delta —
+    the same reason its cursor is held.
+
+    Only parts this installation believes it published are candidates, so a row leaving
+    scope that was never listed is not a retirement waiting to happen.
+    """
+    if changes.truncated:
+        return [], ""
+    retire = [r for r in changes.left_scope if r in published]
+    if not (retire and published):
+        return retire, ""
+    share = len(retire) / len(published)
+    if share > args.max_retire_fraction and not args.force_retire:
+        return [], (f"  REFUSING to retire {len(retire)} part(s) — {share:.0%} of the "
+                    f"catalogue in one delta. Re-run with --force-retire if it is real.")
+    return retire, ""
+
+
 def _delta_baseline():
     """The server clock to hand the next delta run, or None if this site has no delta mapping.
 
@@ -389,6 +461,21 @@ def cmd_delta(args) -> int:
     minutes, which is what closes the window where a part sold at the counter (or on another
     sales channel) stays buyable online until the next hourly extract.
     """
+    # A delta is defined by its window, not by a selection. Narrowing one and still
+    # advancing the cursor would step over every other part that changed inside that window,
+    # and nothing would ever look at them again — the snapshot would call them unchanged.
+    # Both flags were silently ignored here, which is worse than refusing: `--r-number`
+    # promises in its own help that it acts on those parts only and retires nothing, and a
+    # delta run did neither.
+    narrowing = _partial_view(args)
+    if narrowing:
+        print(f"`sync delta` cannot be narrowed — {narrowing}.\n"
+              f"The cursor advances past the whole window, so publishing part of it would "
+              f"leave the rest unpublished and no longer detectable as changed. Use "
+              f"`{cli_name()} sync --r-number ...` for specific parts, or run the delta "
+              f"without the flag.", file=sys.stderr)
+        return 2
+
     from coreyard.yms import schema as schema_mod
     from coreyard.yms.delta import CURSOR_NAME, fetch_changes
     from coreyard.yms.inventory import is_configured
@@ -430,15 +517,9 @@ def cmd_delta(args) -> int:
         # Only parts we believe are published may be retired, and only because we hold the
         # row that says they left scope. Absence proves nothing here and is never used.
         published = state.load()
-        retire = [r for r in changes.left_scope if r in published]
-        if changes.truncated:
-            retire = []
-        elif retire and published:
-            share = len(retire) / len(published)
-            if share > args.max_retire_fraction and not args.force_retire:
-                print(f"  REFUSING to retire {len(retire)} part(s) — {share:.0%} of the "
-                      f"catalogue in one delta. Re-run with --force-retire if it is real.")
-                retire = []
+        retire, refused = _delta_retirement_plan(changes, published, args)
+        if refused:
+            print(refused)
 
         revivals = {r: s for r, s in state.retired_statuses().items() if r in current}
         todo_keys = set(diff.added) | set(diff.changed)
@@ -487,16 +568,7 @@ def cmd_delta(args) -> int:
         if retire:
             print(f"Retiring {len(retire)} part(s) that left scope "
                   f"(qty 0, {publisher.retire_status}) ...")
-            for i, r_number in enumerate(retire, 1):
-                try:
-                    # Out of scope, not sold: leave an already-invisible draft as it is.
-                    publisher.retire(r_number, record_prior=state.record_retired,
-                                     skip_draft=True)
-                    retired.add(r_number)
-                except RuntimeError as exc:
-                    print(f"  R#{r_number}: {exc}")
-                if i % 25 == 0 or i == len(retire):
-                    print(f"  {i}/{len(retire)}")
+            retired = _retire_batch(publisher, retire, state.record_retired)
 
         # Record only what actually landed, then advance the cursor. A part that failed to
         # publish keeps its old fingerprint (or none), so the next run picks it up again.
@@ -805,28 +877,10 @@ def cmd_sync(args) -> int:
             state.clear_retired(revived)
 
             if retire:
+                # Absence is why these parts are here, not a sale, so an already-invisible
+                # draft is left alone rather than archived.
                 print(f"Retiring {len(retire)} sold part(s) (qty 0, {publisher.retire_status}) ...")
-                skipped_drafts = 0
-                for i, r_number in enumerate(retire, 1):
-                    try:
-                        # Absence is why this part is here, not a sale. A DRAFT product is
-                        # already invisible, so archiving it would only destroy the
-                        # difference between "not ready" and "gone".
-                        outcome = publisher.retire(r_number,
-                                                   record_prior=state.record_retired,
-                                                   skip_draft=True)
-                        # A skipped draft still leaves the snapshot: it is not listable, and
-                        # keeping it would re-propose the same no-op on every future run.
-                        retired.add(r_number)
-                        skipped_drafts += outcome == "draft"
-                    except RuntimeError as exc:
-                        # One stubborn product must not strand the rest, and an R# that was
-                        # not retired must stay in the snapshot so the next run tries again.
-                        print(f"  R#{r_number}: {exc}")
-                    if i % 25 == 0 or i == len(retire):
-                        print(f"  {i}/{len(retire)}")
-                if skipped_drafts:
-                    print(f"  ({skipped_drafts} already-draft product(s) left alone)")
+                retired |= _retire_batch(publisher, retire, state.record_retired)
 
         if args.retire_only:
             # Nothing was published, so committing `current` would record 26,000 parts as
