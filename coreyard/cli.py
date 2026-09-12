@@ -309,9 +309,18 @@ def _needs_from_flags(path: str, args) -> set[str]:
     credential — with exit 1, as though something had been attempted and might work next
     time. Nothing was attempted. It is a refusal, and refusals happen first.
     """
-    if args is not None and getattr(args, "sink", None) == "api":
-        return {"shopify"}
-    return set()
+    if args is None:
+        return set()
+    needs = set()
+    if getattr(args, "sink", None) == "api":
+        needs.add("shopify")
+    if path == "part-types" and not getattr(args, "catalogue", None):
+        # It reads the yard's part-type table, so it needs the database — unless it was
+        # handed a catalogue file, which is the whole point of that flag. Declared as
+        # `source` alone, a tabular installation got `YMS_DB_NAME is not set` out of the
+        # middle of the run instead of a refusal naming the capability.
+        needs.add("database")
+    return needs
 
 
 def _verbosity(args) -> int:
