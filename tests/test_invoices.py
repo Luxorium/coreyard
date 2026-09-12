@@ -17,8 +17,19 @@ from coreyard.yms.invoices import InvoiceWriteError, build_batch
 WRITE = schema.load(bundled("schema.example.json")).invoice_write
 
 
+# The example's placeholder for the parts table. Every identifier in the shipped mapping is
+# a placeholder — the real ones live in each installation's gitignored `schema.json`.
+PARTS_TABLE = "dbo.PARTS_TABLE"
+
+
 def batch(order_number=2172, tracking="1Z999AA10123456784", write=None):
     return build_batch(order_number, tracking, write or WRITE)
+
+
+def indented(statement: str) -> str:
+    """One mapped statement as `build_batch` lays it into the transaction body."""
+    lines = statement.strip().rstrip(";").splitlines()
+    return "\n".join("  " + line for line in lines) + ";"
 
 
 class ExampleMapping(unittest.TestCase):
@@ -69,14 +80,24 @@ class Guards(unittest.TestCase):
         self.assertIn("THROW 50016", sql)
 
     def test_the_work_order_is_closed_so_it_cannot_be_promoted_twice(self):
+        """Asserted through the mapping rather than through any site's column names.
+
+        Which column holds a line's status is the site's to say, so a test that spells one
+        out is testing this yard's database instead of the contract — and it puts a vendor's
+        schema in the tree, which `scripts/check_neutrality.py` exists to prevent.
+        """
         sql = batch()
         self.assertIn("THROW 50017", sql)
-        self.assertIn("SET LineItemStatus", sql)
-        self.assertIn("SET WorkOrderStatus", sql)
+        self.assertIn(indented(WRITE.lines_close), sql)
+        self.assertIn(indented(WRITE.order_close), sql)
 
     def test_nothing_touches_inventory(self):
         """Booking already took the part off the shelf; promoting must not take it again."""
-        self.assertNotIn("INVENTORY\n", batch().replace("dbo.INVENTORY inv", ""))
+        sql = batch()
+        self.assertIn(f"LEFT JOIN {PARTS_TABLE}", sql)         # read, for the description
+        for line in sql.splitlines():
+            if line.strip().startswith(("UPDATE ", "INSERT ", "DELETE ")):
+                self.assertNotIn(PARTS_TABLE, line)
 
     def test_line_ids_come_from_one_block_allocation(self):
         sql = batch()
@@ -86,7 +107,7 @@ class Guards(unittest.TestCase):
 
 class Refusals(unittest.TestCase):
     def test_a_non_numeric_work_order_never_reaches_the_sql(self):
-        for bad in ("2172; DROP TABLE dbo.INVOICE", "", None, "abc"):
+        for bad in ("2172; DROP TABLE dbo.INVOICE_TABLE", "", None, "abc"):
             with self.subTest(bad=bad):
                 with self.assertRaises((InvoiceWriteError, RuntimeError)):
                     batch(order_number=bad)
