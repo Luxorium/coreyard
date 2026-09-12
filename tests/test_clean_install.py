@@ -139,3 +139,85 @@ class TheGuidanceItPrints(unittest.TestCase):
         output = result.stdout + result.stderr
         self.assertIn("No schema mapping yet", output, output)
         self.assertTrue(self._copy_target(output).is_file())
+
+
+class AReadOnlyInstallation(unittest.TestCase):
+    """DIST-04: the installation directory holds code, so it does not have to be writable.
+
+    That is what `pip install` into a system prefix produces, and what a container image or a
+    package manager gives a service user: the tree is root's, the process is not root, and
+    every file CoreYard needs to write has to be somewhere else. `DATA_ROOT` exists for this,
+    and the property is easy to hold by accident and lose the same way — one `open(...,"w")`
+    resolved against the package is all it takes, and it will work on every developer's
+    checkout.
+
+    The installation here is a copy of the package with the write bit taken off, so a write
+    against it fails rather than being politely redirected.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import shutil
+
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.tree = Path(cls.tmp.name) / "install"
+        cls.tree.mkdir()
+        shutil.copytree(REPO_ROOT / "coreyard", cls.tree / "coreyard",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        for path in sorted(cls.tree.rglob("*"), reverse=True):
+            path.chmod(0o555 if path.is_dir() else 0o444)
+        cls.tree.chmod(0o555)
+
+    @classmethod
+    def tearDownClass(cls):
+        # Put the write bit back before cleanup, or the temporary directory cannot be removed.
+        for path in sorted(cls.tree.rglob("*"), reverse=True):
+            path.chmod(0o755 if path.is_dir() else 0o644)
+        cls.tree.chmod(0o755)
+        cls.tmp.cleanup()
+
+    def run_installed(self, home: Path, *args: str) -> subprocess.CompletedProcess:
+        env = {k: v for k, v in os.environ.items()
+               if not any(k.startswith(p) for p in INHERITED)}
+        env["COREYARD_HOME"] = str(home)
+        env["PYTHONPATH"] = str(self.tree)
+        # Never the checkout: PYTHONPATH has to be the read-only copy, or the test is
+        # examining this repository rather than an installation.
+        return subprocess.run([sys.executable, "-m", "coreyard", *args],
+                              env=env, cwd=home, capture_output=True, text=True, timeout=180)
+
+    def home(self) -> Path:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        return Path(directory.name)
+
+    def test_the_tree_really_is_read_only(self):
+        """Otherwise every assertion below passes for the wrong reason."""
+        with self.assertRaises(PermissionError):
+            (self.tree / "coreyard" / "scratch.txt").write_text("x")
+
+    def test_the_quickstart_runs_from_it(self):
+        home = self.home()
+        started = self.run_installed(home, "init", "--demo")
+        self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+        synced = self.run_installed(home, "sync", "--sink", "csv", "--dry-run")
+        self.assertEqual(synced.returncode, 0, synced.stdout + synced.stderr)
+        self.assertIn("listable part(s)", synced.stdout)
+
+    def test_everything_it_wrote_is_under_the_data_root(self):
+        home = self.home()
+        before = {p: p.stat().st_mtime_ns for p in self.tree.rglob("*") if p.is_file()}
+        self.run_installed(home, "init", "--demo")
+        self.run_installed(home, "sync", "--sink", "csv", "--dry-run")
+        self.run_installed(home, "doctor")
+
+        after = {p: p.stat().st_mtime_ns for p in self.tree.rglob("*") if p.is_file()}
+        self.assertEqual(before, after, "the installation tree was written to")
+        self.assertTrue((home / ".env").exists())
+        self.assertTrue((home / "out").is_dir())
+
+    def test_diagnostics_still_report_rather_than_crash(self):
+        """`doctor` is what somebody runs when an install is not working, and an unwritable
+        tree must not be the thing that stops it saying so."""
+        result = self.run_installed(self.home(), "doctor")
+        self.assertIn("CoreYard doctor", result.stdout)

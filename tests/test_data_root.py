@@ -276,3 +276,66 @@ class TheSuiteIsNotTheInstallation(unittest.TestCase):
         from coreyard.state import DEFAULT_STATE_DB
 
         self.assertFalse(str(DEFAULT_STATE_DB).startswith(str(REPO_ROOT)))
+
+
+class TwoInstallationsRunningAtOnce(unittest.TestCase):
+    """DIST-04: two yards, one machine, and nothing shared between them *while they run*.
+
+    `TwoInstallationsOnOneHost` above proves the paths separate by construction, which is
+    the rule. This is the arrangement an operator actually creates — one host, two crontabs,
+    two stores — so it starts both and then asks each home what it believes.
+
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def home(self, name: str) -> Path:
+        path = Path(self.tmp.name) / name
+        path.mkdir()
+        return path
+
+    def spawn(self, home: Path, *args: str) -> subprocess.Popen:
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("COREYARD_", "SMB_", "YMS_", "SHOPIFY_", "STORE_"))}
+        env["COREYARD_HOME"] = str(home)
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        return subprocess.Popen([sys.executable, "-m", "coreyard", *args],
+                                env=env, cwd=home, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True)
+
+    def test_each_keeps_its_own_state_while_the_other_is_running(self):
+        first, second = self.home("yard-a"), self.home("yard-b")
+        for home in (first, second):
+            setup = self.spawn(home, "init", "--demo")
+            setup.communicate(timeout=180)
+            self.assertEqual(setup.returncode, 0)
+
+        # Both at once, against the same installed code.
+        runs = [self.spawn(home, "sync", "--sink", "csv") for home in (first, second)]
+        outputs = [run.communicate(timeout=180)[0] for run in runs]
+        for home, run, output in zip((first, second), runs, outputs):
+            with self.subTest(home=home.name):
+                self.assertEqual(run.returncode, 0, output)
+
+        for home in (first, second):
+            with self.subTest(home=home.name):
+                self.assertTrue((home / "coreyard_sync_state.sqlite3").exists())
+                self.assertTrue((home / "out" / "products.csv").exists())
+
+    def test_neither_leaves_anything_in_the_other(self):
+        first, second = self.home("yard-a"), self.home("yard-b")
+        self.spawn(first, "init", "--demo").communicate(timeout=180)
+        self.spawn(first, "sync", "--sink", "csv").communicate(timeout=180)
+        self.assertEqual(sorted(p.name for p in second.iterdir()), [])
+
+    def test_their_locks_are_not_the_same_lock(self):
+        """A shared lock would make two unrelated yards take turns for no reason."""
+        first, second = self.home("yard-a"), self.home("yard-b")
+        for home in (first, second):
+            self.spawn(home, "init", "--demo").communicate(timeout=180)
+            self.spawn(home, "--lock", "sync", "status").communicate(timeout=180)
+        locks = [next((home / "out").glob(".sync.lock"), None) for home in (first, second)]
+        self.assertTrue(all(locks), "each run takes a lock under its own data root")
+        self.assertNotEqual(locks[0], locks[1])
