@@ -61,7 +61,7 @@ Python 3.10+ is required; there is no build step.
 
 ```bash
 ./install.sh --no-deps --yes
-.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m unittest discover -t . -s tests -v
 .venv/bin/python scripts/check_neutrality.py
 .venv/bin/python scripts/inventory.py --check
 .venv/bin/python scripts/ledger.py --summary

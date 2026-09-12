@@ -78,7 +78,7 @@ supported; there is no build, formatter, or linter.
 
 ```bash
 ./install.sh --no-deps --yes
-.venv/bin/python -m unittest discover -s tests -v          # full offline suite
+.venv/bin/python -m unittest discover -t . -s tests -v          # full offline suite
 .venv/bin/python -m unittest tests.test_state.Diff.test_summary
 .venv/bin/python scripts/check_neutrality.py
 .venv/bin/python scripts/inventory.py --check              # docs/INVENTORY.md is current

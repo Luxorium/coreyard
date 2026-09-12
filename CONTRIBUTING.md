@@ -24,7 +24,7 @@ rather than same-day.
 git clone <your fork>
 cd coreyard
 ./install.sh --no-deps        # or plain ./install.sh to pull system packages too
-.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m unittest discover -t . -s tests -v
 ```
 
 You do not need a live database, a Shopify store, or credentials. To see the whole pipeline
@@ -72,7 +72,7 @@ live server belongs in `scripts/` or behind an explicit CLI flag.
 CI runs these on Python 3.10 through 3.13. Run them locally before opening a PR:
 
 ```bash
-.venv/bin/python -m unittest discover -s tests    # the offline suite
+.venv/bin/python -m unittest discover -t . -s tests    # the offline suite
 python scripts/check_neutrality.py                # no vendor or site names in the tree
 python scripts/inventory.py --check               # docs/INVENTORY.md matches the command tree
 python scripts/ledger.py --summary                # every acceptance criterion has an evidence row

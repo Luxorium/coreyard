@@ -4,9 +4,9 @@
 
 ## How it was verified
 
-<!-- Commands you actually ran, e.g. python -m unittest discover -s tests -->
+<!-- Commands you actually ran, e.g. python -m unittest discover -t . -s tests -->
 
-- [ ] `python -m unittest discover -s tests`
+- [ ] `python -m unittest discover -t . -s tests`
 - [ ] `python scripts/check_neutrality.py`
 
 ## Impact checklist

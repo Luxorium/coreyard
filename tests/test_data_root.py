@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from coreyard.config import DATA_ROOT, REPO_ROOT, _data_root, out_dir
@@ -53,7 +54,13 @@ class ASourceCheckoutIsUnchanged(unittest.TestCase):
     """The one property that matters most: an upgrade must not move a yard's state."""
 
     def test_a_checkout_resolves_to_itself(self):
-        self.assertEqual(DATA_ROOT, REPO_ROOT)
+        """Asked of the resolver, not of `DATA_ROOT`: the suite deliberately runs with
+        `COREYARD_HOME` set elsewhere, which is rule 1 and would answer a different
+        question."""
+        environment = dict(os.environ)
+        environment.pop("COREYARD_HOME", None)
+        with unittest.mock.patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(_data_root(), REPO_ROOT)
 
     def test_the_state_database_is_where_it_has_always_been(self):
         root, env_path, workspace, state, queue = probe({})
@@ -243,3 +250,29 @@ class AConfiguredPathIsNotRelativeToWhereverYouStarted(unittest.TestCase):
         # The message must name where it actually looked, or the next person reads
         # "not found" and goes hunting for a file that is sitting right there.
         self.assertIn(str(DATA_ROOT), str(caught.exception))
+
+
+class TheSuiteIsNotTheInstallation(unittest.TestCase):
+    """A test that writes into the yard's own data root is not an offline test.
+
+    `cli` records every run in the history, refusals included, so that a scheduled job which
+    starts refusing does not read as one nobody scheduled. An in-process CLI test therefore
+    filed a failed `sync delta` into the live sync-state database every time the suite ran,
+    and `status` showed it to the operator as the last delta run.
+
+    `tests/__init__.py` points `COREYARD_HOME` at a scratch directory, and it is imported
+    only when the tests are discovered as a package — which is why the documented command
+    passes `-t .`. This asserts the arrangement actually took effect, so running the suite
+    the old way fails loudly here instead of quietly writing to production.
+    """
+
+    def test_the_suite_runs_against_a_scratch_data_root(self):
+        self.assertNotEqual(
+            DATA_ROOT, REPO_ROOT,
+            "the suite is writing into the installation itself — run it as documented: "
+            "python -m unittest discover -t . -s tests")
+
+    def test_the_state_database_is_not_the_installations(self):
+        from coreyard.state import DEFAULT_STATE_DB
+
+        self.assertFalse(str(DEFAULT_STATE_DB).startswith(str(REPO_ROOT)))

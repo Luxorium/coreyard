@@ -294,7 +294,7 @@ ok "installed bin/coreyard launcher (data home: $DATA_HOME)"
 
 # ---------------------------------------------------------------- verify ----
 step "Verifying the install"
-if (cd "$REPO_DIR" && "$VENV_PY" -m unittest discover -s tests >/dev/null 2>&1); then
+if (cd "$REPO_DIR" && "$VENV_PY" -m unittest discover -t . -s tests >/dev/null 2>&1); then
     ok "offline test suite passed"
 else
     die "the test suite failed — the install is not healthy"
