@@ -468,6 +468,12 @@ broken join looks like:
 Anything not retired is carried forward in the snapshot at its old fingerprint, so a refused
 batch is re-detected rather than silently forgotten.
 
+A part that fails to *publish* is carried the same way, and the reason is remembered against
+it. `bin/coreyard status` names the parts still failing, three at a time with the error the
+storefront gave, and a part drops off that list as soon as one publish of it succeeds. The
+run summary's `failed` count cannot answer the question that matters — three failures every
+tick reads the same whether it is three different parts or the same three since Tuesday.
+
 Photo changes are picked up the same way: the share is listed once per run and folded into the
 fingerprint, so a part that gains or loses a photo is republished with its media rebuilt. Pass
 `--no-image-scan` to skip that listing if you don't need it.
