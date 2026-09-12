@@ -24,6 +24,11 @@ import pathlib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+# Every other script here does this, and for the same reason: run as `python
+# scripts/settings.py`, `sys.path[0]` is `scripts/`, so the package beside it is not
+# importable — which is how this passed in a venv with CoreYard installed and failed in CI,
+# where the hygiene job installs the requirements and not the package.
+sys.path.insert(0, str(ROOT))
 # The scripts are configured surface too: `healthcheck.py` reads its own notifier command,
 # and a settings reference that stopped at the package would omit it while `.env.example`
 # documents it.

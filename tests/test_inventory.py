@@ -253,3 +253,47 @@ class SettingsAreDocumentedFromTheCode(unittest.TestCase):
         settings = module.collect()
         self.assertIn("duration", settings["COREYARD_ALERT_REPEAT"].kind)
         self.assertEqual(settings["STORE_REQUIRE_IMAGES"].kind, "switch")
+
+
+class TheScriptsRunOnEveryAdvertisedPython(unittest.TestCase):
+    """The helper scripts are part of the supported surface, and CI runs them.
+
+    Both of these failed in CI while passing here, for the two reasons a script written in a
+    developer's environment usually does: it imported the package, which the hygiene job does
+    not install, and it imported `tomllib`, which 3.10 does not have. The badge says 3.10.
+    """
+
+    def script(self, name: str):
+        import importlib.util
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location(f"coreyard_script_{name}",
+                                                      root / "scripts" / f"{name}.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_the_dependency_check_reads_pyproject_without_tomllib(self):
+        module = self.script("dependencies")
+        with_parser = module.declared_in_pyproject()
+        module.tomllib = None
+        self.assertEqual(module.declared_in_pyproject(), with_parser)
+
+    def test_every_script_ci_runs_works_without_the_package_installed(self):
+        """`python scripts/x.py` puts `scripts/` on the path, not the repository root."""
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        for command in (["scripts/inventory.py", "--check"],
+                        ["scripts/settings.py", "--check"],
+                        ["scripts/dependencies.py", "--check"],
+                        ["scripts/ledger.py", "--summary"],
+                        ["scripts/check_neutrality.py"]):
+            with self.subTest(script=command[0]):
+                result = subprocess.run(
+                    [sys.executable, *command], cwd=root, capture_output=True, text=True,
+                    env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"})
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

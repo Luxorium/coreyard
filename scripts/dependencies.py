@@ -25,7 +25,11 @@ import importlib.metadata as metadata
 import pathlib
 import re
 import sys
-import tomllib
+
+try:                                    # 3.11+
+    import tomllib
+except ModuleNotFoundError:             # 3.10, which this project supports
+    tomllib = None
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LOCK = ROOT / "requirements-lock.txt"
@@ -38,9 +42,23 @@ def _key(name: str) -> str:
     return name.lower().replace("_", "-")
 
 
+#: `[project] dependencies = [...]`, for the interpreters with no `tomllib`. A regex over
+#: one array is not a TOML parser and is not pretending to be: it reads the one key this
+#: needs, and `--check` compares what it found against `requirements.txt`, so a shape it
+#: misread shows up as a disagreement rather than as a silent pass.
+_DEPENDENCIES = re.compile(r"^dependencies\s*=\s*\[(.*?)\]", re.M | re.S)
+
+
 def declared_in_pyproject() -> set[str]:
-    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    names = (_NAME.match(req) for req in data["project"]["dependencies"])
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    if tomllib is not None:
+        requirements = tomllib.loads(text)["project"]["dependencies"]
+    else:
+        match = _DEPENDENCIES.search(text)
+        if not match:
+            raise SystemExit("pyproject.toml has no [project] dependencies array")
+        requirements = re.findall(r"[\"']([^\"']+)[\"']", match.group(1))
+    names = (_NAME.match(req) for req in requirements)
     return {_key(match.group(0)) for match in names if match}
 
 
