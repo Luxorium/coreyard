@@ -135,6 +135,12 @@ class TheGuidanceItPrints(unittest.TestCase):
                 "SMB_USER": "u", "SMB_PASSWORD": "p", "SMB_IMAGES_SHARE": "share",
                 "YMS_DB_HOST": "192.0.2.1", "YMS_DB_NAME": "db",
                 "SHOPIFY_VENDOR": "Test Yard",
+                # The default sink is the Admin API, which now declares that it needs
+                # Shopify — so without these the run refuses for a missing credential and
+                # never reaches the refusal under test. Unreachable placeholders, like the
+                # rest: the capability probe reads configuration and opens no socket.
+                "SHOPIFY_STORE": "example.myshopify.com",
+                "SHOPIFY_ADMIN_TOKEN": "shpat_placeholder",
             })
         output = result.stdout + result.stderr
         self.assertIn("No schema mapping yet", output, output)

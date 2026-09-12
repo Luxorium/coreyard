@@ -92,9 +92,9 @@ CoreYard 0.1.0 — 47 commands.
 - **`coreyard repair fingerprints`** — `--apply` `--dry-run` `--no-image-scan`
 - **`coreyard audit catalog`** — `--all-products` `--json` `--show`
 - **`coreyard orders serve`** — `--error-retention-days` `--host` `--no-retire` `--no-write-orders` `--path` `--port` `--write-orders`
-- **`coreyard orders register`** — `--topics` `--url`
+- **`coreyard orders register`** — `--dry-run` `--topics` `--url`
 - **`coreyard orders list`** — _(no options)_
-- **`coreyard orders unregister`** — `--url`
+- **`coreyard orders unregister`** — `--dry-run` `--url`
 - **`coreyard orders replay`** — `--print-cmd` `--retire` `--write-order` `--write-orders`
 - **`coreyard orders retry`** — `--all` `--id` `--no-retire` `--no-write-orders` `--write-orders`
 - **`coreyard orders status`** — `--limit`
@@ -106,7 +106,7 @@ CoreYard 0.1.0 — 47 commands.
 - **`coreyard schema`** — _(no options)_
 - **`coreyard state adopt`** — `--apply`
 - **`coreyard validate`** — `--orders` `--overrides` `--profile` `--shipping` `--store` `--weights`
-- **`coreyard bulk`** — `--all-parts` `--images-only` `--limit` `--log` `--max-attempts` `--no-resume` `--status` `--workers`
+- **`coreyard bulk`** — `--all-parts` `--dry-run` `--images-only` `--limit` `--log` `--max-attempts` `--no-resume` `--status` `--workers`
 - **`coreyard altfix`** — `--dry-run` `--limit` `--log` `--max-pages` `--no-resume` `--overwrite`
 - **`coreyard oauth`** — _(no options)_
 - **`coreyard schedule install`** — `--backend` `--dry-run` `--every` `--task`

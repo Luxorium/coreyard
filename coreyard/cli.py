@@ -284,7 +284,7 @@ def tree(parser: argparse.ArgumentParser, prefix: str = "") -> list[tuple]:
     return found
 
 
-def unmet(path: str, caps) -> list[tuple[str, str]]:
+def unmet(path: str, caps, args=None) -> list[tuple[str, str]]:
     """Capabilities this command cannot run without that this installation does not have.
 
     REL-01: an unsupported combination must fail before side effects with a useful
@@ -294,7 +294,24 @@ def unmet(path: str, caps) -> list[tuple[str, str]]:
     that looks like a job that ran.
     """
     _, needs, _ = SUPPORT.get(path, (READS, (), ""))
-    return [(name, caps.get(name).detail) for name in needs if not caps.enabled(name)]
+    needs = set(needs) | _needs_from_flags(path, args)
+    return [(name, caps.get(name).detail) for name in sorted(needs)
+            if not caps.enabled(name)]
+
+
+def _needs_from_flags(path: str, args) -> set[str]:
+    """Requirements a flag adds to the command that carries it.
+
+    `SUPPORT` says what a command needs whatever it is asked to do, and `sync` genuinely
+    does not need Shopify: `--sink csv` renders a file. With the sink it defaults to, it
+    needs Shopify for everything, and saying so only when the extract finished and the sink
+    was constructed meant a run threw away several minutes of work to report a missing
+    credential — with exit 1, as though something had been attempted and might work next
+    time. Nothing was attempted. It is a refusal, and refusals happen first.
+    """
+    if args is not None and getattr(args, "sink", None) == "api":
+        return {"shopify"}
+    return set()
 
 
 def _installation() -> tuple[str, str] | None:
@@ -509,7 +526,7 @@ def main(argv: list[str] | None = None) -> int:
 
     caps = capabilities.detect()
     path = getattr(args, "_support_path", None) or args.command
-    missing = unmet(path, caps)
+    missing = unmet(path, caps, args)
 
     try:
         return _run(args, path, missing, caps)

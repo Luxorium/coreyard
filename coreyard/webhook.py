@@ -296,6 +296,9 @@ def register(args) -> int:
         if (topic, args.url) in existing:
             print(f"  {topic}: already registered")
             continue
+        if getattr(args, "dry_run", False):
+            print(f"  {topic}: would register -> {args.url}")
+            continue
         res = client.graphql(_CREATE, {"topic": topic,
                                        "sub": {"uri": args.url, "format": "JSON"}})
         errs = res["webhookSubscriptionCreate"]["userErrors"]
@@ -303,6 +306,8 @@ def register(args) -> int:
             print(f"  {topic}: FAILED {errs}", file=sys.stderr)
         else:
             print(f"  {topic}: registered -> {args.url}")
+    if getattr(args, "dry_run", False):
+        print("Plan only — re-run without --dry-run to subscribe.")
     return 0
 
 
@@ -314,14 +319,29 @@ def list_subscriptions(args) -> int:
 
 
 def unregister(args) -> int:
+    """Remove webhook subscriptions. The destructive half of `register`, so it previews.
+
+    Deleting a subscription is quiet and total: deliveries simply stop, and nothing about the
+    storefront looks different afterwards. `--dry-run` is what makes "remove all of them" a
+    decision rather than a discovery.
+    """
     client = _client()
+    planned = 0
     for node in client.graphql(_LIST)["webhookSubscriptions"]["nodes"]:
         url = node.get("uri") or ""
         if args.url and url != args.url:
             continue
+        planned += 1
+        if getattr(args, "dry_run", False):
+            print(f"  would remove {node['topic']} -> {url}")
+            continue
         res = client.graphql(_DELETE, {"id": node["id"]})["webhookSubscriptionDelete"]
         print(f"  removed {node['topic']} -> {url}"
               if not res["userErrors"] else f"  FAILED {res['userErrors']}")
+    if getattr(args, "dry_run", False):
+        print(f"Plan only — {planned} subscription(s) would be removed.")
+    elif not planned:
+        print("  nothing to remove")
     return 0
 
 
@@ -426,6 +446,8 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
     r = sub.add_parser("register", help="subscribe the store to order webhooks")
     r.add_argument("--url", required=True, help="public https URL of your /webhook endpoint")
+    r.add_argument("--dry-run", action="store_true",
+                   help="say which topics would be subscribed, and subscribe nothing")
     r.add_argument("--topics", nargs="+", default=DEFAULT_TOPICS,
                    help=f"topics to subscribe to (default: {' '.join(DEFAULT_TOPICS)})")
     r.set_defaults(func=register)
@@ -435,6 +457,8 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
     u = sub.add_parser("unregister", help="delete subscriptions")
     u.add_argument("--url", default="", help="only those pointing here (default: all)")
+    u.add_argument("--dry-run", action="store_true",
+                   help="say which subscriptions would be removed, and remove nothing")
     u.set_defaults(func=unregister)
 
     p = sub.add_parser("replay", help="re-run a saved order JSON file")

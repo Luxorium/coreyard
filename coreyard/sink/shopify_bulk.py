@@ -101,6 +101,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG,
                         help="the resume log: every attempt is appended here, and a "
                              "re-run skips the parts it already published")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="say how many parts would be published, and publish nothing")
     parser.add_argument("--no-resume", action="store_true",
                         help="ignore the resume log and republish everything eligible")
     images = parser.add_mutually_exclusive_group()
@@ -131,6 +133,14 @@ def run(args) -> int:
         flush=True,
     )
     if not selected:
+        return 0
+    if getattr(args, "dry_run", False):
+        # Everything above is the decision; everything below is the publishing. A first
+        # bulk load is the largest single write this tool makes, and asking what it would
+        # do should not require running it.
+        photos = "photographed parts only" if require_images else "every listable part"
+        print(f"Plan only — would publish {len(selected):,} part(s) as {args.status}, "
+              f"{photos}, {args.workers} at a time. Nothing was changed.")
         return 0
 
     args.log.parent.mkdir(parents=True, exist_ok=True)
