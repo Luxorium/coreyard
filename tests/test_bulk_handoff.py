@@ -25,6 +25,7 @@ from coreyard.config import StoreProfile
 from coreyard.models import Part
 from coreyard.sink import shopify_bulk
 from coreyard.state import SyncState, fingerprints_all
+from coreyard.yms.interchange import Fitment
 
 STORE = StoreProfile()
 NO_IMG = lambda part: []                                              # noqa: E731
@@ -64,11 +65,12 @@ class BulkLoad(unittest.TestCase):
         return {"status": "ok", "r_number": part_.r_number, "product_id": "gid://x",
                 "images_added": 0, "attempts": 1, "seconds": 0.0}
 
-    def run_bulk(self, publish=None, **kw) -> int:
+    def run_bulk(self, publish=None, resolver=None, **kw) -> int:
         with mock.patch.object(shopify_bulk, "fetch_parts", return_value=self.parts), \
                 mock.patch.object(shopify_bulk, "photos_required", return_value=False), \
                 mock.patch.object(shopify_bulk, "connect"), \
-                mock.patch.object(shopify_bulk, "InterchangeResolver"), \
+                mock.patch.object(shopify_bulk, "InterchangeResolver",
+                                  resolver or mock.MagicMock()), \
                 mock.patch.object(shopify_bulk, "DEFAULT_STATE_DB", self.db), \
                 mock.patch.object(shopify_bulk, "load_store", return_value=STORE), \
                 mock.patch.object(shopify_bulk, "_publish_with_retry",
@@ -111,6 +113,29 @@ class BulkLoad(unittest.TestCase):
         self.run_bulk()
         expected = fingerprints_all(self.parts, NO_IMG, STORE).content
         self.assertEqual(self.snapshot(), expected)
+
+    def test_fitment_attached_on_the_way_to_the_store_is_not_in_the_fingerprint(self):
+        """The trap this walked into on a live catalogue.
+
+        The publish path enriches a part on its way out — `fitment_for` attaches interchange
+        applications to the object in place — and the sync takes its fingerprints *before*
+        any of that. Fingerprinting afterwards produces a value no sync will ever compute,
+        so every part carrying fitment reads as changed on the next run and is published
+        again, for ever. Identical products, different hashes.
+        """
+        class AttachesFitment:
+            def __init__(self, conn):
+                pass
+
+            def fitment_for(self, part):
+                return [Fitment(make="Honda", model="Accord",
+                                year_start=2013, year_end=2017)]
+
+        self.run_bulk(resolver=AttachesFitment)
+
+        self.assertTrue(any(p.fitment for p in self.parts), "the fixture proves nothing")
+        plain = [part(p.r_number) for p in self.parts]
+        self.assertEqual(self.snapshot(), fingerprints_all(plain, NO_IMG, STORE).content)
 
     def test_the_resume_log_still_records_what_happened(self):
         self.failures = {"3"}

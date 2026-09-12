@@ -15,6 +15,7 @@ from typing import Any
 from coreyard.config import load_store, out_dir
 from coreyard.models import Part
 from coreyard.state import DEFAULT_STATE_DB, SyncState, fingerprints_all
+from coreyard.state import subset as fp_subset
 from coreyard.yms.db import connect
 from coreyard.yms.interchange import InterchangeResolver
 from coreyard.yms.inventory import fetch_parts, photos_required
@@ -140,7 +141,15 @@ def run(args) -> int:
 
     photos = _make_resolver(None, scan_images=True)
     store = load_store()
-    unbanked: list[Part] = []
+
+    # One fingerprint pass over the whole selection, before the publish path touches these
+    # parts — which is exactly when the sync takes its own. It has to be the same moment:
+    # `fitment_for` below attaches interchange copy to the part in place, and a fingerprint
+    # taken after that describes a part the sync never fingerprints, so every part with
+    # fitment would read as changed on the next run and be published all over again. Taking
+    # it here also renders each part once rather than twice.
+    prints = fingerprints_all(selected, photos.resolve, store, stamps=photos.stamps)
+    unbanked: list[str] = []
 
     def bank(state, force: bool = False) -> None:
         """Tell the snapshot what this run published, in the sync's own terms.
@@ -151,9 +160,10 @@ def run(args) -> int:
         The work was not lost, but nothing this run did was *known*, which is the same thing
         from the next run's point of view.
 
-        Only parts that actually published are recorded, and the fingerprint is taken from
-        the same renderer, store profile and photo manifest the sync uses — anything else
-        would record a version the storefront does not hold and strand the difference.
+        Only parts that actually published are recorded, and at the fingerprint taken before
+        this run touched them, which is the one the sync takes. Anything else records a
+        version no sync will ever compute, and every part carrying it reads as changed
+        forever after.
 
         Recording is best-effort on purpose. A long bulk load that publishes correctly must
         not die because the state database was busy; the cost of failing here is that the
@@ -163,9 +173,9 @@ def run(args) -> int:
             return
         batch, unbanked[:] = list(unbanked), []
         try:
-            prints = fingerprints_all(batch, photos.resolve, store, stamps=photos.stamps)
-            state.update(prints)
-            state.record_channel(CHANNEL, prints)
+            banked = fp_subset(prints, batch)
+            state.update(banked)
+            state.record_channel(CHANNEL, banked)
         except Exception as exc:      # noqa: BLE001 - see the docstring
             print(f"  (could not record {len(batch)} part(s) in the sync state: {exc})",
                   flush=True)
@@ -197,7 +207,7 @@ def run(args) -> int:
             processed += 1
             if result["status"] == "ok":
                 successes += 1
-                unbanked.append(part)
+                unbanked.append(part.uid())
                 bank(state)
                 marker = "OK"
                 detail = f'+{result["images_added"]} images'
