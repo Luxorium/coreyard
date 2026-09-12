@@ -41,7 +41,7 @@ that does not exist yet, and those are different problems with different owners.
 
 Owner and environment are unassigned until a release owner is named (SEC-04, QA-03).
 
-Baseline commit: `35c1706` · offline suite: 1157 tests · Python 3.14.7 locally,
+Baseline commit: `6cab4cc` · offline suite: 1279 tests · Python 3.14.7 locally,
 3.10-3.13 in CI.
 
 | Criterion | Title | Status | Needs | Evidence and outstanding work |
@@ -73,7 +73,7 @@ Baseline commit: `35c1706` · offline suite: 1157 tests · Python 3.14.7 locally
 | `DATA-06` | Customer mapping acceptance | NOT VERIFIED | offline + live yard | No evidence collected. |
 | `DATA-07` | Source freshness | NOT VERIFIED | offline | No evidence collected. |
 | `SYNC-01` | Convergence | NOT VERIFIED | test store | No evidence collected. |
-| `SYNC-02` | Partial failure | NOT VERIFIED | offline | No evidence collected. |
+| `SYNC-02` | Partial failure | IN PROGRESS | offline | All four injection points the criterion names are now exercised against a real `ShopifyPublisher` driven at a fake store that treats the handle as the identity, because that is what decides the duplicate question and a stubbed publisher stubs it out (`tests/test_partial_failure.py`, 15 tests). Failure **before the request** (the photo share refuses): nothing is sent, no fingerprint is kept, the next run still owes the part. **After the remote write, before the checkpoint**: the next run upserts the same product rather than creating a second, and an update the interrupted run never published is still found. **During a batch**: only what published advances, the refused part is retried and lands, and an exception that is not a `RuntimeError` still banks what had published (`_publish_batch`'s `finally`, also `tests/test_publish_checkpoint.py`). **During checkpoint persistence**: a bank that raises claims nothing, and the next run converges without duplicating the products the first run had already written. Commit discipline for the wholesale path is `_committable` (`tests/test_commit_discipline.py`): a part the diff called changed that never landed keeps the fingerprint the storefront actually holds, so the change is not lost. Fixed 2026-09-11: a failed publish was counted and printed but never recorded, so "3 failed" on every tick read the same whether it was three different parts or the same three stuck since Tuesday — `_publish_batch` now records each failure and its reason through `state.record_channel_failure`, a later success clears it, and `status` names the parts still failing. Outstanding: failure injected *inside* the sink's own retry loop (staged upload, HTTP PUT), the CSV sink's own partial-failure behaviour, and the cross-channel clause, which one channel cannot demonstrate. |
 | `SYNC-03` | Retirement guards | NOT VERIFIED | offline | No evidence collected. |
 | `SYNC-04` | Time and contention | NOT VERIFIED | offline | No evidence collected. |
 | `SYNC-05` | Sale versus publication race | NOT VERIFIED | offline + live yard | No evidence collected. |

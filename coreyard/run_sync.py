@@ -287,7 +287,7 @@ def _enrich(conn, parts) -> None:
         print(f"  (enrichment skipped: {exc})")
 
 
-def _publish_batch(publisher, todo, needs_photos, revivals, bank):
+def _publish_batch(publisher, todo, needs_photos, revivals, bank, fail=None):
     """Publish each part, banking progress as it goes *and* however this loop is left.
 
     ``bank(pending)`` records the parts published since it was last called. It runs at the
@@ -307,6 +307,12 @@ def _publish_batch(publisher, todo, needs_photos, revivals, bank):
     Banking here can never skip a part. A fingerprint is recorded strictly after the publish
     it describes returned cleanly, and the *cursor* is still advanced only on a clean
     finish, so an interrupted run leaves a smaller snapshot, never a wrong one.
+
+    ``fail(r_number, reason)`` records the parts this run could not publish. The count alone
+    cannot answer the question an operator actually has: "3 failed" on every tick reads the
+    same whether it is three different parts each time or the same three stuck since Tuesday.
+    A recorded reason survives the run, and a later success clears it, so what is left is
+    exactly the set that is still failing.
 
     Returns ``(published_ok, revived)``.
     """
@@ -328,8 +334,12 @@ def _publish_batch(publisher, todo, needs_photos, revivals, bank):
                 publisher.publish(part, refresh_images=key in needs_photos,
                                   revive_status=revivals.get(key))
             except RuntimeError as exc:
-                # Leave this part out of the state update so the next run retries it.
+                # Leave this part out of the state update so the next run retries it, and
+                # remember why: the fingerprint is deliberately untouched, so nothing else
+                # in the snapshot distinguishes a part that failed from one nobody tried.
                 print(f"  R#{key}: {exc}")
+                if fail is not None:
+                    fail(key, str(exc))
                 continue
             published_ok.add(key)
             if key in revivals:
@@ -466,7 +476,11 @@ def cmd_delta(args) -> int:
             state.update(banked)
             state.record_channel(CHANNEL, banked)
 
-        published_ok, revived = _publish_batch(publisher, todo, needs_photos, revivals, bank)
+        def fail(r_number: str, reason: str) -> None:
+            state.record_channel_failure(CHANNEL, r_number, reason)
+
+        published_ok, revived = _publish_batch(publisher, todo, needs_photos, revivals,
+                                               bank, fail)
         state.clear_retired(revived)
 
         retired: set[str] = set()
@@ -779,8 +793,13 @@ def cmd_sync(args) -> int:
                 state.update(banked)
                 state.record_channel(CHANNEL, banked)
 
+            def fail(r_number: str, reason: str) -> None:
+                if args.dry_run:
+                    return
+                state.record_channel_failure(CHANNEL, r_number, reason)
+
             published_ok, revived = _publish_batch(publisher, todo, needs_photos,
-                                                   revivals, bank)
+                                                   revivals, bank, fail)
             # Only after the upsert landed: a part whose revival failed must still be
             # remembered, or the retry would republish it as ARCHIVED.
             state.clear_retired(revived)

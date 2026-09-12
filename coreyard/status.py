@@ -53,7 +53,7 @@ def gather(deep: bool = False) -> dict:
     """Everything the report shows. Each section degrades to a message on its own."""
     caps = capabilities.detect()
     report: dict = {"reachability": [], "counts": {}, "pending": {}, "runs": {},
-                    "source": caps.source_kind,
+                    "failing": {}, "source": caps.source_kind,
                     "capabilities": {name: state for name, state, _ in caps.summary()}}
 
     # Probe what this installation actually uses. Asking a tabular yard whether its named
@@ -92,6 +92,14 @@ def gather(deep: bool = False) -> dict:
                 for channel in channels:
                     report["counts"][f"  via {channel}"] = state.channel_summary(
                         channel, snapshot)
+            # What is *still* failing, rather than what failed on the last tick. A part
+            # keeps its row until a publish of it succeeds, so this is the set the counts
+            # cannot show: an unchanged fingerprint means "not published", whether nobody
+            # tried or it has been refused every run since Tuesday.
+            for channel in channels:
+                failures = state.channel_failures(channel)
+                if failures:
+                    report["failing"][channel] = failures
     except Exception as exc:
         report["counts"]["CoreYard state"] = f"FAILED — {str(exc)[:60]}"
         snapshot = {}
@@ -189,6 +197,14 @@ def _render(report: dict) -> None:
         detail = "  ".join(f"{k}={v}" for k, v in sorted(counts.items()) if v)
         line = f"  {label:<32}{run['when']:>12}  {verdict:<12}"
         print((line + f"  {detail}" if detail and not dry else line).rstrip())
+
+    for channel, failures in (report.get("failing") or {}).items():
+        print(f"\n  {len(failures)} part(s) failed their last publish to {channel} and are "
+              f"still pending:")
+        for r_number, reason in sorted(failures.items())[:3]:
+            print(f"    R#{r_number:<10}{reason[:58]}")
+        if len(failures) > 3:
+            print(f"    ... and {len(failures) - 3:,} more")
 
     if report.get("running"):
         print(f"\n  running now   {', '.join(report['running'])}")
