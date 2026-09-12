@@ -24,6 +24,13 @@ from coreyard.state import DEFAULT_STATE_DB
 # without bound. At a run every five minutes this is about a fortnight.
 MAX_ROWS = 4000
 
+# A tick that never ran because another run held the lock. The marker lives in the counts
+# blob like every other outcome flag (`dry_run`, `timed_out`), so this is how SQL asks for
+# it: a skipped tick is `ok = 1` — being turned away is a normal thing to happen — and a
+# staleness check that counted it would report a job that has done nothing for days as
+# having last worked a minute ago.
+SKIPPED_PATTERN = '%"skipped"%'
+
 _DDL = """CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   command TEXT NOT NULL,
@@ -177,6 +184,59 @@ def record(command: str, scope: str = "", db: Path = DEFAULT_STATE_DB):
             pass
 
 
+def skipped(command: str, scope: str = "", holder: str = "",
+            db: Path = DEFAULT_STATE_DB) -> None:
+    """Record a tick that never ran because another run held the lock.
+
+    A busy lock is a normal outcome — the five-minute catch-up shares the hourly sync's lock
+    so that a full run supersedes it — but it is not *nothing*, and until now it left no
+    trace outside a line in a log file. That is the shape the 2026-09-02 starvation took: a
+    delta holding the lock four minutes in five, the hourly sync and the half-hourly
+    reconcile skipped for four days, and a status page that could only say the last full sync
+    was old, never that every attempt since had been turned away at the door.
+
+    Written as a finished row with ``skipped`` in its counts. :func:`last` and
+    :func:`last_ok` step over these, because "the last run" has to keep meaning one that
+    actually ran: a skip that closed the staleness window would silence the alert that
+    exists for exactly this.
+    """
+    try:
+        conn = _connect(db)
+        now = datetime.now(timezone.utc).isoformat()
+        counts = {"skipped": True}
+        if holder:
+            counts["holder"] = holder
+        with conn:
+            conn.execute(
+                "INSERT INTO runs(command, scope, started, finished, ok, counts, exit_code)"
+                " VALUES (?,?,?,?,1,?,0)",
+                (command, scope, now, now, json.dumps(counts)))
+            conn.execute(
+                "DELETE FROM runs WHERE id NOT IN"
+                " (SELECT id FROM runs ORDER BY id DESC LIMIT ?)", (MAX_ROWS,))
+        conn.close()
+    except Exception:
+        pass
+
+
+def skips_since_last_run(command: str, scope: str | None = None,
+                         db: Path = DEFAULT_STATE_DB) -> int:
+    """How many ticks of this command have been turned away since it last actually ran.
+
+    The number that distinguishes "nothing is scheduled any more" from "it is scheduled and
+    never gets in", which read identically in a stale timestamp.
+    """
+    count = 0
+    for run in history(limit=MAX_ROWS, db=db):
+        if run["command"] != command or (scope is not None and run["scope"] != scope):
+            continue
+        if run["counts"].get("skipped"):
+            count += 1
+        else:
+            break
+    return count
+
+
 def running(command: str, scope: str | None = None,
             db: Path = DEFAULT_STATE_DB) -> bool:
     """Is a run of this command in flight right now?
@@ -252,9 +312,13 @@ def last_ok(command: str, scope: str | None = None,
     conn = None
     try:
         conn = _connect(db)
+        # `counts NOT LIKE` rather than a column, because the skip marker lives in the
+        # counts blob like every other outcome flag. A skipped tick is ok=1 — it is a normal
+        # thing to happen — so without this it would answer "when did this last work" with
+        # the moment it was last turned away, which is the failure this function documents.
         sql = ("SELECT finished FROM runs WHERE command = ? AND ok = 1"
-               " AND finished IS NOT NULL")
-        values: tuple = (command,)
+               " AND finished IS NOT NULL AND counts NOT LIKE ?")
+        values: tuple = (command, SKIPPED_PATTERN)
         if scope is not None:
             sql += " AND scope = ?"
             values += (scope,)
@@ -269,8 +333,15 @@ def last_ok(command: str, scope: str | None = None,
 
 def last(command: str, scope: str | None = None,
          db: Path = DEFAULT_STATE_DB) -> dict | None:
-    """The most recent *finished* run of one command (optionally one scope), or None."""
+    """The most recent *finished* run of one command (optionally one scope), or None.
+
+    A tick that was skipped for a busy lock is not one: it neither succeeded nor failed, and
+    counting it would make "no full sync has finished for three hours" read as a run that
+    ended three minutes ago. :func:`skips_since_last_run` is how those are counted.
+    """
     for run in history(limit=MAX_ROWS, db=db):
+        if run["counts"].get("skipped"):
+            continue
         if run["command"] == command and (scope is None or run["scope"] == scope):
             return run
     return None

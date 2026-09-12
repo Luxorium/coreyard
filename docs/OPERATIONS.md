@@ -110,6 +110,12 @@ already has it — a skipped tick is the intended outcome when a full sync is st
 `--timeout` stops a long run cleanly, exiting 124. Both are global flags, so they go before
 the command.
 
+A skipped tick is recorded, and `bin/coreyard status` counts them beside the last run that
+actually ran: "Last full sync 4h ago  ok  47 tick(s) skipped since" is a job being starved by
+whatever else holds that lock, which otherwise looks identical to a job nobody schedules any
+more. The staleness alerts ignore skips deliberately, so being turned away never reads as
+having run.
+
 A run that is stopped this way **keeps the work it had already published**: progress is
 banked into the snapshot every 100 products. Without that, a backlog larger than one timeout
 window can never be worked off — each run publishes what it can, records nothing, and the

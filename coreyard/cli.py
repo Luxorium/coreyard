@@ -200,6 +200,19 @@ def _duration(text: str) -> int:
     return total
 
 
+class LockBusy(SystemExit):
+    """Another run holds this lock, so this tick does not run.
+
+    Carries the lock's name so the caller can record which job it yielded to. A
+    ``SystemExit`` subclass because that is what it has always been — exiting 0 is the
+    intended outcome — and anything that catches ``SystemExit`` keeps working unchanged.
+    """
+
+    def __init__(self, holder: str):
+        super().__init__(0)
+        self.holder = holder
+
+
 @contextmanager
 def _single_instance(name: str):
     """Refuse to start if another run holds this lock, exactly as cron's ``flock -n`` did.
@@ -221,7 +234,7 @@ def _single_instance(name: str):
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             print(f"Another run holds {path.name}; skipping this one.")
-            raise SystemExit(0)
+            raise LockBusy(path.name)
         yield
     finally:
         handle.close()
@@ -347,6 +360,18 @@ def main(argv: list[str] | None = None) -> int:
     path = getattr(args, "_support_path", None) or args.command
     missing = unmet(path, caps)
 
+    try:
+        return _run(args, path, missing, caps)
+    except LockBusy as busy:
+        # A skipped tick is a normal outcome and still an event. Recorded so that "scheduled
+        # and never gets in" stops reading like "no longer scheduled": the two are the same
+        # stale timestamp otherwise, and telling them apart took four days the last time.
+        ops.skipped(args.command, getattr(args, "scope", None) or "", busy.holder)
+        return 0
+
+
+def _run(args, path: str, missing, caps) -> int:
+    """The command itself, inside the lock and the deadline it asked for."""
     with _single_instance(args.lock) if args.lock else _nullcontext():
         with _deadline(args.timeout) if args.timeout else _nullcontext():
             if _reports_only(args):

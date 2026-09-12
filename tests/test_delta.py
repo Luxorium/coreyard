@@ -149,8 +149,52 @@ class SubsetState(unittest.TestCase):
 
 
 class Overlap(unittest.TestCase):
+    """A row committed while the read is running must not fall into the gap between runs.
+
+    The window closes at the server's clock as it was *before* the read, minus an overlap,
+    so the next run re-covers the time this one spent reading. Re-covering is free —
+    publishing is idempotent — and the alternative is a part that changed mid-extract and is
+    never looked at again, because the cursor moved past it while it was in flight.
+    """
+
+    def fetch(self, server_time, since=WHEN, overlap=delta.DEFAULT_OVERLAP):
+        self.read_from = None
+
+        def page_rows(conn, mapping, since_, images_only):
+            self.read_from = since_
+            return [], False
+
+        with mock.patch.object(delta, "connect"), \
+                mock.patch.object(delta.schema, "load", return_value=MAPPING), \
+                mock.patch.object(delta, "server_now", return_value=server_time), \
+                mock.patch.object(delta, "_page_rows", side_effect=page_rows), \
+                mock.patch.object(delta, "_photo_changed_r_numbers", return_value=set()):
+            return delta._fetch_changes_once(since, overlap)
+
     def test_cursor_is_rewound_so_in_flight_writes_are_not_skipped(self):
         self.assertGreater(delta.DEFAULT_OVERLAP, timedelta(0))
+
+    def test_the_stored_cursor_is_the_servers_clock_less_the_overlap(self):
+        now = datetime(2026, 9, 11, 12, 0, 0)
+        self.assertEqual(self.fetch(now).cursor, now - delta.DEFAULT_OVERLAP)
+
+    def test_it_is_the_clock_read_before_the_query_not_after(self):
+        """Taken after, the rows written during the read would be inside the window this
+        run already passed, and nothing would ever return to them."""
+        now = datetime(2026, 9, 11, 12, 0, 0)
+        result = self.fetch(now)
+        self.assertLess(result.cursor, now)
+
+    def test_the_read_still_starts_where_the_last_one_stopped(self):
+        """The overlap widens what the *next* run sees, never narrows this one."""
+        self.fetch(datetime(2026, 9, 11, 12, 0, 0))
+        self.assertEqual(self.read_from, WHEN)
+
+    def test_a_run_that_takes_longer_than_the_overlap_still_moves_forward(self):
+        """The cursor is the source's clock, so a slow read cannot rewind it past `since`
+        and turn every catch-up into a re-read of the same window."""
+        now = WHEN + timedelta(hours=1)
+        self.assertGreater(self.fetch(now).cursor, WHEN)
 
 
 class TransientRetry(unittest.TestCase):

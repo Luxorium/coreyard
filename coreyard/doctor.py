@@ -390,7 +390,16 @@ def check_freshness(*, caps=None) -> list[Result]:
                 out.append((OK, "delta", f"cursor {minutes} min old — catch-up is "
                                          f"skipped while a full sync holds the lock"))
             else:
-                out.append((FAIL, "delta", f"cursor {minutes} min old"))
+                # Say *why* where the answer is known. A frozen cursor and a frozen cursor
+                # whose job has been turned away forty times are the same red line and
+                # different problems: one is a broken delta, the other is a neighbour
+                # holding the shared lock past its budget.
+                skipped = ops.skips_since_last_run("sync", "delta")
+                detail = f"cursor {minutes} min old"
+                if skipped:
+                    detail += (f" — {skipped} catch-up tick(s) skipped since it last ran; "
+                               f"another job is holding the lock")
+                out.append((FAIL, "delta", detail))
 
         try:
             newest = conn.execute("SELECT MAX(last_seen) FROM parts").fetchone()[0]

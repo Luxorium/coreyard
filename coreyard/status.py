@@ -144,19 +144,27 @@ def gather(deep: bool = False) -> dict:
                  for r in ops.history(limit=20, include_running=True) if r["running"]]
     report["running"] = in_flight
 
-    for label, scope in (("Last full sync", ""), ("Last delta sync", "delta"),
-                         ("Last inventory sync", "inventory")):
-        run = ops.last("sync", scope)
-        report["runs"][label] = ({"when": _ago(run["finished"] or run["started"]),
-                                  "ok": run["ok"], "counts": run["counts"],
-                                  "exit_code": run.get("exit_code")}
-                                 if run else None)
-    for command in ("reconcile", "repair", "orders"):
-        run = ops.last(command)
-        if run:
-            report["runs"][f"Last {command}"] = {
-                "when": _ago(run["finished"] or run["started"]), "ok": run["ok"],
-                "counts": run["counts"], "exit_code": run.get("exit_code")}
+    # Skipped ticks are counted beside the last run that actually ran, not folded into it.
+    # "Last full sync 4h ago, ok" is true and useless while every attempt since has been
+    # turned away by a held lock; "4h ago, ok, 47 skipped since" is the same fact with the
+    # reason attached.
+    for label, command, scope in (("Last full sync", "sync", ""),
+                                  ("Last delta sync", "sync", "delta"),
+                                  ("Last inventory sync", "sync", "inventory"),
+                                  ("Last reconcile", "reconcile", None),
+                                  ("Last repair", "repair", None),
+                                  ("Last orders", "orders", None)):
+        run = ops.last(command, scope)
+        if run is None:
+            # A sync row is shown even when it has never run, because "never" is the answer
+            # to "is this scheduled?". A command nobody has used says nothing worth a line.
+            if command == "sync":
+                report["runs"][label] = None
+            continue
+        report["runs"][label] = {
+            "when": _ago(run["finished"] or run["started"]), "ok": run["ok"],
+            "counts": run["counts"], "exit_code": run.get("exit_code"),
+            "skipped_since": ops.skips_since_last_run(command, scope)}
     return report
 
 
@@ -195,6 +203,11 @@ def _render(report: dict) -> None:
                    else "ok" if run["ok"]
                    else f"FAILED ({code})" if code not in (None, 1) else "FAILED")
         detail = "  ".join(f"{k}={v}" for k, v in sorted(counts.items()) if v)
+        skipped = run.get("skipped_since") or 0
+        if skipped:
+            # Not a count of this run: a count of the attempts that never became one.
+            detail = (f"{skipped} tick(s) skipped since"
+                      + (f"  {detail}" if detail else ""))
         line = f"  {label:<32}{run['when']:>12}  {verdict:<12}"
         print((line + f"  {detail}" if detail and not dry else line).rstrip())
 

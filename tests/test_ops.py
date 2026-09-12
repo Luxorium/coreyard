@@ -186,6 +186,97 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class SkippedTicks(unittest.TestCase):
+    """A tick turned away by a held lock is an event, and not an outcome.
+
+    Both halves matter. Recording nothing is how the 2026-09-02 starvation hid: the hourly
+    sync and the half-hourly reconcile were skipped for four days and the only evidence was
+    a line in a log file, so `status` could say the last full sync was old but never that
+    every attempt since had been refused at the door. Recording it as an ordinary run would
+    be worse — the staleness alert reads the newest row, and a job skipped every minute
+    would look like one finishing every minute.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name) / "state.sqlite3"
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_a_skipped_tick_is_recorded_with_what_it_yielded_to(self):
+        ops.skipped("sync", "delta", ".sync.lock", db=self.db)
+        run = ops.history(limit=5, db=self.db)[0]
+        self.assertEqual((run["command"], run["scope"]), ("sync", "delta"))
+        self.assertTrue(run["counts"]["skipped"])
+        self.assertEqual(run["counts"]["holder"], ".sync.lock")
+
+    def test_it_is_not_the_last_run(self):
+        with ops.record("sync", "delta", db=self.db) as run:
+            run.code = 0
+        ops.count(created=3)
+        ops.skipped("sync", "delta", db=self.db)
+        self.assertFalse(ops.last("sync", "delta", db=self.db)["counts"].get("skipped"))
+
+    def test_it_does_not_answer_when_this_last_worked(self):
+        """The staleness checks read `last_ok`. A skip that closed that window would
+        silence the alarm for exactly the outage it is watching for."""
+        with ops.record("reconcile", db=self.db) as run:
+            run.code = 0
+        worked = ops.last_ok("reconcile", db=self.db)
+        for _ in range(5):
+            ops.skipped("reconcile", "", db=self.db)
+        self.assertEqual(ops.last_ok("reconcile", db=self.db), worked)
+
+    def test_the_skips_since_the_last_real_run_are_countable(self):
+        with ops.record("sync", "", db=self.db) as run:
+            run.code = 0
+        for _ in range(7):
+            ops.skipped("sync", "", db=self.db)
+        self.assertEqual(ops.skips_since_last_run("sync", "", db=self.db), 7)
+
+    def test_a_later_real_run_clears_the_count(self):
+        ops.skipped("sync", "", db=self.db)
+        with ops.record("sync", "", db=self.db) as run:
+            run.code = 0
+        self.assertEqual(ops.skips_since_last_run("sync", "", db=self.db), 0)
+
+    def test_another_jobs_skips_are_not_counted(self):
+        with ops.record("sync", "", db=self.db) as run:
+            run.code = 0
+        ops.skipped("orders", "", db=self.db)
+        self.assertEqual(ops.skips_since_last_run("sync", "", db=self.db), 0)
+
+    def test_a_busy_lock_exits_zero_and_leaves_a_trace(self):
+        """The whole point of the shared lock is that the lesser job gives way, so this is
+        a normal exit — but an invisible one is indistinguishable from an absent cron job."""
+        import fcntl
+
+        from coreyard import cli
+
+        held = Path(self.tmp.name) / "out" / ".sync.lock"
+        held.parent.mkdir(parents=True, exist_ok=True)
+        handle = held.open("w")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.addCleanup(handle.close)
+
+        with unittest.mock.patch("coreyard.cli.out_dir", return_value=held.parent), \
+                unittest.mock.patch("coreyard.ops.skipped") as recorded, \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            code = cli.main(["--lock", "sync", "status"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("skipping this one", out.getvalue())
+        recorded.assert_called_once_with("status", "", ".sync.lock")
+
+    def test_status_says_how_many_ticks_were_turned_away(self):
+        report = {"reachability": [], "counts": {}, "pending": {},
+                  "runs": {"Last full sync": {"when": "4h ago", "ok": True, "counts": {},
+                                              "skipped_since": 47}}}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            status._render(report)
+        self.assertIn("47 tick(s) skipped since", out.getvalue())
+
+
 class CryWolf(unittest.TestCase):
     """Three ways the diagnostics reported a non-problem, each fixed.
 
