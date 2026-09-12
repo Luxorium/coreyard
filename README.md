@@ -97,6 +97,7 @@ product, not to a specific variant, which is fine while every part is a single-v
 | [Adding a yard system](docs/SOURCES.md) | The source contract: what an adapter must do, and what it may decline |
 | [Capability matrix](docs/CAPABILITY_MATRIX.md) | What is supported per source and feature, with limitations |
 | [Command inventory](docs/INVENTORY.md) | Every command, generated from the live command tree |
+| [Settings](docs/SETTINGS.md) | Every setting, its type and default, generated from the code that reads it |
 | [Evidence ledger](docs/EVIDENCE_LEDGER.md) | What has been verified, and what has not |
 | [Contributing](CONTRIBUTING.md) | How to work on CoreYard |
 

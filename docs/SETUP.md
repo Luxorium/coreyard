@@ -52,6 +52,10 @@ Only two Python dependencies exist, and each belongs to one capability:
 | Rendering, diffing, the CSV sink, the whole transform | — | nothing third-party is involved |
 | Mirroring images to an S3-compatible bucket | `boto3`, optional and not installed | the default publishes Shopify-hosted media |
 
+Every setting an installation can carry — its type, its default, and whether a command
+refuses to start without it — is in [`docs/SETTINGS.md`](SETTINGS.md), generated from the code
+that reads each key.
+
 `coreyard doctor` reports each of these as a capability rather than as a package, so a missing
 system tool reads as the feature it disables. The two Python dependencies pull roughly twenty
 more of their own; `scripts/dependencies.py --licences` lists the closure as installed, and

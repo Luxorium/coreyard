@@ -206,3 +206,50 @@ class DependenciesAreDeclaredOnce(unittest.TestCase):
         for direct in ("impacket==", "requests=="):
             with self.subTest(dependency=direct):
                 self.assertTrue(any(line.startswith(direct) for line in recorded))
+
+
+class SettingsAreDocumentedFromTheCode(unittest.TestCase):
+    """UX-02: the type, default and precedence of every setting, generated rather than kept.
+
+    A configuration reference written by hand is wrong within two releases — a key is
+    renamed, a default moves, an option is added for one installation and never written down
+    — and a reference that is wrong is worse than none, because it is believed.
+    """
+
+    def test_the_document_matches_the_code(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        result = subprocess.run([sys.executable, "scripts/settings.py", "--check"],
+                                cwd=root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_it_covers_the_scripts_as_well_as_the_package(self):
+        """`healthcheck.py` reads its own notifier command, and a reference that stopped at
+        the package would omit a key `.env.example` documents."""
+        import importlib.util
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location(
+            "coreyard_settings_script", root / "scripts" / "settings.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertIn("COREYARD_ALERT_CMD", module.collect())
+
+    def test_a_typed_accessor_gives_the_setting_its_type(self):
+        """A key read through `_duration` is a duration whether or not anyone wrote that
+        down, which is the whole reason this is generated."""
+        import importlib.util
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location(
+            "coreyard_settings_script2", root / "scripts" / "settings.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        settings = module.collect()
+        self.assertIn("duration", settings["COREYARD_ALERT_REPEAT"].kind)
+        self.assertEqual(settings["STORE_REQUIRE_IMAGES"].kind, "switch")

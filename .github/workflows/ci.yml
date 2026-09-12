@@ -63,6 +63,10 @@ jobs:
       # installer — and the copy nobody installs from is the one that goes stale.
       - name: The two dependency declarations agree
         run: python scripts/dependencies.py --check
+      # UX-02. A settings reference that describes keys the code no longer reads is worse
+      # than none, because it is believed.
+      - name: docs/SETTINGS.md matches the code that reads each setting
+        run: python scripts/settings.py --check
 
   hygiene:
     name: whitespace and metadata
