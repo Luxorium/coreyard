@@ -111,6 +111,26 @@ to `DRAFT`: an imported CSV lands as drafts on no channel, exactly as an API pub
 a catalogue reaches shoppers only once somebody says so. Existing products keep the status
 they have either way.
 
+### Exit codes
+
+Four, and they mean the same thing on every command, because a scheduled job reads the
+number rather than the message:
+
+| Code | Meaning | What automation should do |
+|---|---|---|
+| `0` | It did what it was asked, **or** deliberately did nothing — a skipped tick behind a busy lock, an unpaid webhook acknowledged and dropped, a dry run | nothing; the run history and `status` carry the detail |
+| `1` | It tried and failed: a part that would not publish, an order that would not book, a command that raised | look. `coreyard status` names the failure and the next run retries what is retryable |
+| `2` | It refused before doing anything: a capability this installation does not have, a snapshot belonging to another store, a stale source, a flag that cannot apply to this command | fix the configuration. Nothing was changed, so re-running without fixing it changes nothing again |
+| `124` | It ran out of `--timeout` and stopped cleanly, keeping the work it had banked | usually nothing — the next run continues. Every run timing out means the window is too small or the backlog too big |
+
+A busy lock is `0` on purpose: the five-minute catch-up shares the hourly sync's lock so a
+full run supersedes it, and a monitor that treats a skipped tick as a failure pages every
+hour for the system working as designed. The skip is recorded instead, and `status` counts
+them.
+
+`124` is GNU `timeout`'s status, so a monitor that already understands the crontab's
+`timeout` reads CoreYard's own deadline the same way.
+
 ### Source freshness
 
 A read that worked is not a read that is current. Against a live database those are the same
