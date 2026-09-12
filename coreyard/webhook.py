@@ -98,7 +98,26 @@ def verify(body: bytes, header: str, secret: str) -> bool:
 
 
 # ------------------------------------------------------------------------ server ---
-def make_handler(spool: EventQueue, secret: str, path: str, wake: queue.Queue):
+def _configured_store() -> str:
+    """The shop domain this installation publishes to, or "" when it has none."""
+    try:
+        from coreyard.sink.shopify_api import load_creds
+
+        return load_creds().store
+    except Exception:
+        return ""
+
+
+def make_handler(spool: EventQueue, secret: str, path: str, wake: queue.Queue,
+                 store: str = ""):
+    """The request handler. ``store`` is the shop domain this installation publishes to.
+
+    Passed in rather than read here so the caller decides — an installation with no store
+    configured (a test, a fixture) accepts any delivery it can verify, which is the same
+    thing it did before the check existed.
+    """
+    store = (store or "").strip().lower()
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "CoreYard"
         sys_version = ""
@@ -130,6 +149,21 @@ def make_handler(spool: EventQueue, secret: str, path: str, wake: queue.Queue):
             if not verify(body, self.headers.get("X-Shopify-Hmac-Sha256", ""), secret):
                 # No detail: an attacker probing the endpoint learns only that it said no.
                 return self._reply(401, "unauthorized")
+
+            # Signed, but signed for whom? The HMAC proves the sender holds this
+            # installation's secret; it says nothing about which store the order belongs to.
+            # An app installed on two stores, a secret copied into a second environment, or
+            # an installation re-pointed while the old store is still retrying, all produce
+            # deliveries that verify and describe somebody else's sale — which would be
+            # booked into this yard and taken off these shelves.
+            delivered_by = (self.headers.get("X-Shopify-Shop-Domain") or "").strip().lower()
+            if store and delivered_by and delivered_by != store:
+                # 200, so it is not retried here for two days: it is not this endpoint's
+                # order and never will be. Named in the log, because a delivery arriving
+                # from a store nobody configured is worth somebody knowing about.
+                print(f"  refused a delivery from {delivered_by}; this installation "
+                      f"publishes to {store}", file=sys.stderr)
+                return self._reply(200, "ignored other store")
 
             topic = self.headers.get("X-Shopify-Topic", "unknown").strip().lower()
             if topic not in SUPPORTED_TOPICS:
@@ -195,7 +229,7 @@ def serve(args) -> int:
 
     threading.Thread(target=loop, daemon=True).start()
 
-    handler = make_handler(spool, secret, args.path, wake)
+    handler = make_handler(spool, secret, args.path, wake, _configured_store())
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(f"CoreYard webhook listening on http://{args.host}:{args.port}{args.path}")
     print(f"  retire sold parts: {'no' if args.no_retire else 'yes'}")

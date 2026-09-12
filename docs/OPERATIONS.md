@@ -398,9 +398,14 @@ Remove the legacy subscription after confirming the paid subscription is active.
 `serve` binds to `127.0.0.1:8787` by default — put TLS in front of it (a reverse proxy or a
 tunnel); Shopify only delivers to `https://`. Every request is checked against the app's
 signing secret with a constant-time compare, and an unsigned or mis-signed POST is refused
-without explanation. Deliveries are queued by `X-Shopify-Webhook-Id`, so Shopify's
-at-least-once retries can't print an order twice, and the receiver answers immediately rather
-than holding the connection open while a printer warms up.
+without explanation. A signature proves the sender holds this installation's secret, though —
+not that the order is this store's, so a delivery whose `X-Shopify-Shop-Domain` is not the
+store in `SHOPIFY_STORE` is acknowledged, logged and dropped. That happens when one app is
+installed on two stores, when a secret is copied into a second environment, or when an
+installation is re-pointed while the old store is still retrying; booking one of those would
+take a part off these shelves for somebody else's sale. Deliveries are queued by
+`X-Shopify-Webhook-Id`, so Shopify's at-least-once retries can't print an order twice, and the
+receiver answers immediately rather than holding the connection open while a printer warms up.
 
 Sold parts are archived on Shopify as each paid order arrives, which closes the window where a
 part stays buyable until the next timer tick. `--no-retire` leaves them on sale. Order payloads

@@ -119,6 +119,154 @@ class PaymentGate(unittest.TestCase):
         )
 
 
+class Delivery(unittest.TestCase):
+    """ORD-01 at the door: what a request has to be before anything is persisted.
+
+    Each guard is one refusal, and the property they share is that nothing reaches the queue
+    — an order that is not queued is never printed, never booked, and never takes a part off
+    the shelf.
+    """
+
+    def setUp(self):
+        import queue as queue_mod
+
+        from coreyard.webhook import make_handler
+
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.spool = EventQueue(Path(self.tmp.name) / "queue.sqlite3")
+        self.addCleanup(self.spool.close)
+        self.wake = queue_mod.Queue()
+        self.handler_cls = make_handler(self.spool, SECRET, "/hook", self.wake,
+                                        store="mine.myshopify.com")
+
+    def post(self, payload=None, *, body=None, secret=SECRET, path="/hook",
+             topic="orders/paid", delivery="d-1", shop="mine.myshopify.com",
+             length=None, sign_body=True):
+        if body is None:
+            body = json.dumps(payload or self.order()).encode()
+        headers = {"Content-Length": str(len(body) if length is None else length),
+                   "X-Shopify-Topic": topic,
+                   "X-Shopify-Webhook-Id": delivery}
+        if shop is not None:
+            headers["X-Shopify-Shop-Domain"] = shop
+        if sign_body:
+            headers["X-Shopify-Hmac-Sha256"] = sign(body, secret)
+        replies = []
+        handler = self.handler_cls.__new__(self.handler_cls)
+        handler.path = path
+        handler.headers = headers
+        handler.rfile = io.BytesIO(body)
+        handler._reply = lambda code, message="": replies.append((code, message))
+        handler.address_string = lambda: "198.51.100.7"
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            handler.do_POST()
+        return replies[0], err.getvalue()
+
+    def order(self, **kw):
+        payload = {"id": 9001, "name": "#1042", "financial_status": "paid",
+                   "line_items": [{"sku": "51", "quantity": 1}]}
+        payload.update(kw)
+        return payload
+
+    def queued(self) -> int:
+        return len(self.spool.pending())
+
+    def test_a_signed_paid_order_from_this_store_is_queued(self):
+        (code, message), _ = self.post()
+        self.assertEqual((code, message), (200, "queued"))
+        self.assertEqual(self.queued(), 1)
+
+    def test_a_wrong_signature_is_refused_and_nothing_is_kept(self):
+        (code, _), _ = self.post(secret="shpss_someoneelse")
+        self.assertEqual(code, 401)
+        self.assertEqual(self.queued(), 0)
+
+    def test_a_missing_signature_is_refused(self):
+        (code, _), _ = self.post(sign_body=False)
+        self.assertEqual(code, 401)
+        self.assertEqual(self.queued(), 0)
+
+    def test_an_oversized_body_is_refused_before_it_is_read(self):
+        from coreyard.webhook import MAX_BODY
+
+        (code, _), _ = self.post(length=MAX_BODY + 1)
+        self.assertEqual(code, 413)
+        self.assertEqual(self.queued(), 0)
+
+    def test_an_empty_or_unparsable_length_is_refused(self):
+        self.assertEqual(self.post(length=0)[0][0], 413)
+        self.assertEqual(self.post(length="banana")[0][0], 400)
+        self.assertEqual(self.queued(), 0)
+
+    def test_malformed_json_is_refused(self):
+        (code, _), _ = self.post(body=b"{not json")
+        self.assertEqual(code, 400)
+        self.assertEqual(self.queued(), 0)
+
+    def test_json_that_is_not_an_order_is_refused(self):
+        (code, _), _ = self.post(body=json.dumps([1, 2, 3]).encode())
+        self.assertEqual(code, 400)
+        self.assertEqual(self.queued(), 0)
+
+    def test_an_unpaid_order_is_acknowledged_and_dropped(self):
+        """Acknowledged so Shopify stops retrying, dropped so no PII is persisted."""
+        (code, message), _ = self.post(self.order(financial_status="pending"))
+        self.assertEqual((code, message), (200, "ignored unpaid"))
+        self.assertEqual(self.queued(), 0)
+
+    def test_a_delivery_from_another_store_is_refused(self):
+        """The signature proves the sender holds this secret. It says nothing about whose
+        sale this is — and booking somebody else's order takes a part off these shelves."""
+        (code, message), log = self.post(shop="someone-else.myshopify.com")
+        self.assertEqual((code, message), (200, "ignored other store"))
+        self.assertEqual(self.queued(), 0)
+        self.assertIn("someone-else.myshopify.com", log)
+
+    def test_a_delivery_with_no_shop_header_is_still_accepted(self):
+        """Shopify always sends one; a proxy that strips it must not stop the pipeline."""
+        (code, message), _ = self.post(shop=None)
+        self.assertEqual(message, "queued")
+
+    def test_an_installation_with_no_store_configured_accepts_any(self):
+        import queue as queue_mod
+
+        from coreyard.webhook import make_handler
+
+        self.handler_cls = make_handler(self.spool, SECRET, "/hook", queue_mod.Queue())
+        self.assertEqual(self.post(shop="anywhere.myshopify.com")[0][1], "queued")
+
+    def test_an_unsupported_topic_is_acknowledged_and_dropped(self):
+        (code, message), _ = self.post(topic="orders/cancelled")
+        self.assertEqual((code, message), (200, "ignored topic"))
+        self.assertEqual(self.queued(), 0)
+
+    def test_another_path_is_not_the_webhook(self):
+        (code, _), _ = self.post(path="/")
+        self.assertEqual(code, 404)
+        self.assertEqual(self.queued(), 0)
+
+    def test_the_same_delivery_twice_is_queued_once(self):
+        self.post()
+        (code, message), _ = self.post()
+        self.assertEqual((code, message), (200, "duplicate"))
+        self.assertEqual(self.queued(), 1)
+
+    def test_the_same_order_under_a_new_delivery_id_is_queued_once(self):
+        """Shopify re-delivers under a fresh id, and the poller finds the same order
+        again. One booking either way."""
+        self.post(delivery="d-1")
+        (code, message), _ = self.post(delivery="d-2")
+        self.assertEqual(message, "duplicate")
+        self.assertEqual(self.queued(), 1)
+
+    def test_a_delivery_with_no_id_still_deduplicates(self):
+        body = json.dumps(self.order()).encode()
+        self.post(body=body, delivery=None)
+        self.assertEqual(self.post(body=body, delivery=None)[0][1], "duplicate")
+        self.assertEqual(self.queued(), 1)
+
+
 class Queue(unittest.TestCase):
     def _queue(self, path: Path) -> EventQueue:
         event_queue = EventQueue(path)
