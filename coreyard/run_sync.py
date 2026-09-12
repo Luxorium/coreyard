@@ -467,9 +467,10 @@ def cmd_delta(args) -> int:
     # Both flags were silently ignored here, which is worse than refusing: `--r-number`
     # promises in its own help that it acts on those parts only and retires nothing, and a
     # delta run did neither.
-    narrowing = _partial_view(args)
+    narrowing = ("--r-number" if getattr(args, "r_numbers", None)
+                 else "--limit" if args.limit else "")
     if narrowing:
-        print(f"`sync delta` cannot be narrowed — {narrowing}.\n"
+        print(f"`sync delta` cannot be narrowed with {narrowing}.\n"
               f"The cursor advances past the whole window, so publishing part of it would "
               f"leave the rest unpublished and no longer detectable as changed. Use "
               f"`{cli_name()} sync --r-number ...` for specific parts, or run the delta "
