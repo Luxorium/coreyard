@@ -212,7 +212,7 @@ def expand_part_type(pt: str, store: "StoreProfile | CatalogProfile | None" = No
     base = re.sub(r"[A-Za-z]+\.?",
                   lambda m: _ABBREV.get(m.group(0).lower().rstrip("."), m.group(0)),
                   pt.strip())
-    return _smart_title(base)
+    return plain_text(_smart_title(base))
 
 
 def residual_abbreviations(text: str) -> list[str]:
@@ -520,6 +520,29 @@ _TITLE_DROP = re.compile(r"[\"'“”‘’()\[\]{}<>|\\/*#~^_+:;!?•]+")
 # loses its full stop.
 _NON_DECIMAL_DOT = re.compile(r"(?<!\d)\.|\.(?!\d)")
 _MODEL_HYPHEN = re.compile(r"(?<=[A-Za-z])-(?=\d)")     # F-150 -> F150
+
+
+# Source text reaches a shopper in three shapes, and only two of them protect themselves.
+# The body escapes it, a title reduces it to words and digits — and the rest is published
+# *verbatim*, as a metadata value: a tag, a product type, a meta description. A value is not
+# markup, so escaping it would publish "&amp;" as part of a tag name; what it needs is to
+# stop being markup. A quote is the sharp edge: a meta description carrying one lands inside
+# `content="..."` in the storefront's own <head>, and a theme that does not escape it there
+# has been handed an attribute break by the yard's data entry.
+_MARKUP = re.compile(r"<[^>]*>")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def plain_text(text: str) -> str:
+    """One line of text with no markup and no attribute-breaking characters."""
+    s = _MARKUP.sub(" ", text or "")
+    s = _CONTROL.sub(" ", s)
+    for char in ("<", ">", '"'):
+        s = s.replace(char, " " if char != '"' else "")
+    s = re.sub(r"\s+", " ", s).strip()
+    # Removing markup can leave the space it occupied in front of the punctuation that
+    # followed it: "...CIVIC ." rather than "...CIVIC.".
+    return re.sub(r"\s+([.,;:!?])", r"\1", s)
 
 
 def seo_clean(text: str) -> str:
@@ -1236,7 +1259,8 @@ def meta_description(part: Part, store: Optional[StoreProfile] = None) -> str:
         candidate = f"{description} {sentence}"
         if len(candidate) <= META_DESC_MAX:
             description = candidate
-    return description
+    # Published into `content="..."` in the storefront's head, so it leaves here as text.
+    return plain_text(description)
 
 
 def _lead_html(policy: CatalogProfile, part_type: str, origin: str) -> str:
@@ -1382,7 +1406,16 @@ def build_tags(part: Part, store: Optional[StoreProfile] = None, max_tags: int =
     def add(t: Optional[str]) -> None:
         if not t:
             return
-        t = re.sub(r"\s+", " ", t).strip().replace(",", " ")
+        # A tag is a value, and Shopify shows it in collection filters and search facets.
+        # Whatever the yard typed into the field it came from, it leaves here as one line
+        # of text: see `plain_text`.
+        # Deliberately not re-collapsed after the comma becomes a space: "Bumper Reinf,
+        # Front" has published as "Bumper Reinf  Front" since the beginning, and tidying
+        # that here would move the fingerprint of every part whose type carries a comma —
+        # 7,518 of this catalogue's 27,202, republished to change a space. A catalogue-wide
+        # render change is a decision someone makes on purpose, with the repair commands, not
+        # a side effect of hardening a value.
+        t = plain_text(t).replace(",", " ").strip()
         if t and t.lower() not in seen and len(tags) < max_tags:
             seen.add(t.lower())
             tags.append(t)

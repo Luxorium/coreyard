@@ -298,6 +298,13 @@ is a one-to-many join in the site's `source` mapping: rows that merely repeat co
 that disagree are named and the first is published, and neither is ever dropped from the
 extract — absence is how a full run recognises a sale.
 
+Source text reaches a shopper in three shapes, and only two protect themselves. The body
+escapes it; a title reduces it to words and digits; everything else is published *verbatim*
+as a metadata value — a tag, a product type, a meta description. A value is not markup, so
+escaping it there would publish `&amp;` as part of a tag name: `seo.plain_text` makes it stop
+being markup instead. The sharp edge is a quote, which lands inside `content="..."` in the
+storefront's own head.
+
 Photo refresh is **stage, attach, verify, then delete**. The old order deleted the live
 media first, so any failure after that point — an unreachable share, a rejected staged
 upload, a timed-out PUT, a `productSet` userError — left a product on sale with no
