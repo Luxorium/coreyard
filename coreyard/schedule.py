@@ -561,7 +561,9 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     install.add_argument("--every", default=DEFAULT_EVERY, help="e.g. 15m, 2h, 1d (default 30m)")
     install.add_argument("--task", default=DEFAULT_TASK, help=f"CLI args to run (default {DEFAULT_TASK!r})")
     install.add_argument("--backend", default="auto",
-                         choices=["auto", "systemd-user", "systemd-system", "cron"])
+                         choices=["auto", "systemd-user", "systemd-system", "cron"],
+                         help="where to install the job (default: systemd if this host "
+                              "has it, cron otherwise)")
     install.add_argument("--dry-run", action="store_true", help="print the units, write nothing")
     install.set_defaults(func=do_install)
 

@@ -288,8 +288,10 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     f = sub.add_parser("fingerprints",
                        help="record the current render as the sync baseline (no Shopify "
                             "writes) — only when the store is already correct")
-    f.add_argument("--apply", action="store_true")
-    f.add_argument("--dry-run", action="store_true")
+    f.add_argument("--apply", action="store_true",
+                   help="write the recomputed fingerprints to the sync state")
+    f.add_argument("--dry-run", action="store_true",
+                   help="report what would be rewritten (the default)")
     f.add_argument("--no-image-scan", action="store_true",
                    help="skip the photo-share listing")
     f.set_defaults(func=cmd_fingerprints)

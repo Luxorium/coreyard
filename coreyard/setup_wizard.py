@@ -262,18 +262,25 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     ap.add_argument("--yes", action="store_true",
                     help="never prompt; use flags and defaults only")
     ap.add_argument("--force", action="store_true", help="overwrite existing files")
-    ap.add_argument("--vendor", default="")
-    ap.add_argument("--city", default="")
-    ap.add_argument("--warranty", default="")
-    ap.add_argument("--handle-prefix", dest="handle_prefix", default="")
+    ap.add_argument("--vendor", default="",
+                    help="the business name shown on every product (skips the question)")
+    ap.add_argument("--city", default="",
+                    help="where parts ship from, as a shopper should read it")
+    ap.add_argument("--warranty", default="",
+                    help="the warranty to state, or empty to promise none")
+    ap.add_argument("--handle-prefix", dest="handle_prefix", default="",
+                    help="the storefront key every product is filed under. Chosen once: "
+                         "changing it later republishes the catalogue under new handles")
     ap.add_argument("--source", default="",
                     help="'database' (default) or 'tabular:<path>'")
     ap.add_argument("--require-images", action="store_true",
                     help="only publish parts that have a photograph")
     ap.add_argument("--write-schema", action="store_true",
                     help="copy the bundled schema template to <data home>/schema.json")
-    ap.add_argument("--env", type=Path, default=DATA_ROOT / ".env")
-    ap.add_argument("--store", type=Path, default=DATA_ROOT / "store.json")
+    ap.add_argument("--env", type=Path, default=DATA_ROOT / ".env",
+                    help="where to write the settings file (default: the data root)")
+    ap.add_argument("--store", type=Path, default=DATA_ROOT / "store.json",
+                    help="where to write the storefront policy file")
     ap.set_defaults(func=run)
     return ap
 

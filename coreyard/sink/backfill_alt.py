@@ -292,8 +292,10 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
                     help="re-examine alt text that is already set, and correct it where it "
                          "no longer describes the photo")
     ap.add_argument("--limit", type=int, default=None, help="max products to update")
-    ap.add_argument("--log", type=Path, default=DEFAULT_LOG)
-    ap.add_argument("--no-resume", action="store_true")
+    ap.add_argument("--log", type=Path, default=DEFAULT_LOG,
+                    help="the resume log: a re-run skips products already corrected")
+    ap.add_argument("--no-resume", action="store_true",
+                    help="ignore the resume log and re-examine everything")
     ap.add_argument("--max-pages", type=int, default=None,
                     help="stop scanning after N pages of 50 products (for a quick sample)")
     ap.set_defaults(func=run)

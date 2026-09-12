@@ -89,12 +89,20 @@ def _write_result(log_file, result: dict[str, Any]) -> None:
 
 def add_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """Populate a parser with the bulk-publish flags."""
-    parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--status", choices=("DRAFT",), default="DRAFT")
-    parser.add_argument("--max-attempts", type=int, default=5)
-    parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
-    parser.add_argument("--no-resume", action="store_true")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="publish at most this many parts, for a cautious first run")
+    parser.add_argument("--workers", type=int, default=4,
+                        help="how many parts to publish at once (default 4)")
+    parser.add_argument("--status", choices=("DRAFT",), default="DRAFT",
+                        help="status for new products. An initial load is reviewed "
+                             "before it goes live, so DRAFT is the only choice here")
+    parser.add_argument("--max-attempts", type=int, default=5,
+                        help="tries per part before it is logged as failed (default 5)")
+    parser.add_argument("--log", type=Path, default=DEFAULT_LOG,
+                        help="the resume log: every attempt is appended here, and a "
+                             "re-run skips the parts it already published")
+    parser.add_argument("--no-resume", action="store_true",
+                        help="ignore the resume log and republish everything eligible")
     images = parser.add_mutually_exclusive_group()
     images.add_argument("--images-only", dest="images_only", action="store_true",
                         default=None,

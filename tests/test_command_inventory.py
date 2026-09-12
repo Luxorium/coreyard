@@ -380,3 +380,67 @@ class ReadOnlyIsPerInvocation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SharedControlsMeanOneThing(unittest.TestCase):
+    """UX-06: an option that appears on several commands has to behave the same on each.
+
+    Seventeen commands take `--limit`, sixteen take `--dry-run`, fifteen take `--apply`. What
+    makes that a feature rather than a coincidence is that knowing one teaches you the rest —
+    so a flag that is a switch on four commands and takes a value on the fifth is worse than
+    a differently-named flag would have been, because nothing warns you.
+    """
+
+    def flags(self):
+        from collections import defaultdict
+
+        from coreyard import cli
+
+        found = defaultdict(list)
+        for path, parser in cli.tree(cli.build_parser()):
+            for action in parser._actions:
+                for option in action.option_strings:
+                    if option not in ("-h", "--help"):
+                        found[option].append((path, action))
+        return found
+
+    @staticmethod
+    def _accepts_bare(action) -> bool:
+        """Can it be written on its own, with nothing after it?"""
+        return action.nargs == 0 or action.nargs in ("?", "*")
+
+    def test_an_option_written_bare_on_one_command_works_bare_on_all_of_them(self):
+        """`--json` was a switch on `status`, `doctor` and `alert` and a *path* on `audit`,
+        so `audit catalog --json | jq` failed with an argparse error rather than printing
+        anything. It now accepts both, which is what the older spelling deserves."""
+        for option, uses in sorted(self.flags().items()):
+            with self.subTest(option=option):
+                bare = {self._accepts_bare(action) for _, action in uses}
+                self.assertEqual(len(bare), 1,
+                                 f"{option} can be written bare on some of "
+                                 f"{[path for path, _ in uses]} and not others")
+
+    def test_every_option_explains_itself(self):
+        """`--help` is the documentation an operator has in front of them at the moment they
+        need it, and an option with nothing beside it is a question they have to take
+        somewhere else."""
+        for option, uses in sorted(self.flags().items()):
+            for path, action in uses:
+                with self.subTest(command=path, option=option):
+                    self.assertTrue((action.help or "").strip(),
+                                    f"`coreyard {path} {option}` has no help text")
+
+    def test_one_word_means_stop_planning_and_write_it(self):
+        """A second spelling is a second thing to remember at exactly the moment being wrong
+        is expensive. `--apply` is that word everywhere it applies."""
+        for rejected in ("--commit", "--no-dry-run", "--for-real", "--execute"):
+            with self.subTest(option=rejected):
+                self.assertNotIn(rejected, self.flags())
+
+    def test_the_source_write_gate_is_spelled_the_same_everywhere(self):
+        """It shipped as `--write-order` on `replay` and `--write-orders` on its three
+        siblings. One letter, and the command it differs on is the one somebody reaches for
+        while an order is already stuck."""
+        commands = {path for path, _ in self.flags()["--write-orders"]}
+        self.assertEqual(commands,
+                         {"orders serve", "orders retry", "orders poll", "orders replay"})

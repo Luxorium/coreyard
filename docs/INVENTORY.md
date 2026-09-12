@@ -95,7 +95,7 @@ CoreYard 0.1.0 — 47 commands.
 - **`coreyard orders register`** — `--topics` `--url`
 - **`coreyard orders list`** — _(no options)_
 - **`coreyard orders unregister`** — `--url`
-- **`coreyard orders replay`** — `--print-cmd` `--retire` `--write-order`
+- **`coreyard orders replay`** — `--print-cmd` `--retire` `--write-order` `--write-orders`
 - **`coreyard orders retry`** — `--all` `--id` `--no-retire` `--no-write-orders` `--write-orders`
 - **`coreyard orders status`** — `--limit`
 - **`coreyard orders poll`** — `--check` `--include-unpaid` `--limit` `--no-retire` `--no-write-orders` `--since` `--write-orders`

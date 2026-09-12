@@ -50,14 +50,21 @@ def run(args) -> int:
             print(f"    {finding.label}{detail}")
 
     if args.json:
-        path = Path(args.json)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(
-            {"total": report.total,
-             "findings": {name: [f.label for f in items]
-                          for name, items in report.ordered()}},
-            indent=1), encoding="utf-8")
-        print(f"\nFull report written to {path}")
+        machine = {"total": report.total,
+                   "findings": {name: [f.label for f in items]
+                                for name, items in report.ordered()}}
+        if args.json is True:
+            # `--json` with no argument means the same thing here as it does on `status`,
+            # `doctor` and `alert`: the report, machine-readable, on stdout. It used to
+            # require a path, so the path spelling still works — a flag that means one thing
+            # on four commands and another on the fifth is the hole this closes, and
+            # breaking the older spelling to close it would be trading one for another.
+            print(json.dumps(machine, indent=1))
+        else:
+            path = Path(args.json)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(machine, indent=1), encoding="utf-8")
+            print(f"\nFull report written to {path}")
     return 0
 
 
@@ -68,7 +75,9 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     c.add_argument("--show", type=int, default=6, help="offenders to print per finding")
     c.add_argument("--all-products", action="store_true",
                    help="audit every product on the store, not only CoreYard's")
-    c.add_argument("--json", default=None, help="also write the full report here")
+    c.add_argument("--json", nargs="?", const=True, default=None, metavar="PATH",
+                   help="machine-readable output on stdout, as on `status` and `doctor`; "
+                        "with a path, write the full report there instead")
     c.set_defaults(func=run)
     return ap
 

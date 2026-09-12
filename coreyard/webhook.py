@@ -328,7 +328,7 @@ def unregister(args) -> int:
 def replay(args) -> int:
     """Re-run a saved order payload through the pipeline — no signature, no receiver."""
     payload = json.loads(Path(args.file).read_text(encoding="utf-8"))
-    worker = OrderWorker(retire=args.retire, write_orders=args.write_order)
+    worker = OrderWorker(retire=args.retire, write_orders=args.write_orders)
     done = worker.handle(payload)
     wo = f" -> work order {done.work_order}" if done.work_order else " -> not booked"
     print(f"{done.order_name}: {len(done.r_numbers)} line(s){wo}")
@@ -404,8 +404,10 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     s = sub.add_parser("serve", help="run the receiver")
     s.add_argument("--host", default="127.0.0.1",
                    help="bind address (default 127.0.0.1 — put a TLS proxy in front)")
-    s.add_argument("--port", type=int, default=8787)
-    s.add_argument("--path", default="/webhook")
+    s.add_argument("--port", type=int, default=8787,
+                   help="port to listen on (default 8787, loopback only)")
+    s.add_argument("--path", default="/webhook",
+                   help="the URL path Shopify delivers to (default /webhook)")
     s.add_argument("--no-retire", action="store_true",
                    help="leave sold products on sale")
     group = s.add_mutually_exclusive_group()
@@ -424,7 +426,8 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
     r = sub.add_parser("register", help="subscribe the store to order webhooks")
     r.add_argument("--url", required=True, help="public https URL of your /webhook endpoint")
-    r.add_argument("--topics", nargs="+", default=DEFAULT_TOPICS)
+    r.add_argument("--topics", nargs="+", default=DEFAULT_TOPICS,
+                   help=f"topics to subscribe to (default: {' '.join(DEFAULT_TOPICS)})")
     r.set_defaults(func=register)
 
     sub.add_parser("list", help="show the store's webhook subscriptions"
@@ -436,9 +439,16 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
     p = sub.add_parser("replay", help="re-run a saved order JSON file")
     p.add_argument("file")
-    p.add_argument("--print-cmd", default=None)
+    p.add_argument("--print-cmd", default=None,
+                   help="shell command to pipe the work order into, instead of the "
+                        "configured printer")
     p.add_argument("--retire", action="store_true", help="also archive the products")
-    p.add_argument("--write-order", action="store_true",
+    # `--write-orders` on `serve`, `poll` and `retry`; this one shipped in the singular, and
+    # a flag that differs from its siblings by one letter is a flag somebody types wrong at
+    # the moment they are already replaying a failed order. Both spellings work, the plural
+    # is the one `--help` teaches, and the older one is kept rather than quietly retired.
+    p.add_argument("--write-orders", "--write-order", dest="write_orders",
+                   action="store_true",
                    help="also create the work order (this WRITES to the yard database)")
     p.set_defaults(func=replay)
 
@@ -456,7 +466,8 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     x.set_defaults(func=retry)
 
     q = sub.add_parser("status", help="recent deliveries")
-    q.add_argument("--limit", type=int, default=20)
+    q.add_argument("--limit", type=int, default=20,
+                   help="how many recent deliveries to show (default 20)")
     q.set_defaults(func=show)
 
     # Polling is a second transport onto the same pipeline, for installations that cannot
