@@ -167,17 +167,66 @@ class Queueing(Quiet):
 
     def test_an_unreadable_order_does_not_stop_the_others(self):
         spool, worker = self._queue(), self._worker()
+        queued, seen, _ = poll_mod.poll(self._flaky(), spool, worker,
+                                        datetime.now(timezone.utc))
+        self.assertEqual((queued, seen), (1, 2))
 
+    def _flaky(self):
+        """A window whose first order cannot be read and whose second can."""
         class Flaky(FakeClient):
             def rest_get(self, path, tries=5):
                 if path == "orders/1001.json":
                     return {"order": {"id": 1001}}      # no line items
                 return rest_order(1009, "#1044")
 
-        stubs = [PAID, dict(PAID, id="gid://shopify/Order/1009", name="#1044")]
-        queued, seen, _ = poll_mod.poll(Flaky(stubs), spool, worker,
-                                        datetime.now(timezone.utc))
-        self.assertEqual((queued, seen), (1, 2))
+        return Flaky([PAID, dict(PAID, id="gid://shopify/Order/1009", name="#1044",
+                                 createdAt="2026-08-20T16:00:00Z")])
+
+    def test_the_cursor_stops_behind_an_order_that_never_reached_the_queue(self):
+        """The one failure a durable queue cannot cover.
+
+        A stage that fails still leaves the order in the queue, where `orders retry` owns
+        it. An order whose payload could not be read is not in the queue at all, so nothing
+        will come back for it — except the next poll, and only while the cursor is still
+        behind it. Advancing past it loses a paid sale silently.
+        """
+        spool, worker = self._queue(), self._worker()
+        _, _, latest = poll_mod.poll(self._flaky(), spool, worker,
+                                     datetime.now(timezone.utc))
+        self.assertIsNone(latest, "the window starts at the unreadable order")
+
+    def test_an_order_after_the_gap_does_not_drag_the_cursor_over_it(self):
+        spool, worker = self._queue(), self._worker()
+        first = dict(PAID, id="gid://shopify/Order/1000", name="#1041",
+                     createdAt="2026-08-20T13:00:00Z")
+
+        class Flaky(FakeClient):
+            def rest_get(self, path, tries=5):
+                if path == "orders/1001.json":
+                    return {"order": {"id": 1001}}      # no line items
+                return rest_order(int(path.split("/")[1].split(".")[0]), "#x")
+
+        stubs = [first, PAID, dict(PAID, id="gid://shopify/Order/1009", name="#1044",
+                                   createdAt="2026-08-20T16:00:00Z")]
+        _, _, latest = poll_mod.poll(Flaky(stubs), spool, worker,
+                                     datetime.now(timezone.utc))
+        self.assertEqual(latest, "2026-08-20T13:00:00Z")
+
+    def test_a_clean_window_advances_to_its_newest_order(self):
+        spool, worker = self._queue(), self._worker()
+        newer = dict(PAID, id="gid://shopify/Order/1009", name="#1044",
+                     createdAt="2026-08-20T16:00:00Z")
+        _, _, latest = poll_mod.poll(FakeClient([PAID, newer]), spool, worker,
+                                     datetime.now(timezone.utc))
+        self.assertEqual(latest, "2026-08-20T16:00:00Z")
+
+    def test_an_unpaid_order_does_not_hold_the_cursor(self):
+        """It is accounted for rather than skipped: this run's policy says it is not a
+        sale, which is a decision and not a failure to read it."""
+        spool, worker = self._queue(), self._worker()
+        _, _, latest = poll_mod.poll(FakeClient([PAID, UNPAID]), spool, worker,
+                                     datetime.now(timezone.utc))
+        self.assertEqual(latest, UNPAID["createdAt"])
 
 
 class Scopes(Quiet):

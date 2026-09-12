@@ -260,6 +260,37 @@ class Delivery(unittest.TestCase):
         self.assertEqual(message, "duplicate")
         self.assertEqual(self.queued(), 1)
 
+    def test_the_success_reply_comes_after_the_commit_not_before(self):
+        """ORD-04's first clause, and the only thing standing between an acknowledgement
+        and a lost order: Shopify stops retrying once it sees 200, so the event has to be
+        durable by then. Asserted through a second connection, which can only see committed
+        rows."""
+        (code, message), _ = self.post()
+        self.assertEqual((code, message), (200, "queued"))
+        with EventQueue(Path(self.tmp.name) / "queue.sqlite3") as reopened:
+            self.assertEqual([e.webhook_id for e in reopened.pending()], ["d-1"])
+
+    def test_a_queue_that_cannot_be_written_does_not_acknowledge(self):
+        """Disk full, or the queue unwritable. Nothing may answer 200 for an order it did
+        not keep — a rejected ingestion is still Shopify's to retry, and that only works if
+        it was never told the delivery succeeded."""
+        with patch.object(EventQueue, "add", side_effect=OSError("disk is full")):
+            with self.assertRaises(OSError):
+                self.post()
+        self.assertEqual(self.queued(), 0)
+
+    def test_a_handled_order_still_deduplicates_after_its_payload_is_erased(self):
+        """The payload is erased as soon as it is handled, because it is a customer's name
+        and address. What stays is the evidence that prevents a second booking."""
+        self.post()
+        with EventQueue(Path(self.tmp.name) / "queue.sqlite3") as spool:
+            event = spool.pending()[0]
+            spool.finish(event.webhook_id, "#1042", ["51"], work_order="2075")
+            self.assertFalse(any(e.payload for e in spool.pending()))
+        (code, message), _ = self.post(delivery="d-2")
+        self.assertEqual(message, "duplicate")
+        self.assertEqual(self.queued(), 0)
+
     def test_a_delivery_with_no_id_still_deduplicates(self):
         body = json.dumps(self.order()).encode()
         self.post(body=body, delivery=None)
@@ -394,6 +425,63 @@ class Queue(unittest.TestCase):
             self.assertEqual(len(upgraded.pending()), 1)     # the queued order is still there
             upgraded.finish("wh-old", "#1", ["51"], "/tmp/t.html", work_order="1791")
             self.assertEqual(upgraded.recent()[0][-1], "1791")
+
+
+class OneBadOrder(unittest.TestCase):
+    """A permanently failing order must not stop the ones behind it.
+
+    Orders queue behind each other, and the one that cannot be booked is the one most
+    likely to be retried forever — a line item whose R# was deleted, a work order the yard
+    refuses. If it took the drain down with it, every sale after it would wait for a person.
+    """
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.spool = EventQueue(Path(self.tmp.name) / "queue.sqlite3")
+        self.addCleanup(self.spool.close)
+        for i in (1, 2, 3):
+            body = json.dumps({"id": i, "name": f"#{i}", "financial_status": "paid",
+                               "line_items": [{"sku": str(i), "quantity": 1}]}).encode()
+            self.spool.add(f"d-{i}", "orders/paid", body, str(i))
+
+    def test_the_rest_of_the_queue_is_still_drained(self):
+        seen = []
+
+        def handle(payload, stages):
+            seen.append(payload["name"])
+            if payload["name"] == "#2":
+                raise RuntimeError("the yard refused this one")
+            return Handled(order_name=payload["name"], r_numbers=[payload["name"]])
+
+        worker = Mock()
+        worker.handle.side_effect = handle
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            handled = drain(self.spool, worker)
+
+        self.assertEqual(seen, ["#1", "#2", "#3"])
+        self.assertEqual(handled, 3)
+
+    def test_the_one_that_failed_is_recorded_with_its_reason(self):
+        """It leaves the pending queue either way — the drain is not a place to wait — and
+        what is left behind is an error row `orders status` shows and `orders retry` owns."""
+        def handle(payload, stages):
+            if payload["name"] == "#2":
+                raise RuntimeError("the yard refused this one")
+            return Handled(order_name=payload["name"], r_numbers=[payload["name"]])
+
+        worker = Mock()
+        worker.handle.side_effect = handle
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            drain(self.spool, worker)
+
+        rows = self.spool.conn.execute(
+            "SELECT webhook_id, error FROM events WHERE error != ''").fetchall()
+        self.assertEqual([row[0] for row in rows], ["d-2"])
+        self.assertIn("refused", rows[0][1])
+        self.assertEqual(self.spool.pending(), [])
 
 
 class Worker(unittest.TestCase):

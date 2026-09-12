@@ -389,6 +389,13 @@ bin/coreyard orders poll --since 2026-08-01
 bin/coreyard orders poll --write-orders
 ```
 
+The poll cursor advances only past orders it actually took in. A *stage* that fails is safe
+to move past — the order is in the durable queue and `orders retry` owns it — but an order
+whose payload could not be read never reached the queue at all, and nothing else would come
+back for it. The cursor stops behind that one, and the next poll finds it again. An order is
+found by `created_at`, so one created unpaid and paid later, after the cursor has passed it,
+is caught by the `ORDERS_PAID` webhook rather than by polling.
+
 Registration uses Shopify's `ORDERS_PAID` topic. The receiver also requires
 `financial_status=paid` before printing, booking, or retiring anything. During migration an
 older `ORDERS_CREATE` subscription is safe: unpaid deliveries are acknowledged and ignored,

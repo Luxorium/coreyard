@@ -99,25 +99,39 @@ def poll(client, spool: EventQueue, worker: OrderWorker, since: datetime,
     queued = 0
     seen = 0
     latest: Optional[str] = None
+    # Once an order in this window could not be taken in, the cursor stops short of it.
+    # Orders arrive oldest first, so everything after an unfetchable one is newer, and
+    # moving the cursor past any of them would be a promise that the gap was handled.
+    held = False
     for stub in find_orders(client, since):
         seen += 1
         created = stub.get("createdAt")
-        if created and (latest is None or created > latest):
-            latest = created
+        ingested = True
         if paid_only and str(stub.get("displayFinancialStatus") or "").upper() != "PAID":
-            continue
-        try:
-            payload = fetch_payload(client, stub["id"])
-        except RuntimeError as exc:
-            print(f"  ! {stub.get('name') or stub['id']}: {exc}")
-            continue
-        # A poll and a webhook can both see the same order; the order key is what stops the
-        # second one printing it again.
-        webhook_id = f"poll:{str(stub['id']).rsplit('/', 1)[-1]}"
-        if spool.add(webhook_id, "orders/paid",
-                     json.dumps(payload).encode("utf-8"), _order_key(payload)):
-            queued += 1
-            print(f"  queued {payload.get('name') or webhook_id}")
+            # Accounted for rather than skipped: an unpaid order is not a sale, and the
+            # policy that says so is this run's, not a failure to read it.
+            pass
+        else:
+            try:
+                payload = fetch_payload(client, stub["id"])
+            except RuntimeError as exc:
+                # It never reached the durable queue, so `orders retry` does not own it and
+                # nothing else will come back for it. The only thing that can is the next
+                # poll, and only if the cursor stays behind it.
+                print(f"  ! {stub.get('name') or stub['id']}: {exc}")
+                ingested = False
+            else:
+                # A poll and a webhook can both see the same order; the order key is what
+                # stops the second one printing it again.
+                webhook_id = f"poll:{str(stub['id']).rsplit('/', 1)[-1]}"
+                if spool.add(webhook_id, "orders/paid",
+                             json.dumps(payload).encode("utf-8"), _order_key(payload)):
+                    queued += 1
+                    print(f"  queued {payload.get('name') or webhook_id}")
+        if not ingested:
+            held = True
+        elif not held and created and (latest is None or created > latest):
+            latest = created
         if limit and queued >= limit:
             break
     if queued:
@@ -197,9 +211,10 @@ def run(args) -> int:
             # waiting, and it should not queue behind a retry of something already late.
             retry_parked(spool, worker)
         print(f"\n{seen} order(s) in the window, {queued} newly queued and handled.")
-        # Safe to advance even if a stage failed: the order is already in the durable
-        # queue, so `orders retry` still owns it. The cursor only decides what the *next*
-        # poll asks Shopify for, and re-asking is what the overlap window is for.
+        # Safe to advance even if a *stage* failed: that order is already in the durable
+        # queue, so `orders retry` still owns it. The cursor only decides what the next poll
+        # asks Shopify for, and re-asking is what the overlap window is for. An order that
+        # never reached the queue is the other case, and `poll` holds the cursor behind it.
         if latest and not args.since:
             state.set_cursor(CURSOR_NAME, latest)
             print(f"Cursor advanced to {latest}.")
