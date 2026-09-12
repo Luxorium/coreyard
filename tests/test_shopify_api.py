@@ -295,3 +295,50 @@ class RetirementMemory(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ARetrySaysSoWhileItWaits(unittest.TestCase):
+    """UX-07: a bounded retry that reports itself only once it has given up is a run that
+    goes quiet for half a minute for a reason nobody can see."""
+
+    def client(self):
+        from coreyard.sink.shopify_api import ShopifyClient
+
+        client = ShopifyClient.__new__(ShopifyClient)
+        client.creds = ShopifyCreds("example.myshopify.com", "shpat_notreal")
+        client._resume_at = 0.0
+        return client
+
+    def waiting_lines(self, **kw) -> str:
+        import contextlib
+        import io
+
+        from unittest.mock import patch
+
+        out = io.StringIO()
+        with patch("time.sleep"), contextlib.redirect_stdout(out):
+            self.client()._waiting(4, 1, 5, kw.get("why", "Shopify throttled this"))
+        return out.getvalue()
+
+    def test_it_names_the_wait_the_reason_and_the_attempt(self):
+        line = self.waiting_lines()
+        self.assertIn("throttled", line)
+        self.assertIn("4s", line)
+        self.assertIn("2/5", line)
+
+    def test_it_is_routine_progress_and_obeys_quiet(self):
+        from coreyard import progress
+
+        self.addCleanup(progress.set_level, progress.NORMAL)
+        progress.set_level(progress.QUIET)
+        self.assertEqual(self.waiting_lines(), "")
+
+    def test_every_backoff_in_the_client_goes_through_it(self):
+        """A bare `time.sleep` in a retry loop is the thing this exists to replace."""
+        import inspect
+
+        from coreyard.sink import shopify_api
+
+        source = inspect.getsource(shopify_api)
+        body = source.split("def _waiting", 1)[0] + source.split("        time.sleep(pause)", 1)[1]
+        self.assertNotIn("time.sleep(2", body)

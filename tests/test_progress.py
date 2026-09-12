@@ -161,6 +161,49 @@ class HowMuchToSay(unittest.TestCase):
                       "the outcome is not narration: --quiet means stop telling me what "
                       "you are doing, not what you did")
 
+    def test_machine_readable_output_implies_quiet(self):
+        """A heartbeat interleaved with a JSON document makes it one neither a person nor
+        `jq` can read, and `status --json | jq` is the reason the flag exists."""
+        import argparse
+
+        from coreyard import cli
+
+        self.assertEqual(cli._verbosity(argparse.Namespace(json=True)), progress.QUIET)
+        self.assertEqual(cli._verbosity(argparse.Namespace()), progress.NORMAL)
+
+    def test_asking_for_both_is_answered_with_the_louder_one(self):
+        """Somebody who passes `--verbose --json` has said which they want."""
+        import argparse
+
+        from coreyard import cli
+
+        self.assertEqual(cli._verbosity(argparse.Namespace(json=True, verbose=True)),
+                         progress.VERBOSE)
+
+    def test_the_json_report_parses_with_progress_turned_on(self):
+        """The end-to-end version: run it for real and hand the output to a parser."""
+        import json
+        import os
+        import subprocess
+        import sys
+        import tempfile
+        from pathlib import Path
+
+        from coreyard.config import REPO_ROOT
+
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("COREYARD_", "SMB_", "YMS_", "SHOPIFY_", "STORE_"))}
+        with tempfile.TemporaryDirectory() as home:
+            env["COREYARD_HOME"] = home
+            env["PYTHONPATH"] = str(REPO_ROOT)
+            subprocess.run([sys.executable, "-m", "coreyard", "init", "--demo"],
+                           env=env, cwd=home, capture_output=True, timeout=180)
+            result = subprocess.run(
+                [sys.executable, "-m", "coreyard", "status", "--json"],
+                env=env, cwd=home, capture_output=True, text=True, timeout=180)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("counts", json.loads(result.stdout))
+
     def test_the_flags_are_mutually_exclusive(self):
         from coreyard import cli
 

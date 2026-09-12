@@ -314,6 +314,20 @@ def _needs_from_flags(path: str, args) -> set[str]:
     return set()
 
 
+def _verbosity(args) -> int:
+    """How much routine progress this invocation should print.
+
+    `--json` implies quiet, because asking for machine-readable output is asking for output a
+    parser can read, and a heartbeat interleaved with a JSON document makes it one neither a
+    person nor `jq` can. Someone who passes `--verbose` as well has said which they want.
+    """
+    if getattr(args, "verbose", False):
+        return progress.VERBOSE
+    if getattr(args, "quiet", False) or getattr(args, "json", False):
+        return progress.QUIET
+    return progress.NORMAL
+
+
 def _installation() -> tuple[str, str] | None:
     """This installation's (store, handle prefix), or None when it is not configured."""
     try:
@@ -520,9 +534,7 @@ def main(argv: list[str] | None = None) -> int:
     # Before anything prints. The level is read by the progress helpers deep inside the
     # loops that produce the lines, so it has to be settled at the boundary rather than
     # carried down as an argument nobody else needs.
-    progress.set_level(progress.VERBOSE if getattr(args, "verbose", False)
-                       else progress.QUIET if getattr(args, "quiet", False)
-                       else progress.NORMAL)
+    progress.set_level(_verbosity(args))
 
     caps = capabilities.detect()
     path = getattr(args, "_support_path", None) or args.command

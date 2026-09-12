@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any, Iterator, Optional
 
 from coreyard.config import StoreProfile, _get, cli_name, load_env
+from coreyard.progress import say
 from coreyard.models import Part
 from coreyard.transform import tags as tag_policy
 from coreyard.transform.render import RenderedProduct, render
@@ -111,14 +112,16 @@ class ShopifyClient:
                 # A dropped connection mid-catalogue-walk is ordinary; only give up once the
                 # retries are spent, so a long run survives a blip.
                 if attempt < tries - 1:
-                    time.sleep(2 ** attempt)
+                    self._waiting(2 ** attempt, attempt, tries,
+                                  f"Shopify unreachable ({type(exc).__name__})")
                     continue
                 raise self._unreachable(exc, "running a GraphQL operation") from exc
             if resp.status_code == 429:
-                time.sleep(2 * (attempt + 1))
+                self._waiting(2 * (attempt + 1), attempt, tries, "Shopify throttled this")
                 continue
             if resp.status_code >= 500 and attempt < tries - 1:
-                time.sleep(2 ** attempt)
+                self._waiting(2 ** attempt, attempt, tries,
+                              f"Shopify answered {resp.status_code}")
                 continue
             self._raise_for_status(resp, "running a GraphQL operation")
             data = resp.json()
@@ -127,7 +130,7 @@ class ShopifyClient:
                 # THROTTLED shows up here too on GraphQL
                 msg = str(data["errors"])
                 if "THROTTLED" in msg and attempt < tries - 1:
-                    time.sleep(2 * (attempt + 1))
+                    self._waiting(2 * (attempt + 1), attempt, tries, "Shopify throttled this")
                     continue
                 raise RuntimeError(f"Shopify GraphQL errors: {msg}")
             return data["data"]
@@ -164,6 +167,18 @@ class ShopifyClient:
             if not page["pageInfo"]["hasNextPage"] or (max_pages and pages >= max_pages):
                 return
             cursor = page["pageInfo"]["endCursor"]
+
+    def _waiting(self, pause: float, attempt: int, tries: int, why: str) -> None:
+        """Sleep between attempts, and say so while it is happening.
+
+        A retry that reports itself only once it has given up is a run that goes quiet for
+        half a minute for a reason nobody can see, and `time.sleep` inside a loop is the
+        commonest way a pipeline looks wedged when it is working. The line names the wait,
+        the reason and which attempt this is — the three things that distinguish a blip from
+        something that is not going to clear.
+        """
+        say(f"  . {why}; retrying in {pause:.0f}s ({attempt + 1}/{tries})")
+        time.sleep(pause)
 
     def _raise_for_status(self, resp, what: str) -> None:
         """Turn the statuses an operator can actually fix into a sentence that says so.
@@ -218,11 +233,13 @@ class ShopifyClient:
                 resp = self._session.get(url, timeout=60)
             except self._requests.RequestException as exc:
                 if attempt < tries - 1:
-                    time.sleep(2 ** attempt)
+                    self._waiting(2 ** attempt, attempt, tries,
+                                  f"Shopify unreachable ({type(exc).__name__})")
                     continue
                 raise self._unreachable(exc, f"reading {path}") from exc
             if resp.status_code == 429 or (resp.status_code >= 500 and attempt < tries - 1):
-                time.sleep(2 * (attempt + 1))
+                self._waiting(2 * (attempt + 1), attempt, tries,
+                              f"Shopify answered {resp.status_code}")
                 continue
             self._raise_for_status(resp, f"reading {path}")
             return resp.json()
