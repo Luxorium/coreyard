@@ -507,6 +507,25 @@ the product has none.
 > product look new and duplicates the whole catalog. If you are migrating an existing store, set
 > the prefix to whatever your products already use.
 
+The sync state records which store and handle prefix it was written for, and a command that
+writes to the store refuses when the configuration has moved out from under it:
+
+```
+This installation's sync state was written for a different installation: store a -> b.
+```
+
+Both directions of that are quiet failures otherwise. Pointed at a *different store*, the
+fingerprints still say every part is published, so the sync finds nothing to do and the new
+store stays empty while the run reports success. Under a *different handle prefix*, every
+fingerprint moves at once and the sync republishes the whole catalog under new handles, beside
+the old products, which stay live and unmanaged.
+
+`bin/coreyard state adopt` says what adopting the snapshot here would mean, and `--apply` does
+it — the fingerprints are untouched, only the label changes. To start this store's history from
+nothing instead, point `COREYARD_HOME` at a fresh data root. A dry run is told about the
+mismatch and allowed to proceed, because it changes nothing and its diff is what you need to
+see.
+
 Inspect any part's photos directly:
 ```bash
 bin/coreyard images 51 --fetch

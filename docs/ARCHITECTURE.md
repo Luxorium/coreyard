@@ -291,7 +291,12 @@ the donor vehicle and is shared by every part off it; `interchange_number` is cu
 
 Never substitute Stock # for R#. Products are keyed by the stable handle
 `<SHOPIFY_HANDLE_PREFIX>-<R#>`. Changing the prefix on a live store makes every item
-look new and duplicates the catalog.
+look new and duplicates the catalog — so the snapshot records the store and prefix it was
+written for, and a command that writes refuses when either has changed under it
+(`coreyard state adopt` is how an operator says they meant it). A repeated R# in the extract
+is a one-to-many join in the site's `source` mapping: rows that merely repeat collapse, rows
+that disagree are named and the first is published, and neither is ever dropped from the
+extract — absence is how a full run recognises a sale.
 
 Photo refresh is **stage, attach, verify, then delete**. The old order deleted the live
 media first, so any failure after that point — an unreachable share, a rejected staged

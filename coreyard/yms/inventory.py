@@ -210,6 +210,42 @@ def _elsewhere():
     return source.load(spec)
 
 
+def unambiguous(parts: list[Part]) -> list[Part]:
+    """One row per R#, and a loud word when the rows disagreed about what it is.
+
+    A repeated R# is a mapping fault rather than a yard fact: the R# is the source's own key
+    for a physical part, so two rows carrying one means the configured ``source`` joins
+    something one-to-many — a part-type table with two matching rows, an interchange table
+    queried without its qualifier.
+
+    Rows that are simply repeated carry identical values and collapse quietly; that is what a
+    join against a lookup table produces and there is nothing to decide. Rows that *differ*
+    are ambiguous, and the first one read wins — deterministically, because the extract is
+    ordered by R#, rather than "whichever page happened to be read last". The R#s are named
+    so the mapping can be fixed.
+
+    Dropping them from the extract is not an option: a full run reads absence as a sale, so
+    holding a part out of the list it diffs against would archive a part that is sitting in
+    the yard. Presence is a fact even when the content is in doubt.
+    """
+    first: dict[str, Part] = {}
+    conflicting: set[str] = set()
+    for part in parts:
+        key = part.uid()
+        held = first.get(key)
+        if held is None:
+            first[key] = part
+        elif held != part:
+            conflicting.add(key)
+    if conflicting:
+        sample = ", ".join(f"R#{key}" for key in sorted(conflicting)[:5])
+        more = f" and {len(conflicting) - 5:,} more" if len(conflicting) > 5 else ""
+        print(f"  AMBIGUOUS: {len(conflicting):,} R#(s) matched more than one source row, "
+              f"with different values: {sample}{more}. Publishing the first of each — check "
+              f"the 'source' join in your schema mapping.")
+    return list(first.values())
+
+
 def fetch_parts(limit: Optional[int] = None, images_only: Optional[bool] = None) -> list[Part]:
     """Connect (read-only, over the SMB named pipe) and return listable parts.
 
@@ -231,7 +267,7 @@ def fetch_parts(limit: Optional[int] = None, images_only: Optional[bool] = None)
         # reconciliation side.
         if images_only is None:
             images_only = photos_required()
-        return other.parts(limit=limit, images_only=images_only)
+        return unambiguous(other.parts(limit=limit, images_only=images_only))
     mapping = schema.load()
     if images_only is None:
         images_only = photos_required(mapping)
@@ -261,7 +297,7 @@ def fetch_parts(limit: Optional[int] = None, images_only: Optional[bool] = None)
             raise RuntimeError("inventory paging did not advance past the last R#")
         after = next_after
         fetched_total += fetched
-    return parts
+    return unambiguous(parts)
 
 
 def fetch_parts_by_r_number(r_numbers: list[str]) -> dict[str, Part]:

@@ -200,6 +200,16 @@ class SyncState:
             " value TEXT NOT NULL,"
             " updated_at TEXT NOT NULL)"
         )
+        # Which installation this snapshot describes. A fingerprint says "the storefront
+        # holds this version of R#51" — a claim that is only meaningful about one store,
+        # under one handle prefix. Carry it beside the rows it qualifies, so re-pointing an
+        # installation cannot quietly inherit another catalogue's history.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS meta ("
+            " key TEXT PRIMARY KEY,"
+            " value TEXT NOT NULL,"
+            " updated_at TEXT NOT NULL)"
+        )
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(parts)")}
         if "stock" in columns and "r_number" not in columns:
             # Older snapshots already stored the R# in a misleadingly named column.
@@ -380,6 +390,52 @@ class SyncState:
             self.conn.executemany("DELETE FROM retired WHERE r_number = ?", keys)
 
     # -- per-channel state -----------------------------------------------------
+
+    # -- whose catalogue this is ------------------------------------------------------
+    IDENTITY = ("store", "handle_prefix")
+
+    def identity(self) -> dict[str, str]:
+        """The store and handle prefix this snapshot was written for, as far as it knows.
+
+        Empty for a snapshot written before this was recorded, which is not the same as a
+        mismatch: an existing installation has been publishing to one store all along, and
+        refusing to run until it says so would make an upgrade an outage.
+        """
+        rows = self.conn.execute(
+            "SELECT key, value FROM meta WHERE key IN (?, ?)", self.IDENTITY)
+        return {row[0]: row[1] for row in rows}
+
+    def claim(self, store: str, handle_prefix: str) -> None:
+        """Record whose catalogue this is. Adopts an unlabelled snapshot as it stands."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self.conn:
+            self.conn.executemany(
+                "INSERT INTO meta (key, value, updated_at) VALUES (?,?,?)"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+                " updated_at=excluded.updated_at",
+                [("store", str(store), now), ("handle_prefix", str(handle_prefix), now)],
+            )
+
+    def mismatch(self, store: str, handle_prefix: str) -> str:
+        """What has changed under this snapshot since it was written, or "".
+
+        Both answers are destructive in their own way, which is why neither may be guessed
+        at. A snapshot carried to a *different store* still says every part is published, so
+        the next sync finds nothing to do and the new store stays empty while the run reports
+        success. A snapshot kept across a *handle prefix* change says the opposite: the
+        handle is part of the rendered product, so every fingerprint moves at once and the
+        run republishes the whole catalogue under new handles — beside the old products,
+        which stay live, on sale, and now unmanaged.
+        """
+        held = self.identity()
+        if not held:
+            return ""
+        changed = []
+        if held.get("store") and held["store"] != str(store):
+            changed.append(f"store {held['store']} -> {store}")
+        if held.get("handle_prefix") and held["handle_prefix"] != str(handle_prefix):
+            changed.append(f"handle prefix {held['handle_prefix']!r} -> {handle_prefix!r}")
+        return "; ".join(changed)
 
     def record_channel(self, channel: str, fingerprints, *,
                        remote_ids: dict[str, str] | None = None,

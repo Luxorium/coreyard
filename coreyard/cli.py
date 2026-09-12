@@ -22,7 +22,7 @@ import sys
 from contextlib import contextmanager
 
 from coreyard import __version__, ops
-from coreyard.config import out_dir
+from coreyard.config import cli_name, out_dir
 
 # Commands that write nothing outside ``out/``. They are left out of the run history so
 # that "when did a sync last finish" is not buried under a hundred status checks.
@@ -84,6 +84,8 @@ SUPPORT: dict[str, tuple[str, tuple[str, ...], str]] = {
     "repair metafields": (STORE, ("source", "shopify"), "--apply"),
     "repair all": (STORE, ("source", "shopify"), "--apply"),
     "repair fingerprints": (LOCAL, ("source",), "--apply"),
+    "state": (READS, (), ""),
+    "state adopt": (LOCAL, ("shopify",), "--apply"),
     "audit": (READS, ("shopify",), ""),
     "audit catalog": (READS, ("shopify",), ""),
     "orders": (READS, (), ""),
@@ -143,6 +145,8 @@ COMMANDS: list[tuple[str, str, str]] = [
      "every part type the yard can inventory, and where its wording runs out"),
     ("schema", "coreyard.yms.discover_schema",
      "introspect the source database and rank likely tables"),
+    ("state", "coreyard.state_cli",
+     "whose catalogue this snapshot describes, and adopting it after a move"),
     ("validate", "coreyard.validate",
      "check the external config files against their schemas (offline)"),
     ("bulk", "coreyard.sink.shopify_bulk",
@@ -293,6 +297,92 @@ def unmet(path: str, caps) -> list[tuple[str, str]]:
     return [(name, caps.get(name).detail) for name in needs if not caps.enabled(name)]
 
 
+def _installation() -> tuple[str, str] | None:
+    """This installation's (store, handle prefix), or None when it is not configured."""
+    try:
+        from coreyard.state_cli import _identity
+
+        return _identity()
+    except Exception:
+        return None                    # unconfigured: the capability preflight owns that
+
+
+def _snapshot_moved(path: str, args) -> int | None:
+    """Refuse a write when the snapshot was written for a different store or prefix.
+
+    A fingerprint is a claim about one store's catalogue under one handle prefix. Carried to
+    another store it says every part is already published, so the sync finds nothing to do
+    and the new store stays empty while the run reports success. Kept across a prefix rename
+    it says the opposite — the handle is part of the rendered product, so every fingerprint
+    moves at once and the whole catalogue is republished under new handles beside the old
+    products, which stay live and unmanaged.
+
+    Neither is something to guess at, so this is a refusal rather than a warning, and
+    `coreyard state adopt` is how an operator says they meant it. A dry run is told and
+    allowed to proceed: it changes nothing, and the diff is exactly what they need to see.
+    """
+    effect, _, _ = SUPPORT.get(path, (READS, (), ""))
+    if effect != STORE:
+        return None
+    from coreyard.state import DEFAULT_STATE_DB, SyncState
+
+    installation = _installation()
+    if installation is None or not DEFAULT_STATE_DB.exists():
+        return None
+    try:
+        with SyncState(DEFAULT_STATE_DB) as state:
+            changed = state.mismatch(*installation)
+    except Exception:
+        return None                    # unreadable state: `doctor` reports that properly
+    if not changed:
+        return None
+    dry = bool(getattr(args, "dry_run", False))
+    name = cli_name()
+    for line in (
+        f"This installation's sync state was written for a different installation:"
+        f" {changed}.",
+        "",
+        "The stored fingerprints describe that catalogue, not this one, so acting on them",
+        "would either publish nothing at all or duplicate a live catalogue under new",
+        "handles.",
+        "",
+        f"  {name} state adopt          what adopting this snapshot here would mean",
+        f"  {name} state adopt --apply  do it",
+        "",
+        "Or point COREYARD_HOME at a fresh data root to start this store's history from",
+        "nothing.",
+    ):
+        print(line, file=sys.stderr)
+    if dry:
+        print("\nContinuing: a dry run changes nothing.\n", file=sys.stderr)
+        return None
+    print("\nNothing was changed.", file=sys.stderr)
+    return 2
+
+
+def _claim_snapshot(path: str, code: int | None) -> None:
+    """Label an unlabelled snapshot after a successful run that acted on the store.
+
+    Only when it carries no identity at all. An existing installation has been publishing to
+    one store all along, so the first run after upgrading records what was already true —
+    refusing until someone said so would turn an upgrade into an outage.
+    """
+    effect, _, _ = SUPPORT.get(path, (READS, (), ""))
+    if effect != STORE or code not in (0, None):
+        return
+    from coreyard.state import DEFAULT_STATE_DB, SyncState
+
+    installation = _installation()
+    if installation is None or not DEFAULT_STATE_DB.exists():
+        return
+    try:
+        with SyncState(DEFAULT_STATE_DB) as state:
+            if not state.identity():
+                state.claim(*installation)
+    except Exception:
+        pass                           # never fail a run that worked over bookkeeping
+
+
 def _refuse(path: str, missing: list[tuple[str, str]], caps) -> int:
     """Say what cannot run here, why, and that nothing was changed."""
     print(f"`coreyard {path}` cannot run on this installation.\n", file=sys.stderr)
@@ -394,8 +484,14 @@ def _run(args, path: str, missing, caps) -> int:
                 if missing:
                     ops.count(refused=", ".join(name for name, _ in missing))
                     run.code = _refuse(path, missing, caps)
-                else:
-                    run.code = args.func(args)
+                    return run.code
+                moved = _snapshot_moved(path, args)
+                if moved is not None:
+                    ops.count(refused="snapshot belongs to another installation")
+                    run.code = moved
+                    return run.code
+                run.code = args.func(args)
+                _claim_snapshot(path, run.code)
                 return run.code
 
 

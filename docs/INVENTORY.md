@@ -17,7 +17,7 @@ run without. `coreyard doctor` reports which of them this installation has. A bl
 means the command works on any supported installation.
 
 
-CoreYard 0.1.0 — 45 commands.
+CoreYard 0.1.0 — 47 commands.
 
 | Command | What it does | Effect | Unlocked by | Needs |
 |---|---|---|---|---|
@@ -58,6 +58,8 @@ CoreYard 0.1.0 — 45 commands.
 | `coreyard images` | list or fetch one part's photos from the share | local files | `--delete --apply` | database, photos |
 | `coreyard part-types` | every part type the yard can inventory, and where its wording runs out | read-only |  | source |
 | `coreyard schema` | introspect the source database and rank likely tables | read-only |  | database |
+| `coreyard state` | whose catalogue this snapshot describes, and adopting it after a move | read-only |  |  |
+| `coreyard state adopt` | record this store and handle prefix on the existing snapshot | local files | `--apply` | shopify |
 | `coreyard validate` | check the external config files against their schemas (offline) | read-only |  |  |
 | `coreyard bulk` | resumable concurrent bulk publish | Shopify |  | source, shopify |
 | `coreyard altfix` | backfill alt text onto photos published before it was generated | Shopify |  | shopify |
@@ -102,6 +104,7 @@ CoreYard 0.1.0 — 45 commands.
 - **`coreyard images`** — `--apply` `--delete` `--dest` `--fetch`
 - **`coreyard part-types`** — `--catalogue` `--gaps` `--out` `--parts`
 - **`coreyard schema`** — _(no options)_
+- **`coreyard state adopt`** — `--apply`
 - **`coreyard validate`** — `--orders` `--overrides` `--profile` `--shipping` `--store` `--weights`
 - **`coreyard bulk`** — `--all-parts` `--images-only` `--limit` `--log` `--max-attempts` `--no-resume` `--status` `--workers`
 - **`coreyard altfix`** — `--dry-run` `--limit` `--log` `--max-pages` `--no-resume` `--overwrite`

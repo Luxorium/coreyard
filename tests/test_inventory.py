@@ -104,6 +104,10 @@ class NoteCleaning(unittest.TestCase):
         self.assertIsNone(_clean_note("NULL"))
 
 
+def _row(r_number: int) -> dict:
+    return {"r_number": str(r_number), "part_type": "Engine", "price": "10.00"}
+
+
 class PagedFetch(unittest.TestCase):
     @patch("coreyard.yms.inventory.query")
     @patch("coreyard.yms.inventory.connect")
@@ -112,10 +116,13 @@ class PagedFetch(unittest.TestCase):
         mapping = load.return_value
         mapping.build_page_query.side_effect = lambda size, after, **_: f"page:{after}:{size}"
         connect.return_value.__enter__.return_value = MagicMock()
-        row = {"r_number": "1", "part_type": "Engine", "price": "10.00"}
+        # Distinct R#s, because that is what keyset paging reads: the next page starts
+        # *after* the last row's identifier, so a page of repeats could not occur — and a
+        # repeated R# is now held back as ambiguous, which would make this test about
+        # something else entirely.
         run_query.side_effect = [
-            [row] * FETCH_PAGE_SIZE,
-            [{**row, "r_number": "2"}],
+            [_row(i) for i in range(1, FETCH_PAGE_SIZE + 1)],
+            [_row(FETCH_PAGE_SIZE + 1)],
         ]
 
         parts = fetch_parts()
@@ -123,7 +130,7 @@ class PagedFetch(unittest.TestCase):
         self.assertEqual(len(parts), FETCH_PAGE_SIZE + 1)
         self.assertEqual(
             [call.args[1] for call in run_query.call_args_list],
-            [f"page:None:{FETCH_PAGE_SIZE}", f"page:1:{FETCH_PAGE_SIZE}"],
+            [f"page:None:{FETCH_PAGE_SIZE}", f"page:{FETCH_PAGE_SIZE}:{FETCH_PAGE_SIZE}"],
         )
         self.assertEqual(connect.call_count, 2)
     @patch("coreyard.yms.inventory.query")
@@ -133,15 +140,16 @@ class PagedFetch(unittest.TestCase):
         mapping = load.return_value
         mapping.build_page_query.side_effect = lambda size, after, **_: f"page:{after}:{size}"
         connect.return_value.__enter__.return_value = MagicMock()
-        row = {"r_number": "1", "part_type": "Engine", "price": "10.00"}
-        next_row = {**row, "r_number": "2"}
-        run_query.side_effect = [[row] * FETCH_PAGE_SIZE, [next_row] * 250]
+        run_query.side_effect = [
+            [_row(i) for i in range(1, FETCH_PAGE_SIZE + 1)],
+            [_row(i) for i in range(FETCH_PAGE_SIZE + 1, FETCH_PAGE_SIZE + 251)],
+        ]
 
         limit = FETCH_PAGE_SIZE + 250
         self.assertEqual(len(fetch_parts(limit=limit)), limit)
         self.assertEqual(
             [call.args[1] for call in run_query.call_args_list],
-            [f"page:None:{FETCH_PAGE_SIZE}", "page:1:250"],
+            [f"page:None:{FETCH_PAGE_SIZE}", f"page:{FETCH_PAGE_SIZE}:250"],
         )
         self.assertEqual(connect.call_count, 2)
 
