@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple, Optional
 
 from coreyard import ops
 from coreyard.config import DATA_ROOT, bundled, cli_name, load_settings, out_dir
+from coreyard.progress import elapsed, waiting
 from coreyard.state import DEFAULT_STATE_DB, SyncState, fingerprints_all
 
 # The channel this pipeline publishes to. Recorded alongside the canonical
@@ -300,7 +302,7 @@ def _enrich(conn, parts) -> None:
         print(f"  (enrichment skipped: {exc})")
 
 
-def _publish_batch(publisher, todo, needs_photos, revivals, bank, fail=None):
+def _publish_batch(publisher, todo, needs_photos, revivals, bank, fail=None, phase=None):
     """Publish each part, banking progress as it goes *and* however this loop is left.
 
     ``bank(pending)`` records the parts published since it was last called. It runs at the
@@ -355,6 +357,11 @@ def _publish_batch(publisher, todo, needs_photos, revivals, bank, fail=None):
                     fail(key, str(exc))
                 continue
             published_ok.add(key)
+            if phase is not None:
+                # One part can hold the loop for a minute on its own when its media is being
+                # rebuilt, so the count the heartbeat reports is kept current per part rather
+                # than per progress line.
+                phase.advance(i)
             if key in revivals:
                 revived.add(key)
             if i % 25 == 0 or i == len(todo):
@@ -477,6 +484,7 @@ def cmd_delta(args) -> int:
               f"without the flag.", file=sys.stderr)
         return 2
 
+    run_started = time.monotonic()
     from coreyard.yms import schema as schema_mod
     from coreyard.yms.delta import CURSOR_NAME, fetch_changes
     from coreyard.yms.inventory import is_configured
@@ -586,7 +594,8 @@ def cmd_delta(args) -> int:
             print(f"Cursor advanced to {changes.cursor.isoformat()}.")
 
         _refresh_source_inventory_count(publisher)
-        _summarise(diff, published_ok, revived, retired, todo, args)
+        _summarise(diff, published_ok, revived, retired, todo, args,
+                   time.monotonic() - run_started)
     return 0
 
 
@@ -742,10 +751,16 @@ def cmd_sync(args) -> int:
     # the full run must already have seen them.
     baseline = _delta_baseline() if not partial else None
 
-    photos = _make_resolver(args.image_base_url, scan_images=not args.no_image_scan)
+    run_started = time.monotonic()
+    # Both of these go quiet for minutes on a full catalogue — one listing of a share with
+    # 27,000 folders, one paged read of the yard — and a run that is working looks exactly
+    # like a run that is wedged for the whole of it.
+    with waiting("listing the photo share"):
+        photos = _make_resolver(args.image_base_url, scan_images=not args.no_image_scan)
     resolver = photos.resolve
     print(f"Fetching parts (limit={args.limit or 'none'}) ...")
-    parts = fetch_parts(limit=args.limit)
+    with waiting("reading the yard"):
+        parts = fetch_parts(limit=args.limit)
     if getattr(args, "r_numbers", None):
         wanted = {str(r).strip() for r in args.r_numbers}
         parts = [p for p in parts if p.uid() in wanted]
@@ -871,8 +886,9 @@ def cmd_sync(args) -> int:
                     return
                 state.record_channel_failure(CHANNEL, r_number, reason)
 
-            published_ok, revived = _publish_batch(publisher, todo, needs_photos,
-                                                   revivals, bank, fail)
+            with waiting("publishing", total=len(todo)) as phase:
+                published_ok, revived = _publish_batch(publisher, todo, needs_photos,
+                                                       revivals, bank, fail, phase)
             # Only after the upsert landed: a part whose revival failed must still be
             # remembered, or the retry would republish it as ARCHIVED.
             state.clear_retired(revived)
@@ -933,11 +949,12 @@ def cmd_sync(args) -> int:
 
         if publisher is not None and not args.dry_run:
             _refresh_source_inventory_count(publisher)
-        _summarise(diff, published_ok, revived, retired, todo, args)
+        _summarise(diff, published_ok, revived, retired, todo, args,
+                   time.monotonic() - run_started)
     return 0
 
 
-def _summarise(diff, published_ok, revived, retired, todo, args) -> None:
+def _summarise(diff, published_ok, revived, retired, todo, args, seconds=None) -> None:
     """One block an operator can read at a glance, and the counts ``status`` remembers.
 
     Every path records its counts, including the catch-up run: without them ``status`` could
@@ -963,7 +980,7 @@ def _summarise(diff, published_ok, revived, retired, todo, args) -> None:
     if not acted:
         print(f"Nothing to publish ({counts['unchanged']:,} unchanged).")
         return
-    print("\nSync complete.\n")
+    print(f"\nSync complete{f' in {elapsed(seconds)}' if seconds else ''}.\n")
     for label, value in counts.items():
         print(f"  {label.replace('_', ' ').capitalize():<14}{value:>10,}")
     if counts["failed"]:
