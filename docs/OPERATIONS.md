@@ -486,8 +486,17 @@ fingerprint, so a part that gains or loses a photo is republished with its media
 
 `shopify_bulk` is the path to use for the initial catalog load. It is resumable: every attempt
 is appended to `out/shopify_bulk_results.jsonl`, and a re-run skips R#s already logged `ok`, so
-transient upload failures simply retry on the next run. Note it tracks progress in that log,
-**not** in `coreyard_sync_state.sqlite3` — the two publish paths do not share state.
+transient upload failures simply retry on the next run. That log is what the bulk run resumes
+*itself* from, and it is the only thing a `--no-resume` run ignores.
+
+It also hands its work over to the incremental path. Each part it publishes is recorded in
+`coreyard_sync_state.sqlite3` at the same fingerprint a sync would compute — banked in batches
+as the run goes, and whatever happens to the run — so `bin/coreyard sync` straight after a
+bulk load finds the catalogue unchanged instead of publishing all of it again through the slow
+path. Only parts that actually published are recorded; a part that failed is still waiting for
+a sync, which is exactly where you want it. If the state database cannot be written the load
+carries on and says so: the cost is a sync that republishes, which is what happened before
+there was a handoff at all.
 
 Re-running is safe either way: products are keyed by the stable handle
 `<SHOPIFY_HANDLE_PREFIX>-<R#>` and upserted with `productSet`, and photos are uploaded only when

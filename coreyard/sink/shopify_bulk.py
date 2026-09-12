@@ -12,9 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from coreyard.config import out_dir
+from coreyard.config import load_store, out_dir
 from coreyard.models import Part
-from coreyard.state import DEFAULT_STATE_DB, SyncState
+from coreyard.state import DEFAULT_STATE_DB, SyncState, fingerprints_all
 from coreyard.yms.db import connect
 from coreyard.yms.interchange import InterchangeResolver
 from coreyard.yms.inventory import fetch_parts, photos_required
@@ -130,7 +130,47 @@ def run(args) -> int:
     processed = 0
     pending: dict[Future, Part] = {}
 
-    def record_completed(log_file, block: bool) -> None:
+    # Which photographs a part publishes with — its own, or its donor vehicle's — is
+    # decided in exactly one place, and this is the third caller of it after the full and
+    # delta sync paths. Resolving here is what tells the publisher a part fell back to its
+    # donor; without it an unphotographed part reaches ``_staged_files`` with nothing to
+    # stage and, under ``require_images``, fails outright. It also lists each folder once
+    # for the whole run rather than once per part.
+    from coreyard.run_sync import CHANNEL, CHECKPOINT_EVERY, _make_resolver
+
+    photos = _make_resolver(None, scan_images=True)
+    store = load_store()
+    unbanked: list[Part] = []
+
+    def bank(state, force: bool = False) -> None:
+        """Tell the snapshot what this run published, in the sync's own terms.
+
+        Without this the two publish paths share no state at all: a bulk load of twenty-odd
+        thousand products left the snapshot empty, so the very next `coreyard sync` saw every
+        one of them as new and published the whole catalogue again through the slow path.
+        The work was not lost, but nothing this run did was *known*, which is the same thing
+        from the next run's point of view.
+
+        Only parts that actually published are recorded, and the fingerprint is taken from
+        the same renderer, store profile and photo manifest the sync uses — anything else
+        would record a version the storefront does not hold and strand the difference.
+
+        Recording is best-effort on purpose. A long bulk load that publishes correctly must
+        not die because the state database was busy; the cost of failing here is that the
+        next sync republishes those parts, which is exactly what happened before.
+        """
+        if not unbanked or (len(unbanked) < CHECKPOINT_EVERY and not force):
+            return
+        batch, unbanked[:] = list(unbanked), []
+        try:
+            prints = fingerprints_all(batch, photos.resolve, store, stamps=photos.stamps)
+            state.update(prints)
+            state.record_channel(CHANNEL, prints)
+        except Exception as exc:      # noqa: BLE001 - see the docstring
+            print(f"  (could not record {len(batch)} part(s) in the sync state: {exc})",
+                  flush=True)
+
+    def record_completed(log_file, state, block: bool) -> None:
         nonlocal successes, failures, processed
         if not pending:
             return
@@ -139,16 +179,26 @@ def run(args) -> int:
             return_when=FIRST_COMPLETED,
             timeout=None if block else 0,
         )
+        # A worker that died hard — KeyboardInterrupt, SystemExit — must not take the
+        # results already in this batch with it. They describe products Shopify has taken,
+        # and dropping them here means the log never learns about them and neither does the
+        # snapshot. Finish accounting for what is in hand, then let it out.
+        interrupted: BaseException | None = None
         for future in done:
             part = pending.pop(future)
             try:
                 result = future.result()
             except Exception as exc:
                 result = {"status": "error", "r_number": part.r_number, "error": str(exc)}
+            except BaseException as exc:      # noqa: BLE001 - re-raised below
+                interrupted = exc
+                continue
             _write_result(log_file, result)
             processed += 1
             if result["status"] == "ok":
                 successes += 1
+                unbanked.append(part)
+                bank(state)
                 marker = "OK"
                 detail = f'+{result["images_added"]} images'
             else:
@@ -160,30 +210,30 @@ def run(args) -> int:
                 f'({result.get("seconds", 0)}s, attempt {result.get("attempts", 1)})',
                 flush=True,
             )
+        if interrupted is not None:
+            raise interrupted
 
-    # Which photographs a part publishes with — its own, or its donor vehicle's — is
-    # decided in exactly one place, and this is the third caller of it after the full and
-    # delta sync paths. Resolving here is what tells the publisher a part fell back to its
-    # donor; without it an unphotographed part reaches ``_staged_files`` with nothing to
-    # stage and, under ``require_images``, fails outright. It also lists each folder once
-    # for the whole run rather than once per part.
-    from coreyard.run_sync import _make_resolver
-
-    photos = _make_resolver(None, scan_images=True)
-
-    with args.log.open("a", encoding="utf-8") as log_file:
-        with connect() as conn, ThreadPoolExecutor(max_workers=args.workers) as pool:
-            resolver = InterchangeResolver(conn)
-            for part in selected:
-                part.fitment = resolver.fitment_for(part)
-                photos.resolve(part)
-                future = pool.submit(_publish_with_retry, part, args.status,
-                                     args.max_attempts, require_images)
-                pending[future] = part
-                while len(pending) >= args.workers * 3:
-                    record_completed(log_file, block=True)
-            while pending:
-                record_completed(log_file, block=True)
+    with args.log.open("a", encoding="utf-8") as log_file, \
+            SyncState(DEFAULT_STATE_DB) as state:
+        try:
+            with connect() as conn, ThreadPoolExecutor(max_workers=args.workers) as pool:
+                resolver = InterchangeResolver(conn)
+                for part in selected:
+                    part.fitment = resolver.fitment_for(part)
+                    photos.resolve(part)
+                    future = pool.submit(_publish_with_retry, part, args.status,
+                                         args.max_attempts, require_images)
+                    pending[future] = part
+                    while len(pending) >= args.workers * 3:
+                        record_completed(log_file, state, block=True)
+                while pending:
+                    record_completed(log_file, state, block=True)
+        finally:
+            # However this run is left — drained, interrupted, or killed at the keyboard —
+            # every part in here is one Shopify has already taken. The same lesson as the
+            # publish loop's own checkpoint: banking only at the end means a run that does
+            # not reach the end banks nothing.
+            bank(state, force=True)
 
     print(f"Finished: successes={successes} failures={failures} log={args.log}", flush=True)
     return 1 if failures else 0
