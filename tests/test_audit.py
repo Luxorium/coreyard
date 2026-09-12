@@ -1,6 +1,7 @@
 """Catalog audit: generic checks, site-configurable thresholds, no site-specific rules."""
 
 import unittest
+import unittest.mock
 
 from coreyard.audit.catalog import evaluate, scan
 from coreyard.config import StoreProfile
@@ -184,3 +185,49 @@ class Scan(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MachineReadableOutput(unittest.TestCase):
+    """`--json` means the same thing here as on `status`, `doctor` and `alert`.
+
+    It used to require a path, so `audit catalog --json | jq` failed with an argparse error
+    rather than printing a report. The path spelling still works: closing an inconsistency by
+    breaking the older invocation would trade one for another.
+    """
+
+    def run_audit(self, json_arg):
+        import argparse
+        import contextlib
+        import io
+        import json as json_mod
+        from unittest.mock import patch
+
+        from coreyard.audit import cli as audit_cli
+
+        args = argparse.Namespace(json=json_arg, show=3, all_products=False)
+        out = io.StringIO()
+        with patch.object(audit_cli, "scan", return_value=[]), \
+                patch.object(audit_cli, "load_store"), \
+                patch("coreyard.sink.shopify_api.ShopifyClient"), \
+                patch.object(audit_cli, "evaluate") as evaluate:
+            evaluate.return_value = unittest.mock.Mock(
+                total=2, clean=False,
+                ordered=lambda: [("missing sku", [unittest.mock.Mock(label="51", detail="")])])
+            with contextlib.redirect_stdout(out):
+                code = audit_cli.run(args)
+        return code, out.getvalue(), json_mod
+
+    def test_bare_json_prints_the_report_on_stdout(self):
+        _, printed, json_mod = self.run_audit(True)
+        body = printed[printed.index("{"):]
+        self.assertEqual(json_mod.loads(body)["findings"]["missing sku"], ["51"])
+
+    def test_a_path_still_writes_the_file(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "audit.json"
+            _, printed, json_mod = self.run_audit(str(target))
+            self.assertIn("Full report written to", printed)
+            self.assertEqual(json_mod.loads(target.read_text())["total"], 2)
