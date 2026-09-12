@@ -809,7 +809,7 @@ def cmd_sync(args) -> int:
             from coreyard.sink.csv_sink import write
 
             out = Path(args.out)
-            products, rows = write(parts, out, resolver, settings.store)
+            products, rows = write(parts, out, resolver, settings.store, args.status)
             print(f"Wrote {products} products / {rows} rows -> {out}")
             if diff.removed:
                 print(f"NOTE: {len(diff.removed)} previously-listed parts are gone (sold). "

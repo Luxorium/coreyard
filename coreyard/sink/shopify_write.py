@@ -208,9 +208,16 @@ class ShopifyPublisher:
             {"ownerId": product_id, "namespace": namespace, "key": key} for key in stale
         ]}, "metafieldsDelete")
 
-    def _upsert(self, product: RenderedProduct, quantity: int, product_id: Optional[str],
+    def _upsert(self, product: RenderedProduct, product_id: Optional[str],
                 files: Optional[list] = None, status: Optional[str] = None,
                 existing_tags: Optional[list[str]] = None) -> str:
+        """Write the canonical product, quantity included.
+
+        The quantity comes from the rendered product rather than from the part beside it.
+        Both clamp a negative to zero, which is exactly the problem: one rule written twice
+        is a rule that can be changed once. The fingerprint is taken from `product`, so a
+        quantity published from anywhere else is a number the diff cannot see.
+        """
         policy = self.store.catalog
         inp = product_set_input(
             product, status or self.status, existing_tags,
@@ -224,7 +231,8 @@ class ShopifyPublisher:
         item = inp["variants"][0].setdefault("inventoryItem", {})
         item["tracked"] = True
         inp["variants"][0]["inventoryQuantities"] = [
-            {"locationId": self.location, "name": "available", "quantity": max(quantity, 0)}
+            {"locationId": self.location, "name": "available",
+             "quantity": product.inventory}
         ]
         res = self.client.mutate(_SET, {"input": inp}, "productSet")
         return res["product"]["id"]
@@ -431,8 +439,7 @@ class ShopifyPublisher:
         else:
             files = []
 
-        product_id = self._upsert(rendered, part.quantity, product_id, files, status,
-                                  existing_tags)
+        product_id = self._upsert(rendered, product_id, files, status, existing_tags)
         if stale_media:
             try:
                 self.client.mutate(

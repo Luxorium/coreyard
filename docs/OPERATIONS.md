@@ -59,6 +59,7 @@ bin/coreyard doctor
 
 # 2. Preview: first 25 parts to a CSV you can eyeball / import to a test store
 bin/coreyard sync --sink csv --limit 25 --dry-run
+bin/coreyard sync --sink csv --limit 25 --status ACTIVE   # ...importing them live instead
 
 # 3. Incremental run (diffs against coreyard_sync_state.sqlite3)
 bin/coreyard sync --dry-run      # report the diff, write nothing
@@ -104,6 +105,11 @@ Two consequences worth knowing:
 ```bash
 bin/coreyard --lock sync --timeout 45m sync
 ```
+
+Both sinks honour `--status`, which decides what a *new* product is created as and defaults
+to `DRAFT`: an imported CSV lands as drafts on no channel, exactly as an API publish does, so
+a catalogue reaches shoppers only once somebody says so. Existing products keep the status
+they have either way.
 
 `--lock NAME` holds `out/.NAME.lock` for the run and exits quietly (status 0) if another run
 already has it — a skipped tick is the intended outcome when a full sync is still going.

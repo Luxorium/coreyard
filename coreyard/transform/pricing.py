@@ -37,6 +37,11 @@ def money_str(value) -> str:
     Always ``45.00``, never ``45``: a validator that rejects a whole number is common
     enough, and the failure it produces is a rejected write rather than a wrong price, so
     it is worth being unconditional about. This performs no merchandising adjustment.
+
+    A source amount with more than two decimal places is rounded half-to-even, which is
+    ``decimal``'s default and is stated here because "the published price equals the source
+    price" needs a precision to be true at. Yard prices are money columns, so this is a
+    statement about the edge rather than about the traffic: 12.345 publishes as 12.34.
     """
     amount = value if isinstance(value, Decimal) else Decimal(str(value))
     return f"{amount.quantize(Decimal('0.01')):.2f}"

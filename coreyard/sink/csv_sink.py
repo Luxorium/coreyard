@@ -15,6 +15,7 @@ def write(
     out_path: Path,
     resolver: ImageResolver,
     store: StoreProfile,
+    status: str = "DRAFT",
 ) -> tuple[int, int]:
     """Write CSV; returns (products, rows)."""
-    return write_csv(parts, out_path, resolver, store)
+    return write_csv(parts, out_path, resolver, store, status)

@@ -58,13 +58,14 @@ def rows_for_parts(
     parts: Iterable[Part],
     resolver: ImageResolver = _no_images,
     store: Optional[StoreProfile] = None,
+    status: str = "DRAFT",
 ) -> Iterable[dict[str, str]]:
     """Yield CSV row dicts for all listable parts (skips non-priced rows defensively)."""
     store = store or StoreProfile()
     for part in parts:
         if not part.is_listable():
             continue
-        for row in part_to_rows(part, resolver(part), store):
+        for row in part_to_rows(part, resolver(part), store, status):
             yield row
 
 
@@ -73,15 +74,21 @@ def write_csv(
     path: Path,
     resolver: ImageResolver = _no_images,
     store: Optional[StoreProfile] = None,
+    status: str = "DRAFT",
 ) -> tuple[int, int]:
-    """Write the Shopify CSV. Returns (product_count, row_count)."""
+    """Write the Shopify CSV. Returns (product_count, row_count).
+
+    ``status`` is the intended status for the products this import creates, and it is the
+    same flag the API sink honours — `coreyard sync --status ACTIVE`. It used to be ignored
+    here, so the two sinks disagreed about the only publishing decision the operator makes.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     products = 0
     rows = 0
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=SHOPIFY_COLUMNS, extrasaction="ignore")
         writer.writeheader()
-        for row in rows_for_parts(parts, resolver, store):
+        for row in rows_for_parts(parts, resolver, store, status):
             # A primary row always carries a Title; continuation image rows do not.
             if row.get("Title"):
                 products += 1
