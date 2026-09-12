@@ -114,13 +114,20 @@ jobs:
           test -s "$home/out/products.csv"
 
   packaged:
-    name: the built wheel runs the quickstart
+    name: the built wheel runs the quickstart (py${{ matrix.python }})
     runs-on: ubuntu-latest
+    # DIST-03 asks for every advertised Python, and the suite is not the thing customers
+    # install: a wheel that builds on 3.12 and fails to run on 3.10 is a supported version
+    # nobody exercised.
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
       # QA-01/DIST-03/DIST-04: "a passing source checkout alone is insufficient". This job
       # exists because every earlier check ran inside a tree that already had a schema.json,
       # a .env and a photo share sitting beside the code — so four database requirements on

@@ -84,6 +84,12 @@ the gap between them is the work left.
 The supported product is **source database → Shopify → sales**. There is no marketplace
 integration in this repository.
 
+**Where it runs.** Linux, on Python 3.10 through 3.13 — the versions CI exercises, both for
+the test suite and for the built wheel. `install.sh` knows apt, dnf, yum, zypper, pacman and
+apk; on anything else the manual install two commands below it works wherever those Pythons
+do. macOS is not claimed: the library has nothing Linux-specific in it, but the documented
+install path has never been run there, and an untested platform is not a supported one.
+
 Known gaps: a part's *variant-level* media assignment is not managed — photos attach to the
 product, not to a specific variant, which is fine while every part is a single-variant product.
 

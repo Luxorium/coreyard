@@ -400,3 +400,40 @@ class NothingIsTakingSoldPartsOffTheStore(unittest.TestCase):
 
     def test_the_scheduled_health_run_includes_it(self):
         self.assertIn(doctor.check_delisting, doctor.PIPELINE)
+
+
+class AMissingSystemToolIsAConfiguration(unittest.TestCase):
+    """DIST-03: a tool that is not installed is reported, and only where it is used.
+
+    `smbclient` is the one external binary CoreYard shells out to, and only on the SMB photo
+    path. Demanding it from an installation whose photographs sit in a local directory is
+    asking for a package that will never be called — which is how a check earns a permanent
+    place in the pile people scroll past.
+    """
+
+    def caps(self, *, carries_own_photos: bool, photos: bool):
+        return mock.Mock(
+            traits=mock.Mock(carries_own_photos=carries_own_photos),
+            enabled=lambda name: photos if name == "photos" else False,
+            source_kind="tabular", source_spec="tabular:/tmp/parts.csv",
+            get=lambda name: mock.Mock(state=doctor.OK, detail=""))
+
+    def lines(self, caps):
+        with mock.patch("shutil.which", return_value=None):
+            return [r for r in doctor.check_environment(caps=caps) if r[1] == "smbclient"]
+
+    def test_an_installation_that_needs_it_is_told_to_install_it(self):
+        found = self.lines(self.caps(carries_own_photos=False, photos=True))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0][0], doctor.FAIL)
+        self.assertIn("samba", found[0][2])
+
+    def test_an_installation_that_does_not_is_not_asked_for_it(self):
+        self.assertEqual(self.lines(self.caps(carries_own_photos=True, photos=True)), [])
+        self.assertEqual(self.lines(self.caps(carries_own_photos=False, photos=False)), [])
+
+    def test_when_it_is_there_it_says_so_rather_than_staying_silent(self):
+        caps = self.caps(carries_own_photos=False, photos=True)
+        with mock.patch("shutil.which", return_value="/usr/bin/smbclient"):
+            found = [r for r in doctor.check_environment(caps=caps) if r[1] == "smbclient"]
+        self.assertEqual(found[0][0], doctor.OK)
