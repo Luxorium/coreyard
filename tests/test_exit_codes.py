@@ -173,3 +173,104 @@ class OneTwentyFourIsTheDeadline(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AFailureSaysWhatToDoNext(unittest.TestCase):
+    """UX-04's other half: the message, not the status.
+
+    Each of these is a failure an installation actually hits, and the test is not that it
+    raises — anything raises. It is that the sentence names the thing that is wrong and the
+    next action, because the person reading it is usually not the person who configured it,
+    and is reading it out of a cron log at some distance from the machine.
+    """
+
+    def client(self):
+        from coreyard.sink.shopify_api import ShopifyClient, ShopifyCreds
+
+        client = ShopifyClient.__new__(ShopifyClient)
+        client.creds = ShopifyCreds("example.myshopify.com", "shpat_notreal", "2026-07")
+        return client
+
+    def refused(self, status: int) -> str:
+        with self.assertRaises(RuntimeError) as caught:
+            self.client()._raise_for_status(mock.Mock(status_code=status), "publishing R#51")
+        return str(caught.exception)
+
+    def test_authentication_names_the_setting_and_the_diagnostic(self):
+        message = self.refused(401)
+        self.assertIn("SHOPIFY_ADMIN_TOKEN", message)
+        self.assertIn("doctor", message)
+        self.assertIn("example.myshopify.com", message)
+
+    def test_it_never_prints_the_token_it_is_complaining_about(self):
+        self.assertNotIn("shpat_notreal", self.refused(403))
+
+    def test_a_wrong_store_or_retired_api_version_says_which_to_check(self):
+        message = self.refused(404)
+        self.assertIn("SHOPIFY_STORE", message)
+        self.assertIn("SHOPIFY_API_VERSION", message)
+        self.assertIn("2026-07", message)
+
+    def test_a_frozen_shop_says_this_is_not_yours_to_fix(self):
+        self.assertIn("billing", self.refused(402))
+
+    def test_an_unexpected_status_keeps_the_librarys_own_message(self):
+        """A status nobody has a remedy for should not be dressed up as one."""
+        response = mock.Mock(status_code=418)
+        response.raise_for_status.side_effect = RuntimeError("418 I'm a teapot")
+        with self.assertRaises(RuntimeError) as caught:
+            self.client()._raise_for_status(response, "publishing R#51")
+        self.assertIn("teapot", str(caught.exception))
+
+    def test_a_network_failure_names_the_usual_cause_and_a_safe_retest(self):
+        message = str(self.client()._unreachable(OSError("Name or service not known"),
+                                                 "reading orders/1042.json"))
+        self.assertIn("Could not reach example.myshopify.com", message)
+        self.assertIn("DNS", message)
+        self.assertIn("doctor", message)
+
+    def test_a_missing_required_setting_names_the_key_and_the_file(self):
+        from coreyard import config
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(RuntimeError) as caught:
+                config._get("YMS_DB_HOST", "", required=True)
+        message = str(caught.exception)
+        self.assertIn("YMS_DB_HOST", message)
+        self.assertIn(".env", message)
+
+    def test_an_unmapped_source_says_which_file_to_write_and_how(self):
+        from coreyard import run_sync
+
+        from tests.test_sync_plan import sync_args
+
+        out = io.StringIO()
+        with mock.patch("coreyard.yms.inventory.is_configured", return_value=False), \
+                contextlib.redirect_stderr(out):
+            code = run_sync.cmd_sync(sync_args([]))
+        self.assertEqual(code, 2)
+        printed = out.getvalue()
+        self.assertIn("schema.example.json", printed)
+        self.assertIn("schema.json", printed)
+
+    def test_an_unwritable_data_root_is_reported_by_the_diagnostic(self):
+        """Permission failures are the ones people meet after moving an installation, so
+        `doctor` asks the question before a run does."""
+        from coreyard import doctor
+
+        with tempfile.TemporaryDirectory() as directory:
+            locked = pathlib.Path(directory) / "home"
+            locked.mkdir()
+            locked.chmod(0o555)
+            try:
+                with mock.patch("coreyard.doctor.out_dir", return_value=locked / "out"):
+                    results = doctor.check_environment(caps=mock.Mock(
+                        source_kind="tabular", source_spec="tabular:/tmp/x.csv",
+                        traits=mock.Mock(carries_own_photos=True),
+                        enabled=lambda name: False,
+                        get=lambda name: mock.Mock(state=doctor.OK, detail="")))
+            finally:
+                locked.chmod(0o755)
+        lines = [r for r in results if r[1] == "out/"]
+        self.assertTrue(lines)
+        self.assertEqual(lines[0][0], doctor.FAIL)

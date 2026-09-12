@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Iterator, Optional
 
-from coreyard.config import StoreProfile, _get, load_env
+from coreyard.config import StoreProfile, _get, cli_name, load_env
 from coreyard.models import Part
 from coreyard.transform import tags as tag_policy
 from coreyard.transform.render import RenderedProduct, render
@@ -107,20 +107,20 @@ class ShopifyClient:
                     json={"query": query, "variables": variables or {}},
                     timeout=60,
                 )
-            except self._requests.RequestException:
+            except self._requests.RequestException as exc:
                 # A dropped connection mid-catalogue-walk is ordinary; only give up once the
                 # retries are spent, so a long run survives a blip.
                 if attempt < tries - 1:
                     time.sleep(2 ** attempt)
                     continue
-                raise
+                raise self._unreachable(exc, "running a GraphQL operation") from exc
             if resp.status_code == 429:
                 time.sleep(2 * (attempt + 1))
                 continue
             if resp.status_code >= 500 and attempt < tries - 1:
                 time.sleep(2 ** attempt)
                 continue
-            resp.raise_for_status()
+            self._raise_for_status(resp, "running a GraphQL operation")
             data = resp.json()
             self._note_cost(data)
             if data.get("errors"):
@@ -165,6 +165,43 @@ class ShopifyClient:
                 return
             cursor = page["pageInfo"]["endCursor"]
 
+    def _raise_for_status(self, resp, what: str) -> None:
+        """Turn the statuses an operator can actually fix into a sentence that says so.
+
+        `raise_for_status` produces "401 Client Error: Unauthorized for url: ..." — accurate,
+        and it leaves somebody looking at a traceback to work out that their admin token is
+        the thing to go and look at. These three are the ones an installation hits: wrong or
+        revoked credentials, a store domain that does not resolve to a shop, and an API
+        version Shopify has retired. Everything else keeps the library's own message, which
+        is the right answer for a status nobody has a specific remedy for.
+        """
+        store = self.creds.store
+        if resp.status_code in (401, 403):
+            raise RuntimeError(
+                f"Shopify refused these credentials for {store} ({resp.status_code}) "
+                f"while {what}. The admin token is wrong, revoked, or missing a scope. "
+                f"Check SHOPIFY_ADMIN_TOKEN in your .env; `{cli_name()} doctor` reports "
+                f"which scopes this token actually has.")
+        if resp.status_code == 404:
+            raise RuntimeError(
+                f"Shopify has no such endpoint on {store} (404) while {what}. Either "
+                f"SHOPIFY_STORE names a shop that does not exist, or SHOPIFY_API_VERSION "
+                f"({self.creds.api_version}) has been retired. `{cli_name()} doctor` checks "
+                f"both.")
+        if resp.status_code == 402:
+            raise RuntimeError(
+                f"Shopify says {store} is not currently accepting API calls (402) — a shop "
+                f"that is frozen or on a paused plan answers this way. Nothing here can fix "
+                f"it; the store's billing can.")
+        resp.raise_for_status()
+
+    def _unreachable(self, exc: Exception, what: str) -> RuntimeError:
+        """The network failed, after the retries a blip would have survived."""
+        return RuntimeError(
+            f"Could not reach {self.creds.store} while {what}: {type(exc).__name__}: "
+            f"{str(exc)[:160]}. DNS, a proxy or an outage is the usual cause; "
+            f"`{cli_name()} doctor` retests it without changing anything.")
+
     def rest_get(self, path: str, tries: int = 5) -> dict[str, Any]:
         """GET one REST resource.
 
@@ -179,15 +216,15 @@ class ShopifyClient:
             self._wait_for_budget()
             try:
                 resp = self._session.get(url, timeout=60)
-            except self._requests.RequestException:
+            except self._requests.RequestException as exc:
                 if attempt < tries - 1:
                     time.sleep(2 ** attempt)
                     continue
-                raise
+                raise self._unreachable(exc, f"reading {path}") from exc
             if resp.status_code == 429 or (resp.status_code >= 500 and attempt < tries - 1):
                 time.sleep(2 * (attempt + 1))
                 continue
-            resp.raise_for_status()
+            self._raise_for_status(resp, f"reading {path}")
             return resp.json()
         raise RuntimeError(f"Shopify REST: exhausted retries for {path}")
 
