@@ -81,6 +81,47 @@ class WhichTablesAreWritten(unittest.TestCase):
     def test_a_site_that_does_not_book_orders_writes_nothing(self):
         self.assertEqual(snap.write_tables({"select": {"a": "b"}}), set())
 
+    def test_every_write_path_counts_not_only_the_first(self):
+        """A write path missing from this set is checked as though CoreYard only read it."""
+        schema = {"order_write": {"header_insert": "INSERT dbo.WIDGET (a) VALUES (1)"},
+                  "invoice_write": {"header_insert": "INSERT dbo.DOCKET (a) VALUES (1)",
+                                    "order_close": "UPDATE dbo.WIDGET SET s = 'C'"},
+                  "backlink_write": {"clear": "UPDATE dbo.STOCK SET link = NULL"}}
+        self.assertEqual(snap.write_tables(schema), {"WIDGET", "DOCKET", "STOCK"})
+
+
+class WhereTheCountersAre(unittest.TestCase):
+    """Which table hands out ids is the site's to say, like every other name here."""
+
+    def test_the_counter_tables_come_from_the_mapping(self):
+        schema = {"order_write": {
+            "counter_order_id": "UPDATE dbo.TALLY SET CounterValue = CounterValue + 1",
+            "header_insert": "INSERT dbo.WIDGET (a) VALUES (1)"}}
+        self.assertEqual(snap.counter_tables(schema), ["TALLY"])
+
+    def test_a_second_write_path_may_use_a_second_counter(self):
+        schema = {"order_write": {"counter_order_id": "UPDATE dbo.TALLY SET x = 1"},
+                  "invoice_write": {"counter_invoice_id": "UPDATE dbo.TALLY SET x = 1",
+                                    "counter_invoice_number": "UPDATE dbo.PER_STORE SET x = 1"}}
+        self.assertEqual(snap.counter_tables(schema), ["TALLY", "PER_STORE"])
+
+    def test_a_site_with_no_write_mapping_has_no_counters(self):
+        self.assertEqual(snap.counter_tables({"select": {"a": "b"}}), [])
+
+    def test_only_the_counter_statements_are_read(self):
+        """The insert names the table the ids are *for*, which is not where they come from."""
+        schema = {"order_write": {"header_insert": "INSERT dbo.WIDGET (a) VALUES (1)"}}
+        self.assertEqual(snap.counter_tables(schema), [])
+
+    def test_the_shipped_example_names_its_counters(self):
+        import json
+
+        from coreyard.config import bundled
+
+        example = json.loads(bundled("schema.example.json").read_text(encoding="utf-8"))
+        self.assertEqual(snap.counter_tables(example),
+                         ["COUNTER_TABLE", "PER_STORE_COUNTER_TABLE"])
+
 
 class WhatChanged(unittest.TestCase):
     BEFORE = snapshot({

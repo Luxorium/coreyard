@@ -48,14 +48,43 @@ _WRITES = re.compile(r"\b(?:INSERT\s+(?:INTO\s+)?|UPDATE\s+)(?:dbo\.)?"
                      r"([A-Za-z_][A-Za-z0-9_]*)", re.I)
 
 
+# Every section that writes, not just the first one. A write path whose tables are missing
+# from this set is checked as though CoreYard only read them, which is the softer of the two
+# verdicts: the upgrade that adds a required column to it is reported as news rather than as
+# the broken insert it will be on the next run.
+_WRITE_SECTIONS = ("order_write", "invoice_write", "backlink_write")
+
+
 def write_tables(schema: dict) -> set[str]:
-    """Tables the configured order write inserts into or updates."""
-    section = schema.get("order_write")
-    if not isinstance(section, dict):
-        return set()
-    blob = json.dumps(section)
+    """Tables the configured write paths insert into or update."""
+    sections = [schema.get(name) for name in _WRITE_SECTIONS]
+    blob = json.dumps([s for s in sections if isinstance(s, (dict, list))])
     return {name for name in _WRITES.findall(blob)
             if name.lower() not in _NOT_A_TABLE}
+
+
+def counter_tables(schema: dict) -> list[str]:
+    """The tables a write path allocates ids from, in the site's own spelling.
+
+    Named by the mapping rather than by this file for the same reason as `write_tables`:
+    the counter table belongs to an installation. Hardcoding one yard's name meant every
+    other site captured no counters at all and was never told — and counters are the part
+    of an upgrade that fails quietly, by handing out an id the application also intends
+    to issue.
+    """
+    found: list[str] = []
+    for name in _WRITE_SECTIONS:
+        section = schema.get(name)
+        if not isinstance(section, dict):
+            continue
+        for key, statement in section.items():
+            if not key.startswith("counter_") or not isinstance(statement, str):
+                continue
+            for database, table in _QUALIFIED.findall(statement):
+                entry = f"{database}.{table}" if database else table
+                if table.lower() not in _NOT_A_TABLE and entry not in found:
+                    found.append(entry)
+    return found
 
 
 # `dbo.NAME` is unambiguous. A bare FROM/JOIN is not: the map carries prose in its comment
@@ -96,8 +125,8 @@ def _quote(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def capture(tables: list[str]) -> dict:
-    """Column definitions for the named tables, plus the counters the order write allocates
+def capture(tables: list[str], counters: list[str] | None = None) -> dict:
+    """Column definitions for the named tables, plus the counters the write paths allocate
     from and the server's own version string."""
     from coreyard.yms.db import connect, query
 
@@ -150,21 +179,26 @@ def capture(tables: list[str]) -> dict:
                     "has_default": bool(int(d["has_default"])),
                 }
 
-        # The order write allocates ids by incrementing these rows. A renamed counter or a
+        # The write paths allocate ids by incrementing these rows. A renamed counter or a
         # changed increment does not fail loudly — it books a work order under an id the
-        # application also intends to issue.
-        if "DB_COUNTER" in snapshot["tables"]:
+        # application also intends to issue. Which table holds them is the site's to say.
+        for entry in counters or []:
+            database, _, table = entry.rpartition(".")
+            prefix = f"{database}." if database else ""
             try:
                 rows = query(conn, "SELECT CAST(TableName AS varchar(64)) AS t,"
                                    " CAST(CounterName AS varchar(64)) AS c,"
-                                   " CAST(Increment AS int) AS inc FROM dbo.DB_COUNTER"
+                                   " CAST(Increment AS int) AS inc"
+                                   f" FROM {prefix}dbo.{table}"
                                    " ORDER BY TableName, CounterName")
-                snapshot["counters"] = [
-                    {"table": str(dict(r)["t"]).strip(),
+                snapshot["counters"].extend(
+                    {"source": entry,
+                     "table": str(dict(r)["t"]).strip(),
                      "counter": str(dict(r)["c"]).strip(),
-                     "increment": int(dict(r)["inc"])} for r in rows]
-            except Exception as exc:      # a site may map counters differently
-                snapshot["counters"] = [{"error": f"{type(exc).__name__}: {exc}"}]
+                     "increment": int(dict(r)["inc"])} for r in rows)
+            except Exception as exc:      # a site may shape its counters differently
+                snapshot["counters"].append(
+                    {"source": entry, "error": f"{type(exc).__name__}: {exc}"})
     return snapshot
 
 
@@ -242,9 +276,11 @@ def main(argv=None) -> int:
     if not schema_path.exists():
         print(f"no schema map at {schema_path}", file=sys.stderr)
         return 2
+    mapping = json.loads(schema_path.read_text(encoding="utf-8"))
     tables, certain = mapped_tables(schema_path)
+    counters = counter_tables(mapping)
     print(f"Reading {len(tables)} mapped table(s) from the source database ...")
-    live = capture(tables)
+    live = capture(tables, counters)
     found = sum(len(cols) for cols in live["tables"].values())
     print(f"  {len(live['tables'])} table(s), {found} column(s), "
           f"{len(live['counters'])} counter row(s)")
@@ -270,9 +306,7 @@ def main(argv=None) -> int:
         return 0
 
     before = json.loads(Path(args.compare).read_text(encoding="utf-8"))
-    breaking, notes = compare(before, live,
-                              write_tables(json.loads(
-                                  schema_path.read_text(encoding='utf-8'))))
+    breaking, notes = compare(before, live, write_tables(mapping))
     print(f"\nCompared against {args.compare} (taken {before.get('taken_at', '?')})")
     for line in notes:
         print(f"  [note ] {line}")
