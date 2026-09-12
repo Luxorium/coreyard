@@ -143,6 +143,27 @@ def check_sync(intervals: dict[str, int]) -> list[Alert]:
                   "`coreyard status`.")]
 
 
+def check_source_age(caps) -> list[Alert]:
+    """The source answers, and answers with last week's yard.
+
+    Only a source whose clock dates its data can be stale — a live database read is current
+    because it happened. For an export it is the failure nothing else can see: every probe
+    passes, the rows parse, and availability is published for stock that was sold days ago.
+    CoreYard refuses to write from it, which is the safe outcome and also a silent one
+    unless somebody is told.
+    """
+    from coreyard import source as source_mod
+
+    state = source_mod.freshness(spec=caps.source_spec)
+    if not state.stale:
+        return []
+    return [Alert("source.stale", FAIL,
+                  f"The source has not been refreshed: {state.detail}.",
+                  "Publishing is refused until it is, so the storefront is frozen where it "
+                  "was — parts already listed stay on sale. Refresh the export, or raise "
+                  "SOURCE_MAX_AGE_HOURS if this age is normal here.")]
+
+
 def check_sync_outcome() -> list[Alert]:
     """The last full sync ended, but not well.
 
@@ -303,6 +324,7 @@ def evaluate(caps=None, intervals: dict[str, int] | None = None) -> list[Alert]:
     for condition in (lambda: check_storage(),
                       lambda: check_credentials(caps),
                       lambda: check_orders(caps),
+                      lambda: check_source_age(caps),
                       lambda: check_sync(intervals),
                       lambda: check_sync_outcome(),
                       lambda: check_delta(caps, intervals)):

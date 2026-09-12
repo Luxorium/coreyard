@@ -129,7 +129,10 @@ class TabularInstallationIsNotABrokenOne(unittest.TestCase):
         with mock.patch.object(source_module, "load",
                                lambda spec=None: seen.append(spec) or real(spec)):
             doctor.check_liveness(caps=self.caps)
-        self.assertEqual(seen, [f"tabular:{self.csv}"])
+        # Every consumer, not just the first: the age check asks the source a second
+        # question, and asking *it* with `None` would reach the same wrong server.
+        self.assertTrue(seen)
+        self.assertEqual(set(seen), {f"tabular:{self.csv}"})
 
     def test_a_source_file_that_vanished_is_still_a_failure(self):
         self.csv.unlink()

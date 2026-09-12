@@ -75,6 +75,14 @@ class SourceTraits:
     #: Can a storefront sale be written back to it as a work order?
     supports_order_booking: bool
 
+    #: Does :meth:`Source.server_now` date the *data* rather than report the current time?
+    #: A live database answers with its own clock, so a successful read is by definition a
+    #: current one. A file answers with its modification time, which is when something last
+    #: wrote an export — and an export that stopped being written reads perfectly while
+    #: describing a yard that has moved on. The second kind has a maximum age; the first
+    #: cannot have one.
+    clock_dates_the_data: bool = False
+
 
 @runtime_checkable
 class Source(Protocol):
@@ -128,6 +136,73 @@ _ADAPTERS: dict[str, tuple[str, str]] = {
 def kinds() -> list[str]:
     """Every registered source kind, for error messages and diagnostics."""
     return sorted(_ADAPTERS)
+
+
+@dataclass(frozen=True)
+class Freshness:
+    """How old this source's data is, and whether that is too old to act on.
+
+    ``age`` is None when the source has no freshness signal — which is not "unknown" in the
+    worrying sense but "not applicable": a live database read is current because it happened.
+    ``stale`` is never True without an age.
+    """
+
+    age: "timedelta | None"
+    limit: "timedelta | None"
+    stale: bool
+    detail: str
+
+
+DEFAULT_MAX_AGE_HOURS = 24.0
+
+
+def max_age() -> "timedelta | None":
+    """How old a dated source may be before CoreYard stops acting on it.
+
+    ``SOURCE_MAX_AGE_HOURS=0`` turns the check off, for a site whose export is deliberately
+    occasional and whose operator would rather have the publish than the guard.
+    """
+    from datetime import timedelta
+
+    from coreyard.config import _get
+
+    try:
+        hours = float(_get("SOURCE_MAX_AGE_HOURS", str(DEFAULT_MAX_AGE_HOURS)))
+    except (TypeError, ValueError):
+        hours = DEFAULT_MAX_AGE_HOURS
+    return timedelta(hours=hours) if hours > 0 else None
+
+
+def freshness(source=None, spec: str = "") -> Freshness:
+    """Age this installation's source, without assuming it has an age.
+
+    Reading a file's modification time is a stat; this never opens a connection, because the
+    sources that would need one are exactly the sources whose clock is the current time.
+    """
+    from datetime import datetime, timedelta
+
+    facts = traits(spec)
+    if not facts.clock_dates_the_data:
+        return Freshness(None, None, False, f"{facts.kind}: read live, so always current")
+    limit = max_age()
+    try:
+        source = source or load(spec)
+        observed = source.server_now()
+    except Exception as exc:
+        # Unknown is not fresh. A source that cannot say when it was written is exactly the
+        # case this criterion names, and it is treated as stale rather than as fine.
+        return Freshness(None, limit, True,
+                         f"{facts.kind}: cannot read a modification time ({exc})")
+    age = datetime.now() - observed
+    if age < timedelta(0):
+        age = timedelta(0)                      # a clock ahead of ours is not staleness
+    hours = age.total_seconds() / 3600
+    if limit is None:
+        return Freshness(age, None, False, f"{facts.kind}: {hours:.1f}h old (no limit set)")
+    stale = age > limit
+    return Freshness(age, limit, stale,
+                     f"{facts.kind}: {hours:.1f}h old, limit "
+                     f"{limit.total_seconds() / 3600:.0f}h")
 
 
 def _split(spec: Optional[str] = None) -> tuple[str, str]:

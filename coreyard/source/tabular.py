@@ -120,6 +120,7 @@ class TabularSource:
         supports_delta=False,           # a file has no clock to anchor a cursor to
         supports_fitment=False,         # no interchange catalogue travels with an export
         supports_order_booking=False,   # nothing here to write a work order into
+        clock_dates_the_data=True,      # the file's mtime is when the export was written
     )
 
     @classmethod

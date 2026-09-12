@@ -238,6 +238,16 @@ def check_liveness(*, caps=None) -> list[Result]:
             out.append((OK, "source", f"{caps.source_kind}: {line[:90]}"))
         except Exception as exc:
             out.append((FAIL, "source", f"{type(exc).__name__}: {str(exc)[:110]}"))
+        # Reaching it is not the same as it being current. A source whose clock dates its
+        # data — an export file — can answer every query perfectly while describing a yard
+        # that has moved on, and that is the one failure a liveness probe cannot see.
+        from coreyard.source import freshness
+
+        state = freshness(spec=caps.source_spec)
+        if state.age is not None:
+            out.append(((FAIL if state.stale else OK), "source age", state.detail))
+        elif state.stale:
+            out.append((FAIL, "source age", state.detail))
 
     photos = caps.get("photos")
     if photos.state == MISSING:

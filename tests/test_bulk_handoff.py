@@ -172,10 +172,15 @@ class BulkLoad(unittest.TestCase):
             published.append(part_.r_number)
             return self.publish(part_, status, attempts, require_images)
 
+        # One worker, so "collected before the interrupt surfaced" is a fact about the code
+        # rather than about the scheduler: with several, a future can still be in flight when
+        # the raising one is read, and a part nobody has heard back about is not banked.
         with self.assertRaises(KeyboardInterrupt):
-            self.run_bulk(publish=publish)
+            self.run_bulk(publish=publish, workers=1)
         self.assertTrue(published)
         self.assertEqual(sorted(self.snapshot()), sorted(published))
+        self.assertLessEqual(set(self.snapshot()), set(published),
+                             "nothing may be banked that did not publish")
 
 
 if __name__ == "__main__":

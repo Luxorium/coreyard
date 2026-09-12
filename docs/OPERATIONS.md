@@ -111,6 +111,36 @@ to `DRAFT`: an imported CSV lands as drafts on no channel, exactly as an API pub
 a catalogue reaches shoppers only once somebody says so. Existing products keep the status
 they have either way.
 
+### Source freshness
+
+A read that worked is not a read that is current. Against a live database those are the same
+thing — the query happened, so the answer is now — but against an export they are not: a
+nightly job that stopped writing leaves a file that parses perfectly and describes a yard
+that has moved on.
+
+So a source whose clock dates its data carries a maximum age (`SOURCE_MAX_AGE_HOURS`,
+default 24; `0` turns the check off). Past it, every command that writes to the store refuses
+before it writes, `doctor` reports `source age` as FAILED, and `coreyard alert` raises
+`source.stale`. A dry run is told and allowed through, because it changes nothing and the
+diff is what you need in order to decide. A database source has no age and never trips this.
+
+**What refusing cannot fix.** Parts already published stay on sale. CoreYard freezes the
+storefront where the last good run left it, which is the safe direction for stock that is
+still there and the wrong one for stock that has since sold — those parts remain buyable
+until the export is refreshed. If an export has been stale long enough that this matters:
+
+```bash
+bin/coreyard status                       # what the pipeline last managed to do
+bin/coreyard sync --dry-run               # allowed while stale: what it *would* publish
+# refresh the export, then:
+bin/coreyard sync                         # the refusal lifts on its own
+```
+
+If the export cannot be refreshed quickly and the exposure is unacceptable, take the
+catalogue out of the shopper's way rather than leaving it to age: `bin/coreyard reconcile
+--apply` against the last good state, or unpublish the collection in Shopify admin. Neither
+is automated, because "stop selling everything" is not a decision a timer should make.
+
 `--lock NAME` holds `out/.NAME.lock` for the run and exits quietly (status 0) if another run
 already has it — a skipped tick is the intended outcome when a full sync is still going.
 `--timeout` stops a long run cleanly, exiting 124. Both are global flags, so they go before

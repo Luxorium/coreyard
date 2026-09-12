@@ -360,6 +360,52 @@ def _snapshot_moved(path: str, args) -> int | None:
     return 2
 
 
+def _source_too_old(path: str, args) -> int | None:
+    """Refuse a write when the source's data is older than this installation allows.
+
+    A successful read is not a current one. Where the source is a file — a nightly export —
+    its modification time is the only thing that distinguishes "the yard has these parts"
+    from "the yard had these parts before the export job broke a week ago", and the second
+    reads exactly like the first. Acting on it raises availability for stock that may be
+    gone and, worse, retires whatever the stale file no longer lists.
+
+    A live database has no such gap, declares `clock_dates_the_data=False`, and never
+    reaches the age comparison at all.
+
+    A dry run is told and allowed through, as with a moved snapshot: it changes nothing, and
+    seeing the diff is how an operator decides what to do about it.
+    """
+    effect, _, _ = SUPPORT.get(path, (READS, (), ""))
+    if effect != STORE:
+        return None
+    from coreyard import source as source_mod
+
+    try:
+        state = source_mod.freshness()
+    except Exception:
+        return None                    # misconfigured: the capability preflight owns that
+    if not state.stale:
+        return None
+    dry = bool(getattr(args, "dry_run", False))
+    for line in (
+        f"This installation's source is stale: {state.detail}.",
+        "",
+        "A read that worked is not a read that is current. Publishing from it would raise",
+        "availability for stock that may be gone, and retire every part the export has",
+        "stopped listing — absence is how a full run recognises a sale.",
+        "",
+        "Refresh the export, or set SOURCE_MAX_AGE_HOURS if this age is normal here",
+        "(0 turns the check off). Parts already on the storefront stay on sale: see the",
+        "source-freshness section of docs/OPERATIONS.md for what to do about those.",
+    ):
+        print(line, file=sys.stderr)
+    if dry:
+        print("\nContinuing: a dry run changes nothing.\n", file=sys.stderr)
+        return None
+    print("\nNothing was changed.", file=sys.stderr)
+    return 2
+
+
 def _claim_snapshot(path: str, code: int | None) -> None:
     """Label an unlabelled snapshot after a successful run that acted on the store.
 
@@ -489,6 +535,11 @@ def _run(args, path: str, missing, caps) -> int:
                 if moved is not None:
                     ops.count(refused="snapshot belongs to another installation")
                     run.code = moved
+                    return run.code
+                stale = _source_too_old(path, args)
+                if stale is not None:
+                    ops.count(refused="source is stale")
+                    run.code = stale
                     return run.code
                 run.code = args.func(args)
                 _claim_snapshot(path, run.code)
