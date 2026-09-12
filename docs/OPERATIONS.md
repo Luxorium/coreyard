@@ -417,7 +417,11 @@ receiver answers immediately rather than holding the connection open while a pri
 Sold parts are archived on Shopify as each paid order arrives, which closes the window where a
 part stays buyable until the next timer tick. `--no-retire` leaves them on sale. Order payloads
 carry a customer's name, phone and address, so no request body is logged and no copy is written
-outside the queue. Successful payloads are securely erased immediately. Failed payloads remain
+outside the queue. A handled payload is cleared from its row immediately, with `PRAGMA
+secure_delete` so the bytes are overwritten inside the database rather than left in free
+pages. That is what an application delete can promise and no more: a filesystem that
+relocates pages, and any backup taken before the clear, may still hold a copy — see
+`SECURITY.md`. Failed payloads remain
 in the owner-only queue for seven days so only their failed booking or retirement stage can be
 retried. Configure the window with `COREYARD_WEBHOOK_ERROR_RETENTION_DAYS`.
 

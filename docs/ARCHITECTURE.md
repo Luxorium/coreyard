@@ -634,7 +634,10 @@ Payloads contain customer PII: never log request bodies, and write no copy of on
 the owner-only queue. CoreYard deliberately produces no pull ticket or other document: the
 source system already renders the work order in a printable form, and a second document is
 both a PII copy with its own retention problem and a chance for the two to disagree about
-what was sold. Successful payloads are securely erased immediately; failed payloads remain
+what was sold. A handled payload is cleared from its row immediately, under `PRAGMA
+secure_delete` so the bytes are overwritten inside the file rather than left in free pages —
+an application delete, not forensic erasure (`SECURITY.md` states the limit). Failed payloads
+remain
 only for the configured retry window. Booking and retirement errors are independent, and
 `orders retry` reruns only failed stages. Database idempotence still comes from the stored storefront order
 reference, not from webhook delivery identity.

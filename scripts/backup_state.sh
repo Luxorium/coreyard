@@ -21,6 +21,11 @@
 #   BACKUP_DIR=/mnt/easystore/... scripts/backup_state.sh
 set -uo pipefail
 
+# Everything written below holds either customer PII (in-flight order payloads) or
+# credentials, so it is created owner-only from the start. `chmod` after the fact still runs
+# as a backstop, but it cannot close the window between a file appearing and being narrowed.
+umask 077
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${COREYARD_PYTHON:-$REPO/.venv/bin/python}"
 DEST="${BACKUP_DIR:-$REPO/out/backups}"

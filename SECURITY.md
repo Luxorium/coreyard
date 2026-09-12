@@ -32,9 +32,15 @@ SQL Server over SMB, an SMB file share, and the Shopify Admin API. Reports that 
   would be visible in the process list.
 - **No vendor schema is committed.** Table and column names come from a local `schema.json`,
   also gitignored.
-- **Webhook PII is bounded.** The queue is owner-only and is the only place an order body is
-  written. Successful payloads are securely erased immediately; failed payloads have a short,
-  configurable retention window.
+- **Webhook PII is bounded.** The queue is owner-only (`0600`, and SQLite gives its journal
+  the same mode) and is the only place an order body is written. A handled payload is cleared
+  from the row immediately and a failed one at the end of a short, configurable retention
+  window. The database is opened with `PRAGMA secure_delete`, so the bytes are overwritten
+  inside the file rather than left in free pages — which is what an application can do, and
+  is not forensic erasure: a filesystem that relocates pages (copy-on-write, an SSD's wear
+  levelling) and any backup taken before the clear may still hold a copy. Backups are written
+  owner-only and pruned on their own schedule; if a payload has to be gone from those too,
+  prune them deliberately.
 - **Shopify scopes** should be the minimum the sinks need: `read_products, write_products,
   read_inventory, write_inventory, read_locations, read_files, write_files`.
 
