@@ -174,3 +174,35 @@ class InventoryCount(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DependenciesAreDeclaredOnce(unittest.TestCase):
+    """The two direct dependencies are written down twice, for two different installers.
+
+    `pyproject.toml` is what a wheel installs; `requirements.txt` is what `install.sh` reads.
+    Two lists of the same thing drift in one direction — the one nobody installs from gets
+    forgotten — and the failure lands on whoever installs the way the maintainer does not.
+    """
+
+    def test_pyproject_and_requirements_declare_the_same_set(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        result = subprocess.run([sys.executable, "scripts/dependencies.py", "--check"],
+                                cwd=root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_the_qualification_set_is_recorded(self):
+        """A release qualified against "whatever the index served" is not qualified."""
+        from pathlib import Path
+
+        lock = (Path(__file__).resolve().parent.parent / "requirements-lock.txt")
+        recorded = [line for line in lock.read_text(encoding="utf-8").splitlines()
+                    if line and not line.startswith("#")]
+        self.assertGreater(len(recorded), 2, "a closure, not just the direct dependencies")
+        self.assertTrue(all("==" in line for line in recorded))
+        for direct in ("impacket==", "requests=="):
+            with self.subTest(dependency=direct):
+                self.assertTrue(any(line.startswith(direct) for line in recorded))

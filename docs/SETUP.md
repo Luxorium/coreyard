@@ -42,9 +42,20 @@ existing one. Run the installer, then `coreyard init`.
 If your distro ships Python with `ensurepip` stripped out, the installer detects the failed
 `venv` creation and bootstraps `pip` itself — no manual workaround needed.
 
-Only two Python dependencies exist: `impacket` (the database transport) and `requests` (the
-Admin API). Photo fetching shells out to the `smbclient` CLI, and the transform/CSV code needs
-no third-party packages at all.
+Only two Python dependencies exist, and each belongs to one capability:
+
+| Needed for | Dependency | Without it |
+|---|---|---|
+| A database source | `impacket` (Python) | a tabular source (CSV/SQLite) still works |
+| Shopify — every sink, order poll and diagnostic | `requests` (Python) | the CSV sink still works |
+| Photos from an SMB share | `smbclient` (your distro's Samba client) | a local photo directory still works |
+| Rendering, diffing, the CSV sink, the whole transform | — | nothing third-party is involved |
+| Mirroring images to an S3-compatible bucket | `boto3`, optional and not installed | the default publishes Shopify-hosted media |
+
+`coreyard doctor` reports each of these as a capability rather than as a package, so a missing
+system tool reads as the feature it disables. The two Python dependencies pull roughly twenty
+more of their own; `scripts/dependencies.py --licences` lists the closure as installed, and
+`requirements-lock.txt` records the set this release was qualified against.
 
 ### Manual install
 

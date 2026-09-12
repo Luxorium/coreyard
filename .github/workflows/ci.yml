@@ -59,6 +59,10 @@ jobs:
       # QA-02. A criterion with no ledger row is one nobody looks at again.
       - name: Every acceptance criterion has an evidence-ledger row
         run: python scripts/ledger.py --summary
+      # DIST-02. The direct dependencies are declared twice — for the wheel and for the
+      # installer — and the copy nobody installs from is the one that goes stale.
+      - name: The two dependency declarations agree
+        run: python scripts/dependencies.py --check
 
   hygiene:
     name: whitespace and metadata
