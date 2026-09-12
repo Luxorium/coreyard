@@ -144,7 +144,14 @@ is automated, because "stop selling everything" is not a decision a timer should
 `--lock NAME` holds `out/.NAME.lock` for the run and exits quietly (status 0) if another run
 already has it — a skipped tick is the intended outcome when a full sync is still going.
 `--timeout` stops a long run cleanly, exiting 124. Both are global flags, so they go before
-the command.
+the command, as do `--quiet` and `--verbose`.
+
+`--quiet` drops the narration — which stage is running, how far through it is, the heartbeat
+— and keeps everything that is an outcome: the diff, the summary, every failure and every
+refusal. It means "stop telling me what you are doing", not "what you did", so a scheduled
+job run quietly still logs what it changed and why anything failed. `--verbose` adds a line
+per part as it is decided, which is what to reach for when one part did something and you
+want to know which decision made it.
 
 A skipped tick is recorded, and `bin/coreyard status` counts them beside the last run that
 actually ran: "Last full sync 4h ago  ok  47 tick(s) skipped since" is a job being starved by

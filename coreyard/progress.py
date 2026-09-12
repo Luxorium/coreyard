@@ -21,6 +21,34 @@ import time
 from contextlib import contextmanager
 from typing import Optional
 
+#: How much routine progress to print. Failures ignore this entirely: a mode that can hide
+#: the reason a run failed is a mode nobody should be able to leave on.
+QUIET, NORMAL, VERBOSE = -1, 0, 1
+
+_level = NORMAL
+
+
+def set_level(level: int) -> None:
+    """Called once, by the CLI, from the flags the operator passed.
+
+    A module global rather than a parameter threaded through every print, for the same
+    reason the run counters are one: the lines are produced deep inside loops that already
+    have enough arguments, and the decision is made once at the boundary.
+    """
+    global _level
+    _level = level
+
+
+def level() -> int:
+    return _level
+
+
+def say(text: str, *, at: int = NORMAL, out=None) -> None:
+    """Print routine output, unless the operator asked for less of it."""
+    if _level >= at:
+        print(text, file=out or sys.stdout, flush=True)
+
+
 #: How long a phase may say nothing. The criterion asks for an update at least every 30
 #: seconds; halving that leaves room for a line to be late without breaking the promise.
 DEFAULT_INTERVAL = 15.0
@@ -80,7 +108,7 @@ class Phase:
     # -- the heartbeat ------------------------------------------------------------------
     def _beat(self) -> None:
         while not self._stop.wait(self.every):
-            print(self.line(), file=self.out, flush=True)
+            say(self.line(), out=self.out)
 
     def start(self) -> "Phase":
         self._thread = threading.Thread(target=self._beat, daemon=True)

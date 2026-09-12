@@ -8,11 +8,13 @@ total is known, and with no invented completion estimate — a percentage derive
 nobody measured is a promise the run cannot keep.
 """
 
+import contextlib
 import io
 import time
 import unittest
 import unittest.mock
 
+from coreyard import progress
 from coreyard.progress import DEFAULT_INTERVAL, Phase, elapsed, waiting
 
 
@@ -100,6 +102,71 @@ class ItSpeaksWhileTheBlockRuns(unittest.TestCase):
     def test_the_default_interval_keeps_the_promise(self):
         """The criterion asks for an update at least every thirty seconds."""
         self.assertLessEqual(DEFAULT_INTERVAL, 30)
+
+
+class HowMuchToSay(unittest.TestCase):
+    """Quiet suppresses routine progress and nothing else; verbose adds per-item decisions.
+
+    The line that must survive every level is the one saying a run failed. A mode that can
+    hide why a run failed is not worth the flag it takes to turn on.
+    """
+
+    def setUp(self):
+        self.addCleanup(progress.set_level, progress.NORMAL)
+
+    def said(self, level, text, at=progress.NORMAL) -> str:
+        progress.set_level(level)
+        out = io.StringIO()
+        progress.say(text, at=at, out=out)
+        return out.getvalue()
+
+    def test_routine_progress_is_kept_at_the_normal_level(self):
+        self.assertIn("12/480", self.said(progress.NORMAL, "12/480"))
+
+    def test_and_dropped_when_asked_for_quiet(self):
+        self.assertEqual(self.said(progress.QUIET, "12/480"), "")
+
+    def test_per_item_detail_needs_to_be_asked_for(self):
+        self.assertEqual(self.said(progress.NORMAL, "R#51: published", at=progress.VERBOSE), "")
+        self.assertIn("R#51", self.said(progress.VERBOSE, "R#51: published",
+                                        at=progress.VERBOSE))
+
+    def test_verbose_still_shows_the_routine_lines(self):
+        self.assertIn("12/480", self.said(progress.VERBOSE, "12/480"))
+
+    def test_the_heartbeat_is_routine_and_obeys_quiet(self):
+        progress.set_level(progress.QUIET)
+        out = io.StringIO()
+        with waiting("reading the yard", every=0.02, out=out):
+            time.sleep(0.06)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_a_failure_is_not_routine_and_survives_quiet(self):
+        import argparse
+        import contextlib
+
+        from coreyard import run_sync
+        from coreyard.state import DiffResult
+
+        progress.set_level(progress.QUIET)
+        args = argparse.Namespace(dry_run=False, scope=None)
+        diff = DiffResult(added=["1", "2"], changed=[], unchanged=[], removed=[])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), \
+                unittest.mock.patch.object(run_sync.ops, "count"):
+            run_sync._summarise(diff, {"1"}, set(), set(), [object(), object()], args)
+        printed = out.getvalue()
+        self.assertIn("failed to publish", printed)
+        self.assertIn("Sync complete", printed,
+                      "the outcome is not narration: --quiet means stop telling me what "
+                      "you are doing, not what you did")
+
+    def test_the_flags_are_mutually_exclusive(self):
+        from coreyard import cli
+
+        with self.assertRaises(SystemExit):
+            with contextlib.redirect_stderr(io.StringIO()):
+                cli.build_parser().parse_args(["--quiet", "--verbose", "status"])
 
 
 class TheRunItselfIsInstrumented(unittest.TestCase):

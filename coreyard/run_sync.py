@@ -25,7 +25,7 @@ from typing import NamedTuple, Optional
 
 from coreyard import ops
 from coreyard.config import DATA_ROOT, bundled, cli_name, load_settings, out_dir
-from coreyard.progress import elapsed, waiting
+from coreyard.progress import VERBOSE, elapsed, say, waiting
 from coreyard.state import DEFAULT_STATE_DB, SyncState, fingerprints_all
 
 # The channel this pipeline publishes to. Recorded alongside the canonical
@@ -357,6 +357,7 @@ def _publish_batch(publisher, todo, needs_photos, revivals, bank, fail=None, pha
                     fail(key, str(exc))
                 continue
             published_ok.add(key)
+            say(f"    R#{key}: published", at=VERBOSE)
             if phase is not None:
                 # One part can hold the loop for a minute on its own when its media is being
                 # rebuilt, so the count the heartbeat reports is kept current per part rather
@@ -365,7 +366,7 @@ def _publish_batch(publisher, todo, needs_photos, revivals, bank, fail=None, pha
             if key in revivals:
                 revived.add(key)
             if i % 25 == 0 or i == len(todo):
-                print(f"  {i}/{len(todo)}")
+                say(f"  {i}/{len(todo)}")
             if len(published_ok) - len(banked) >= CHECKPOINT_EVERY:
                 flush()
     finally:
@@ -507,9 +508,9 @@ def cmd_delta(args) -> int:
                   "alongside the snapshot this run has to diff against.", file=sys.stderr)
             return 2
 
-        print(f"Fetching changes since {cursor} ...")
+        say(f"Fetching changes since {cursor} ...")
         changes = fetch_changes(datetime.fromisoformat(cursor))
-        print("  " + changes.summary())
+        say("  " + changes.summary())
         if changes.truncated:
             print(f"  NOTE: more than {len(changes.listable) + len(changes.left_scope)} rows "
                   f"changed; this is no longer a delta. Publishing what was read, but NOT "
@@ -549,7 +550,7 @@ def cmd_delta(args) -> int:
             from coreyard.yms.db import connect
             from coreyard.yms.interchange import InterchangeResolver
 
-            print(f"Resolving fitment for {len(todo)} part(s) ...")
+            say(f"Resolving fitment for {len(todo)} part(s) ...")
             with connect() as conn:
                 InterchangeResolver(conn).attach(todo)
                 _enrich(conn, todo)
@@ -575,8 +576,8 @@ def cmd_delta(args) -> int:
 
         retired: set[str] = set()
         if retire:
-            print(f"Retiring {len(retire)} part(s) that left scope "
-                  f"(qty 0, {publisher.retire_status}) ...")
+            say(f"Retiring {len(retire)} part(s) that left scope "
+                f"(qty 0, {publisher.retire_status}) ...")
             retired = _retire_batch(publisher, retire, state.record_retired)
 
         # Record only what actually landed, then advance the cursor. A part that failed to
@@ -758,7 +759,7 @@ def cmd_sync(args) -> int:
     with waiting("listing the photo share"):
         photos = _make_resolver(args.image_base_url, scan_images=not args.no_image_scan)
     resolver = photos.resolve
-    print(f"Fetching parts (limit={args.limit or 'none'}) ...")
+    say(f"Fetching parts (limit={args.limit or 'none'}) ...")
     with waiting("reading the yard"):
         parts = fetch_parts(limit=args.limit)
     if getattr(args, "r_numbers", None):
@@ -859,7 +860,7 @@ def cmd_sync(args) -> int:
                 from coreyard.yms.db import connect
                 from coreyard.yms.interchange import InterchangeResolver
 
-                print(f"Resolving fitment for {len(todo)} part(s) ...")
+                say(f"Resolving fitment for {len(todo)} part(s) ...")
                 with connect() as conn:
                     InterchangeResolver(conn).attach(todo)
                     _enrich(conn, todo)
@@ -870,8 +871,8 @@ def cmd_sync(args) -> int:
             if args.retire_only:
                 print(f"Retire-only: skipping {len(todo)} upsert(s).")
                 todo = []
-            print(f"Upserting {len(todo)} new/changed products to Shopify "
-                  f"({len(needs_photos & {p.uid() for p in todo})} with changed photos) ...")
+            say(f"Upserting {len(todo)} new/changed products to Shopify "
+                f"({len(needs_photos & {p.uid() for p in todo})} with changed photos) ...")
             # Bank the work so far. A run stopped by its timeout keeps everything it
             # published instead of starting the same backlog again next hour.
             def bank(pending: set[str]) -> None:
@@ -896,7 +897,8 @@ def cmd_sync(args) -> int:
             if retire:
                 # Absence is why these parts are here, not a sale, so an already-invisible
                 # draft is left alone rather than archived.
-                print(f"Retiring {len(retire)} sold part(s) (qty 0, {publisher.retire_status}) ...")
+                say(f"Retiring {len(retire)} sold part(s) "
+                    f"(qty 0, {publisher.retire_status}) ...")
                 retired |= _retire_batch(publisher, retire, state.record_retired)
 
         if args.retire_only:
@@ -980,10 +982,14 @@ def _summarise(diff, published_ok, revived, retired, todo, args, seconds=None) -
     if not acted:
         print(f"Nothing to publish ({counts['unchanged']:,} unchanged).")
         return
+    # The summary is the outcome rather than the narration, so it survives `--quiet`: the
+    # flag means "stop telling me what you are doing", not "what you did".
     print(f"\nSync complete{f' in {elapsed(seconds)}' if seconds else ''}.\n")
     for label, value in counts.items():
         print(f"  {label.replace('_', ' ').capitalize():<14}{value:>10,}")
     if counts["failed"]:
+        # Not routine, so it is printed at every level: a quiet run that failed still has to
+        # say that it failed, and what the next one will do about it.
         print(f"\n  {counts['failed']} part(s) failed to publish and keep their previous "
               f"state, so the next run retries them.")
 

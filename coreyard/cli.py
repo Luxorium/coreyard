@@ -21,7 +21,7 @@ import signal
 import sys
 from contextlib import contextmanager
 
-from coreyard import __version__, ops
+from coreyard import __version__, ops, progress
 from coreyard.config import cli_name, out_dir
 
 # Commands that write nothing outside ``out/``. They are left out of the run history so
@@ -457,6 +457,14 @@ def build_parser() -> argparse.ArgumentParser:
                            "already has it")
     root.add_argument("--timeout", metavar="DUR", type=_duration, default=None,
                       help="stop the run after this long (e.g. 45m); exits 124")
+    noise = root.add_mutually_exclusive_group()
+    noise.add_argument("--quiet", "-q", action="store_true",
+                       help="routine progress only when something is wrong. Failures, "
+                            "refusals and exit codes are unaffected — a mode that could "
+                            "hide why a run failed would not be worth having")
+    noise.add_argument("--verbose", "-v", action="store_true",
+                       help="a line per item as it is decided, for working out why one "
+                            "part did what it did")
 
     sub = root.add_subparsers(dest="command", metavar="<command>")
     for name, module_path, help_text in COMMANDS:
@@ -491,6 +499,13 @@ def main(argv: list[str] | None = None) -> int:
     # Before the lock and before the deadline: a command that cannot run here should not
     # take a lock the next scheduled run then waits on.
     from coreyard import capabilities
+
+    # Before anything prints. The level is read by the progress helpers deep inside the
+    # loops that produce the lines, so it has to be settled at the boundary rather than
+    # carried down as an argument nobody else needs.
+    progress.set_level(progress.VERBOSE if getattr(args, "verbose", False)
+                       else progress.QUIET if getattr(args, "quiet", False)
+                       else progress.NORMAL)
 
     caps = capabilities.detect()
     path = getattr(args, "_support_path", None) or args.command
